@@ -1,4 +1,4 @@
-# Backend CLAUDE.md
+# Backend AGENTS.md
 
 This document provides context for AI assistants and developers working on the FastAPI backend.
 

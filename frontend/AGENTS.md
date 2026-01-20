@@ -1,4 +1,4 @@
-# Frontend CLAUDE.md
+# Frontend AGENTS.md
 
 This document provides context for AI assistants and developers working on the React frontend.
 
