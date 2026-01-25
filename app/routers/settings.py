@@ -26,6 +26,11 @@ class AppSettingsUpdate(BaseModel):
         default=None,
         description="Sidebar sort order: 'recent' or 'alpha'",
     )
+    advert_interval: int | None = Field(
+        default=None,
+        ge=0,
+        description="Periodic advertisement interval in seconds (0 = disabled)",
+    )
 
 
 class FavoriteRequest(BaseModel):
@@ -84,6 +89,10 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
     if update.sidebar_sort_order is not None:
         logger.info("Updating sidebar_sort_order to %s", update.sidebar_sort_order)
         kwargs["sidebar_sort_order"] = update.sidebar_sort_order
+
+    if update.advert_interval is not None:
+        logger.info("Updating advert_interval to %d", update.advert_interval)
+        kwargs["advert_interval"] = update.advert_interval
 
     if kwargs:
         return await AppSettingsRepository.update(**kwargs)

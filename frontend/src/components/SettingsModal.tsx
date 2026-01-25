@@ -100,6 +100,9 @@ export function SettingsModal({
   const [cleaning, setCleaning] = useState(false);
   const [autoDecryptOnAdvert, setAutoDecryptOnAdvert] = useState(false);
 
+  // Advertisement interval state
+  const [advertInterval, setAdvertInterval] = useState('0');
+
   useEffect(() => {
     if (config) {
       setName(config.name);
@@ -117,6 +120,7 @@ export function SettingsModal({
     if (appSettings) {
       setMaxRadioContacts(String(appSettings.max_radio_contacts));
       setAutoDecryptOnAdvert(appSettings.auto_decrypt_dm_on_advert);
+      setAdvertInterval(String(appSettings.advert_interval));
     }
   }, [appSettings]);
 
@@ -220,9 +224,17 @@ export function SettingsModal({
     setLoading(true);
 
     try {
+      // Save radio name
       const update: RadioConfigUpdate = { name };
       await onSave(update);
-      toast.success('Identity saved');
+
+      // Save advert interval to app settings
+      const newAdvertInterval = parseInt(advertInterval, 10);
+      if (!isNaN(newAdvertInterval) && newAdvertInterval !== appSettings?.advert_interval) {
+        await onSaveAppSettings({ advert_interval: newAdvertInterval });
+      }
+
+      toast.success('Identity settings saved');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -349,7 +361,8 @@ export function SettingsModal({
           <DialogTitle>Radio & Settings</DialogTitle>
           <DialogDescription className="sr-only">
             {activeTab === 'radio' && 'Configure radio frequency, power, and location settings'}
-            {activeTab === 'identity' && 'Manage radio name, public key, and private key'}
+            {activeTab === 'identity' &&
+              'Manage radio name, public key, private key, and advertising settings'}
             {activeTab === 'serial' && 'View serial port connection and configure contact sync'}
             {activeTab === 'database' && 'View database statistics and clean up old packets'}
             {activeTab === 'advertise' && 'Send a flood advertisement to announce your presence'}
@@ -526,8 +539,27 @@ export function SettingsModal({
                 <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="advert-interval">Periodic Advertising Interval</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="advert-interval"
+                    type="number"
+                    min="0"
+                    value={advertInterval}
+                    onChange={(e) => setAdvertInterval(e.target.value)}
+                    className="w-28"
+                  />
+                  <span className="text-sm text-muted-foreground">seconds (0 = off)</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  How often to automatically advertise presence. Set to 0 to disable. Recommended:
+                  3600 (1 hour) or higher.
+                </p>
+              </div>
+
               <Button onClick={handleSaveIdentity} disabled={loading} className="w-full">
-                {loading ? 'Saving...' : 'Set Name'}
+                {loading ? 'Saving...' : 'Save Identity Settings'}
               </Button>
 
               <Separator />

@@ -32,8 +32,9 @@ MESSAGE_POLL_INTERVAL = 5
 # Periodic advertisement task handle
 _advert_task: asyncio.Task | None = None
 
-# Advertisement interval in seconds (1 hour)
-ADVERT_INTERVAL = 3600
+# Default check interval when periodic advertising is disabled (seconds)
+# We still need to periodically check if it's been enabled
+ADVERT_CHECK_INTERVAL = 60
 
 # Counter to pause polling during repeater operations (supports nested pauses)
 _polling_pause_count: int = 0
@@ -358,31 +359,63 @@ async def send_advertisement() -> bool:
 
 
 async def _periodic_advert_loop():
-    """Background task that periodically sends advertisements."""
+    """Background task that periodically sends advertisements.
+
+    Reads the interval from app_settings on each iteration, allowing
+    dynamic configuration changes without restarting the task.
+    If interval is 0, advertising is disabled but the task continues
+    running to detect when it's re-enabled.
+    """
+    from app.repository import AppSettingsRepository
+
+    last_advert_time = 0.0
+
     while True:
         try:
-            await asyncio.sleep(ADVERT_INTERVAL)
+            # Get current interval setting
+            settings = await AppSettingsRepository.get()
+            interval = settings.advert_interval
 
-            if radio_manager.is_connected:
-                await send_advertisement()
+            if interval <= 0:
+                # Advertising disabled - check again later
+                await asyncio.sleep(ADVERT_CHECK_INTERVAL)
+                continue
+
+            # Check if enough time has passed since last advertisement
+            now = asyncio.get_running_loop().time()
+            time_since_last = now - last_advert_time
+
+            if time_since_last >= interval and radio_manager.is_connected:
+                if await send_advertisement():
+                    last_advert_time = now
+            elif time_since_last < interval:
+                # Sleep until next advertisement is due
+                sleep_time = min(interval - time_since_last, ADVERT_CHECK_INTERVAL)
+                await asyncio.sleep(sleep_time)
+                continue
+
+            # Sleep for the configured interval
+            await asyncio.sleep(interval)
 
         except asyncio.CancelledError:
             logger.info("Periodic advertisement task cancelled")
             break
         except Exception as e:
             logger.error("Error in periodic advertisement loop: %s", e)
+            # Sleep a bit before retrying on error
+            await asyncio.sleep(ADVERT_CHECK_INTERVAL)
 
 
 def start_periodic_advert():
-    """Start the periodic advertisement background task."""
+    """Start the periodic advertisement background task.
+
+    The task reads interval from app_settings dynamically, so it will
+    adapt to configuration changes without restart.
+    """
     global _advert_task
     if _advert_task is None or _advert_task.done():
         _advert_task = asyncio.create_task(_periodic_advert_loop())
-        logger.info(
-            "Started periodic advertisement (interval: %ds / %d min)",
-            ADVERT_INTERVAL,
-            ADVERT_INTERVAL // 60,
-        )
+        logger.info("Started periodic advertisement task (interval configured in settings)")
 
 
 async def stop_periodic_advert():

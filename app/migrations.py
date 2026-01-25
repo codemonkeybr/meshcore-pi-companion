@@ -100,6 +100,13 @@ async def run_migrations(conn: aiosqlite.Connection) -> int:
         await set_version(conn, 9)
         applied += 1
 
+    # Migration 10: Add advert_interval column to app_settings
+    if version < 10:
+        logger.info("Applying migration 10: add advert_interval column")
+        await _migrate_010_add_advert_interval(conn)
+        await set_version(conn, 10)
+        applied += 1
+
     if applied > 0:
         logger.info(
             "Applied %d migration(s), schema now at version %d", applied, await get_version(conn)
@@ -629,3 +636,21 @@ async def _migrate_009_create_app_settings_table(conn: aiosqlite.Connection) -> 
 
     await conn.commit()
     logger.debug("Created app_settings table with default values")
+
+
+async def _migrate_010_add_advert_interval(conn: aiosqlite.Connection) -> None:
+    """
+    Add advert_interval column to app_settings table.
+
+    This enables configurable periodic advertisement interval (default 0 = disabled).
+    """
+    try:
+        await conn.execute("ALTER TABLE app_settings ADD COLUMN advert_interval INTEGER DEFAULT 0")
+        logger.debug("Added advert_interval column to app_settings")
+    except aiosqlite.OperationalError as e:
+        if "duplicate column" in str(e).lower():
+            logger.debug("advert_interval column already exists, skipping")
+        else:
+            raise
+
+    await conn.commit()
