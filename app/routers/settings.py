@@ -1,7 +1,7 @@
 import logging
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.models import AppSettings
@@ -9,6 +9,20 @@ from app.repository import AppSettingsRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+def validate_bot_code(code: str) -> None:
+    """Validate bot code syntax. Raises HTTPException on error."""
+    if not code or not code.strip():
+        return  # Empty code is valid (disables bot)
+
+    try:
+        compile(code, "<bot_code>", "exec")
+    except SyntaxError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bot code syntax error at line {e.lineno}: {e.msg}",
+        ) from None
 
 
 class AppSettingsUpdate(BaseModel):
@@ -30,6 +44,14 @@ class AppSettingsUpdate(BaseModel):
         default=None,
         ge=0,
         description="Periodic advertisement interval in seconds (0 = disabled)",
+    )
+    bot_enabled: bool | None = Field(
+        default=None,
+        description="Whether the message bot is enabled",
+    )
+    bot_code: str | None = Field(
+        default=None,
+        description="Python code for the message bot function",
     )
 
 
@@ -93,6 +115,15 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
     if update.advert_interval is not None:
         logger.info("Updating advert_interval to %d", update.advert_interval)
         kwargs["advert_interval"] = update.advert_interval
+
+    if update.bot_enabled is not None:
+        logger.info("Updating bot_enabled to %s", update.bot_enabled)
+        kwargs["bot_enabled"] = update.bot_enabled
+
+    if update.bot_code is not None:
+        validate_bot_code(update.bot_code)
+        logger.info("Updating bot_code (length=%d)", len(update.bot_code))
+        kwargs["bot_code"] = update.bot_code
 
     if kwargs:
         return await AppSettingsRepository.update(**kwargs)

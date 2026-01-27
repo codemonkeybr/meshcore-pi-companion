@@ -192,6 +192,7 @@ class TestContactMessageCLIFiltering:
             patch("app.event_handlers.MessageRepository") as mock_repo,
             patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
+            patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
             mock_repo.create = AsyncMock(return_value=42)
             mock_contact_repo.get_by_key_prefix = AsyncMock(return_value=None)
@@ -220,6 +221,7 @@ class TestContactMessageCLIFiltering:
             patch("app.event_handlers.MessageRepository") as mock_repo,
             patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
+            patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
             mock_repo.create = AsyncMock(return_value=42)
             mock_contact_repo.get_by_key_prefix = AsyncMock(return_value=None)
@@ -254,6 +256,7 @@ class TestContactMessageCLIFiltering:
             patch("app.event_handlers.MessageRepository") as mock_repo,
             patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event"),
+            patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
             mock_repo.create = AsyncMock(return_value=42)
             mock_contact_repo.get_by_key_prefix = AsyncMock(return_value=None)

@@ -63,11 +63,13 @@ async def _run_historical_channel_decryption(
             msg_id = await create_message_from_decrypted(
                 packet_id=packet_id,
                 channel_key=channel_key_hex,
+                channel_name=display_name,
                 sender=result.sender,
                 message_text=result.message,
                 timestamp=result.timestamp,
                 received_at=packet_timestamp,
                 path=path_hex,
+                trigger_bot=False,  # Historical decryption should not trigger bot
             )
 
             if msg_id is not None:

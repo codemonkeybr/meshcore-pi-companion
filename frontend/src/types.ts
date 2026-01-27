@@ -134,6 +134,8 @@ export interface AppSettings {
   last_message_times: Record<string, number>;
   preferences_migrated: boolean;
   advert_interval: number;
+  bot_enabled: boolean;
+  bot_code: string;
 }
 
 export interface AppSettingsUpdate {
@@ -141,6 +143,8 @@ export interface AppSettingsUpdate {
   auto_decrypt_dm_on_advert?: boolean;
   sidebar_sort_order?: 'recent' | 'alpha';
   advert_interval?: number;
+  bot_enabled?: boolean;
+  bot_code?: string;
 }
 
 export interface MigratePreferencesRequest {

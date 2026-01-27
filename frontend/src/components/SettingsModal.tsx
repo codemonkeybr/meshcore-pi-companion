@@ -1,4 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
+import Editor from 'react-simple-code-editor';
+import { highlight, languages } from 'prismjs';
+import 'prismjs/components/prism-python';
+import 'prismjs/themes/prism-tomorrow.css';
 import type {
   AppSettings,
   AppSettingsUpdate,
@@ -73,7 +77,7 @@ export function SettingsModal({
   onRefreshAppSettings,
 }: SettingsModalProps) {
   // Tab state
-  type SettingsTab = 'radio' | 'identity' | 'serial' | 'database' | 'advertise';
+  type SettingsTab = 'radio' | 'identity' | 'serial' | 'database' | 'advertise' | 'bot';
   const [activeTab, setActiveTab] = useState<SettingsTab>('radio');
 
   // Radio config state
@@ -103,6 +107,31 @@ export function SettingsModal({
   // Advertisement interval state
   const [advertInterval, setAdvertInterval] = useState('0');
 
+  // Bot state
+  const DEFAULT_BOT_CODE = `def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path):
+    """
+    Process incoming messages and optionally return a reply.
+
+    Args:
+        sender_name: Display name of sender (may be None)
+        sender_key: 64-char hex public key (empty for channel msgs)
+        message_text: The message content
+        is_dm: True for direct messages, False for channel
+        channel_key: 32-char hex key for channels, None for DMs
+        channel_name: Channel name with hash (e.g. "#bot"), None for DMs
+        sender_timestamp: Sender's timestamp (unix seconds, may be None)
+        path: Hex-encoded routing path (may be None)
+
+    Returns:
+        None for no reply, or a string to send as reply
+    """
+    # Example: Only respond in #bot channel to "!pling" command
+    if channel_name == "#bot" and "!pling" in message_text.lower():
+        return "[BOT] Plong!"
+    return None`;
+  const [botEnabled, setBotEnabled] = useState(false);
+  const [botCode, setBotCode] = useState(DEFAULT_BOT_CODE);
+
   useEffect(() => {
     if (config) {
       setName(config.name);
@@ -121,6 +150,11 @@ export function SettingsModal({
       setMaxRadioContacts(String(appSettings.max_radio_contacts));
       setAutoDecryptOnAdvert(appSettings.auto_decrypt_dm_on_advert);
       setAdvertInterval(String(appSettings.advert_interval));
+      setBotEnabled(appSettings.bot_enabled);
+      // Only overwrite bot code if user has saved custom code
+      if (appSettings.bot_code) {
+        setBotCode(appSettings.bot_code);
+      }
     }
   }, [appSettings]);
 
@@ -354,9 +388,25 @@ export function SettingsModal({
     }
   };
 
+  const handleSaveBotSettings = async () => {
+    setLoading(true);
+    setError('');
+
+    try {
+      await onSaveAppSettings({ bot_enabled: botEnabled, bot_code: botCode });
+      toast.success('Bot settings saved');
+    } catch (err) {
+      console.error('Failed to save bot settings:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save');
+      toast.error('Failed to save settings');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DialogContent className="sm:max-w-[500px] max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[50vw] sm:min-w-[500px] max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Radio & Settings</DialogTitle>
           <DialogDescription className="sr-only">
@@ -366,6 +416,7 @@ export function SettingsModal({
             {activeTab === 'serial' && 'View serial port connection and configure contact sync'}
             {activeTab === 'database' && 'View database statistics and clean up old packets'}
             {activeTab === 'advertise' && 'Send a flood advertisement to announce your presence'}
+            {activeTab === 'bot' && 'Configure automatic message bot with Python code'}
           </DialogDescription>
         </DialogHeader>
 
@@ -377,12 +428,13 @@ export function SettingsModal({
             onValueChange={(v) => setActiveTab(v as SettingsTab)}
             className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-5">
+            <TabsList className="grid w-full grid-cols-6">
               <TabsTrigger value="radio">Radio</TabsTrigger>
               <TabsTrigger value="identity">Identity</TabsTrigger>
               <TabsTrigger value="serial">Serial</TabsTrigger>
               <TabsTrigger value="database">Database</TabsTrigger>
               <TabsTrigger value="advertise">Advertise</TabsTrigger>
+              <TabsTrigger value="bot">Bot</TabsTrigger>
             </TabsList>
 
             {/* Radio Config Tab */}
@@ -746,6 +798,87 @@ export function SettingsModal({
                   <p className="text-sm text-destructive mt-4">Radio not connected</p>
                 )}
               </div>
+            </TabsContent>
+
+            {/* Bot Tab */}
+            <TabsContent value="bot" className="space-y-4 mt-4">
+              <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
+                <p className="text-sm text-yellow-500">
+                  <strong>Security Warning:</strong> This feature executes arbitrary Python code on
+                  the server. Only enable if you understand the security implications.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={botEnabled}
+                    onChange={(e) => setBotEnabled(e.target.checked)}
+                    className="w-4 h-4 rounded border-input accent-primary"
+                  />
+                  <span className="text-sm font-medium">Enable Message Bot</span>
+                </label>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="bot-code">Bot Code (Python)</Label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBotCode(DEFAULT_BOT_CODE)}
+                    disabled={!botEnabled}
+                  >
+                    Reset to Example
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Define a <code className="bg-muted px-1 rounded">bot()</code> function that
+                  receives message data and optionally returns a reply string.
+                </p>
+                <div
+                  className={`rounded-md border border-input bg-[#2d2d2d] overflow-auto h-64 ${!botEnabled ? 'opacity-50 pointer-events-none' : ''}`}
+                >
+                  <Editor
+                    value={botCode}
+                    onValueChange={setBotCode}
+                    highlight={(code) => highlight(code, languages.python, 'python')}
+                    padding={12}
+                    style={{
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                      fontSize: 13,
+                      minHeight: '100%',
+                    }}
+                    textareaId="bot-code"
+                    disabled={!botEnabled}
+                  />
+                </div>
+              </div>
+
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>
+                  <strong>Available:</strong> Standard Python libraries and any modules installed in
+                  the server environment.
+                </p>
+                <p>
+                  <strong>Limits:</strong> 10 second timeout, max 3 concurrent executions.
+                </p>
+                <p>
+                  <strong>Note:</strong> Bot only responds to incoming messages, not your own. For
+                  channel messages, <code>sender_key</code> is <code>None</code>.
+                </p>
+              </div>
+
+              {error && <div className="text-sm text-destructive">{error}</div>}
+
+              <Button onClick={handleSaveBotSettings} disabled={loading} className="w-full">
+                {loading ? 'Saving...' : 'Save Bot Settings'}
+              </Button>
             </TabsContent>
           </Tabs>
         )}

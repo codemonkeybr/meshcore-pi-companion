@@ -682,7 +682,7 @@ class AppSettingsRepository:
             """
             SELECT max_radio_contacts, favorites, auto_decrypt_dm_on_advert,
                    sidebar_sort_order, last_message_times, preferences_migrated,
-                   advert_interval, last_advert_time
+                   advert_interval, last_advert_time, bot_enabled, bot_code
             FROM app_settings WHERE id = 1
             """
         )
@@ -732,6 +732,8 @@ class AppSettingsRepository:
             preferences_migrated=bool(row["preferences_migrated"]),
             advert_interval=row["advert_interval"] or 0,
             last_advert_time=row["last_advert_time"] or 0,
+            bot_enabled=bool(row["bot_enabled"]),
+            bot_code=row["bot_code"] or "",
         )
 
     @staticmethod
@@ -744,6 +746,8 @@ class AppSettingsRepository:
         preferences_migrated: bool | None = None,
         advert_interval: int | None = None,
         last_advert_time: int | None = None,
+        bot_enabled: bool | None = None,
+        bot_code: str | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         updates = []
@@ -781,6 +785,14 @@ class AppSettingsRepository:
         if last_advert_time is not None:
             updates.append("last_advert_time = ?")
             params.append(last_advert_time)
+
+        if bot_enabled is not None:
+            updates.append("bot_enabled = ?")
+            params.append(1 if bot_enabled else 0)
+
+        if bot_code is not None:
+            updates.append("bot_code = ?")
+            params.append(bot_code)
 
         if updates:
             query = f"UPDATE app_settings SET {', '.join(updates)} WHERE id = 1"

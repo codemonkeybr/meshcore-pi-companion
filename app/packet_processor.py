@@ -47,6 +47,8 @@ async def create_message_from_decrypted(
     timestamp: int,
     received_at: int | None = None,
     path: str | None = None,
+    channel_name: str | None = None,
+    trigger_bot: bool = True,
 ) -> int | None:
     """Create a message record from decrypted channel packet content.
 
@@ -56,11 +58,13 @@ async def create_message_from_decrypted(
     Args:
         packet_id: ID of the raw packet being processed
         channel_key: Hex string channel key
+        channel_name: Channel name (e.g. "#general"), for bot context
         sender: Sender name (will be prefixed to message) or None
         message_text: The decrypted message content
         timestamp: Sender timestamp from the packet
         received_at: When the packet was received (defaults to now)
-        path: Hex-encoded routing path (None for historical decryption)
+        path: Hex-encoded routing path
+        trigger_bot: Whether to trigger bot response (False for historical decryption)
 
     Returns the message ID if created, None if duplicate.
     """
@@ -162,6 +166,22 @@ async def create_message_from_decrypted(
         },
     )
 
+    # Run bot if enabled (for incoming channel messages, not historical decryption)
+    if trigger_bot:
+        from app.bot import run_bot_for_message
+
+        await run_bot_for_message(
+            sender_name=sender,
+            sender_key=None,  # Channel messages don't have a sender public key
+            message_text=message_text,
+            is_dm=False,
+            channel_key=channel_key_normalized,
+            channel_name=channel_name,
+            sender_timestamp=timestamp,
+            path=path,
+            is_outgoing=False,
+        )
+
     return msg_id
 
 
@@ -173,6 +193,7 @@ async def create_dm_message_from_decrypted(
     received_at: int | None = None,
     path: str | None = None,
     outgoing: bool = False,
+    trigger_bot: bool = True,
 ) -> int | None:
     """Create a message record from decrypted direct message packet content.
 
@@ -185,8 +206,9 @@ async def create_dm_message_from_decrypted(
         their_public_key: The contact's full 64-char public key (conversation_key)
         our_public_key: Our public key (to determine direction), or None
         received_at: When the packet was received (defaults to now)
-        path: Hex-encoded routing path (None for historical decryption)
+        path: Hex-encoded routing path
         outgoing: Whether this is an outgoing message (we sent it)
+        trigger_bot: Whether to trigger bot response (False for historical decryption)
 
     Returns the message ID if created, None if duplicate.
     """
@@ -289,6 +311,26 @@ async def create_dm_message_from_decrypted(
     # Update contact's last_contacted timestamp (for sorting)
     await ContactRepository.update_last_contacted(conversation_key, received)
 
+    # Run bot if enabled (for incoming DMs only, not historical decryption or outgoing)
+    if trigger_bot and not outgoing:
+        from app.bot import run_bot_for_message
+
+        # Get contact name for the bot
+        contact = await ContactRepository.get_by_key(their_public_key)
+        sender_name = contact.name if contact else None
+
+        await run_bot_for_message(
+            sender_name=sender_name,
+            sender_key=their_public_key,
+            message_text=decrypted.message,
+            is_dm=True,
+            channel_key=None,
+            channel_name=None,
+            sender_timestamp=decrypted.timestamp,
+            path=path,
+            is_outgoing=False,
+        )
+
     return msg_id
 
 
@@ -341,6 +383,7 @@ async def run_historical_dm_decryption(
                 received_at=packet_timestamp,
                 path=path_hex,
                 outgoing=outgoing,
+                trigger_bot=False,  # Historical decryption should not trigger bot
             )
 
             if msg_id is not None:
@@ -535,6 +578,7 @@ async def _process_group_text(
         msg_id = await create_message_from_decrypted(
             packet_id=packet_id,
             channel_key=channel.key,
+            channel_name=channel.name,
             sender=decrypted.sender,
             message_text=decrypted.message,
             timestamp=decrypted.timestamp,
