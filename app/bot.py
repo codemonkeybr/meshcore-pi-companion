@@ -12,6 +12,7 @@ the security implications.
 
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -27,6 +28,14 @@ _bot_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="bot_")
 
 # Timeout for bot code execution (seconds)
 BOT_EXECUTION_TIMEOUT = 10
+
+# Minimum spacing between bot message sends (seconds)
+# This ensures repeaters have time to return to listening mode
+BOT_MESSAGE_SPACING = 2.0
+
+# Global state for rate limiting bot sends
+_bot_send_lock = asyncio.Lock()
+_last_bot_send_time: float = 0.0
 
 
 def execute_bot_code(
@@ -124,35 +133,57 @@ async def process_bot_response(
     For DMs, sends a direct message back to the sender.
     For channel messages, sends to the same channel.
 
+    Bot messages are rate-limited to ensure at least BOT_MESSAGE_SPACING seconds
+    between sends, giving repeaters time to return to listening mode.
+
     Args:
         response: The response text to send
         is_dm: Whether the original message was a DM
         sender_key: Public key of the original sender (for DM replies)
         channel_key: Channel key for channel message replies
     """
+    global _last_bot_send_time
+
     from app.models import SendChannelMessageRequest, SendDirectMessageRequest
     from app.routers.messages import send_channel_message, send_direct_message
     from app.websocket import broadcast_event
 
-    try:
-        if is_dm:
-            logger.info("Bot sending DM reply to %s", sender_key[:12])
-            request = SendDirectMessageRequest(destination=sender_key, text=response)
-            message = await send_direct_message(request)
-            # Broadcast to WebSocket (endpoint returns to HTTP caller, bot needs explicit broadcast)
-            broadcast_event("message", message.model_dump())
-        elif channel_key:
-            logger.info("Bot sending channel reply to %s", channel_key[:8])
-            request = SendChannelMessageRequest(channel_key=channel_key, text=response)
-            message = await send_channel_message(request)
-            # Broadcast to WebSocket
-            broadcast_event("message", message.model_dump())
-        else:
-            logger.warning("Cannot send bot response: no destination")
-    except HTTPException as e:
-        logger.error("Bot failed to send response: %s", e.detail)
-    except Exception as e:
-        logger.error("Bot failed to send response: %s", e)
+    # Serialize bot sends and enforce minimum spacing
+    async with _bot_send_lock:
+        # Calculate how long since last bot send
+        now = time.monotonic()
+        time_since_last = now - _last_bot_send_time
+
+        if _last_bot_send_time > 0 and time_since_last < BOT_MESSAGE_SPACING:
+            wait_time = BOT_MESSAGE_SPACING - time_since_last
+            logger.debug("Rate limiting bot send, waiting %.2fs", wait_time)
+            await asyncio.sleep(wait_time)
+
+        try:
+            if is_dm:
+                logger.info("Bot sending DM reply to %s", sender_key[:12])
+                request = SendDirectMessageRequest(destination=sender_key, text=response)
+                message = await send_direct_message(request)
+                # Broadcast to WebSocket (endpoint returns to HTTP caller, bot needs explicit broadcast)
+                broadcast_event("message", message.model_dump())
+            elif channel_key:
+                logger.info("Bot sending channel reply to %s", channel_key[:8])
+                request = SendChannelMessageRequest(channel_key=channel_key, text=response)
+                message = await send_channel_message(request)
+                # Broadcast to WebSocket
+                broadcast_event("message", message.model_dump())
+            else:
+                logger.warning("Cannot send bot response: no destination")
+                return  # Don't update timestamp if we didn't send
+        except HTTPException as e:
+            logger.error("Bot failed to send response: %s", e.detail)
+            return  # Don't update timestamp on failure
+        except Exception as e:
+            logger.error("Bot failed to send response: %s", e)
+            return  # Don't update timestamp on failure
+
+        # Update last send time after successful send
+        _last_bot_send_time = time.monotonic()
 
 
 async def run_bot_for_message(
