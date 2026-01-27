@@ -259,3 +259,7 @@ class AppSettings(BaseModel):
         default=0,
         description="Periodic advertisement interval in seconds (0 = disabled)",
     )
+    last_advert_time: int = Field(
+        default=0,
+        description="Unix timestamp of last advertisement sent (0 = never)",
+    )

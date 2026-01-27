@@ -336,19 +336,54 @@ async def stop_message_polling():
         logger.info("Stopped periodic message polling")
 
 
-async def send_advertisement() -> bool:
+async def send_advertisement(force: bool = False) -> bool:
     """Send an advertisement to announce presence on the mesh.
 
-    Returns True if successful, False otherwise.
+    Respects the configured advert_interval - won't send if not enough time
+    has elapsed since the last advertisement, unless force=True.
+
+    Args:
+        force: If True, send immediately regardless of interval.
+
+    Returns True if successful, False otherwise (including if throttled).
     """
+    from app.repository import AppSettingsRepository
+
     if not radio_manager.is_connected or radio_manager.meshcore is None:
         logger.debug("Cannot send advertisement: radio not connected")
         return False
 
+    # Check if enough time has elapsed (unless forced)
+    if not force:
+        settings = await AppSettingsRepository.get()
+        interval = settings.advert_interval
+        last_time = settings.last_advert_time
+        now = int(time.time())
+
+        # If interval is 0, advertising is disabled
+        if interval <= 0:
+            logger.debug("Advertisement skipped: periodic advertising is disabled")
+            return False
+
+        # Check if enough time has passed
+        elapsed = now - last_time
+        if elapsed < interval:
+            remaining = interval - elapsed
+            logger.debug(
+                "Advertisement throttled: %d seconds remaining (interval=%d, elapsed=%d)",
+                remaining,
+                interval,
+                elapsed,
+            )
+            return False
+
     try:
         result = await radio_manager.meshcore.commands.send_advert(flood=True)
         if result.type == EventType.OK:
-            logger.info("Periodic advertisement sent successfully")
+            # Update last_advert_time in database
+            now = int(time.time())
+            await AppSettingsRepository.update(last_advert_time=now)
+            logger.info("Advertisement sent successfully")
             return True
         else:
             logger.warning("Failed to send advertisement: %s", result.payload)
@@ -359,50 +394,27 @@ async def send_advertisement() -> bool:
 
 
 async def _periodic_advert_loop():
-    """Background task that periodically sends advertisements.
+    """Background task that periodically checks if an advertisement should be sent.
 
-    Reads the interval from app_settings on each iteration, allowing
-    dynamic configuration changes without restarting the task.
-    If interval is 0, advertising is disabled but the task continues
-    running to detect when it's re-enabled.
+    The actual throttling logic is in send_advertisement(), which checks
+    last_advert_time from the database. This loop just triggers the check
+    periodically and sleeps between attempts.
     """
-    from app.repository import AppSettingsRepository
-
-    last_advert_time = 0.0
-
     while True:
         try:
-            # Get current interval setting
-            settings = await AppSettingsRepository.get()
-            interval = settings.advert_interval
+            # Try to send - send_advertisement() handles all checks
+            # (disabled, throttled, not connected)
+            if radio_manager.is_connected:
+                await send_advertisement()
 
-            if interval <= 0:
-                # Advertising disabled - check again later
-                await asyncio.sleep(ADVERT_CHECK_INTERVAL)
-                continue
-
-            # Check if enough time has passed since last advertisement
-            now = asyncio.get_running_loop().time()
-            time_since_last = now - last_advert_time
-
-            if time_since_last >= interval and radio_manager.is_connected:
-                if await send_advertisement():
-                    last_advert_time = now
-            elif time_since_last < interval:
-                # Sleep until next advertisement is due
-                sleep_time = min(interval - time_since_last, ADVERT_CHECK_INTERVAL)
-                await asyncio.sleep(sleep_time)
-                continue
-
-            # Sleep for the configured interval
-            await asyncio.sleep(interval)
+            # Sleep before next check
+            await asyncio.sleep(ADVERT_CHECK_INTERVAL)
 
         except asyncio.CancelledError:
             logger.info("Periodic advertisement task cancelled")
             break
         except Exception as e:
             logger.error("Error in periodic advertisement loop: %s", e)
-            # Sleep a bit before retrying on error
             await asyncio.sleep(ADVERT_CHECK_INTERVAL)
 
 

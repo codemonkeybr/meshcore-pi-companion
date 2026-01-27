@@ -682,7 +682,7 @@ class AppSettingsRepository:
             """
             SELECT max_radio_contacts, favorites, auto_decrypt_dm_on_advert,
                    sidebar_sort_order, last_message_times, preferences_migrated,
-                   advert_interval
+                   advert_interval, last_advert_time
             FROM app_settings WHERE id = 1
             """
         )
@@ -731,6 +731,7 @@ class AppSettingsRepository:
             last_message_times=last_message_times,
             preferences_migrated=bool(row["preferences_migrated"]),
             advert_interval=row["advert_interval"] or 0,
+            last_advert_time=row["last_advert_time"] or 0,
         )
 
     @staticmethod
@@ -742,6 +743,7 @@ class AppSettingsRepository:
         last_message_times: dict[str, int] | None = None,
         preferences_migrated: bool | None = None,
         advert_interval: int | None = None,
+        last_advert_time: int | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
         updates = []
@@ -775,6 +777,10 @@ class AppSettingsRepository:
         if advert_interval is not None:
             updates.append("advert_interval = ?")
             params.append(advert_interval)
+
+        if last_advert_time is not None:
+            updates.append("last_advert_time = ?")
+            params.append(last_advert_time)
 
         if updates:
             query = f"UPDATE app_settings SET {', '.join(updates)} WHERE id = 1"

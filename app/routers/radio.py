@@ -5,6 +5,7 @@ from meshcore import EventType
 from pydantic import BaseModel, Field
 
 from app.dependencies import require_connected
+from app.radio_sync import send_advertisement as do_send_advertisement
 from app.radio_sync import sync_radio_time
 
 logger = logging.getLogger(__name__)
@@ -129,16 +130,26 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
 
 @router.post("/advertise")
 async def send_advertisement(flood: bool = True) -> dict:
-    """Send a radio advertisement to announce presence on the mesh."""
-    mc = require_connected()
+    """Send a radio advertisement to announce presence on the mesh.
 
+    Manual advertisement requests always send immediately, updating the
+    last_advert_time which affects when the next periodic/startup advert
+    can occur.
+
+    Args:
+        flood: Whether to flood the advertisement (default True).
+
+    Returns:
+        status: "ok" if sent successfully
+    """
+    require_connected()
+
+    # Manual requests always send (force=True), but still update last_advert_time
     logger.info("Sending advertisement (flood=%s)", flood)
-    result = await mc.commands.send_advert(flood=flood)
+    success = await do_send_advertisement(force=True)
 
-    if result.type == EventType.ERROR:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to send advertisement: {result.payload}"
-        )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send advertisement")
 
     return {"status": "ok", "flood": flood}
 
