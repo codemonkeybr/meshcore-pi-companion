@@ -543,7 +543,7 @@ export function App() {
   // Send flood advertisement handler
   const handleAdvertise = useCallback(async () => {
     try {
-      await api.sendAdvertisement(true);
+      await api.sendAdvertisement();
       toast.success('Advertisement sent');
     } catch (err) {
       console.error('Failed to send advertisement:', err);

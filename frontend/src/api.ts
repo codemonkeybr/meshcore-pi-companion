@@ -76,8 +76,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ private_key: privateKey }),
     }),
-  sendAdvertisement: (flood = true) =>
-    fetchJson<{ status: string; flood: boolean }>(`/radio/advertise?flood=${flood}`, {
+  sendAdvertisement: () =>
+    fetchJson<{ status: string }>('/radio/advertise', {
       method: 'POST',
     }),
   rebootRadio: () =>

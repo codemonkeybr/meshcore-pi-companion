@@ -134,29 +134,25 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
 
 
 @router.post("/advertise")
-async def send_advertisement(flood: bool = True) -> dict:
-    """Send a radio advertisement to announce presence on the mesh.
+async def send_advertisement() -> dict:
+    """Send a flood advertisement to announce presence on the mesh.
 
     Manual advertisement requests always send immediately, updating the
     last_advert_time which affects when the next periodic/startup advert
     can occur.
-
-    Args:
-        flood: Whether to flood the advertisement (default True).
 
     Returns:
         status: "ok" if sent successfully
     """
     require_connected()
 
-    # Manual requests always send (force=True), but still update last_advert_time
-    logger.info("Sending advertisement (flood=%s)", flood)
+    logger.info("Sending flood advertisement")
     success = await do_send_advertisement(force=True)
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send advertisement")
 
-    return {"status": "ok", "flood": flood}
+    return {"status": "ok"}
 
 
 @router.post("/reboot")
