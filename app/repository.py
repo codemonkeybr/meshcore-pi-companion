@@ -525,7 +525,7 @@ class MessageRepository:
         mention_flags: dict[str, bool] = {}
         last_message_times: dict[str, int] = {}
 
-        mention_pattern = f"%@[{name}]%" if name else None
+        mention_token = f"@[{name}]" if name else None
 
         # Channel unreads
         cursor = await db.conn.execute(
@@ -533,20 +533,20 @@ class MessageRepository:
             SELECT m.conversation_key,
                    COUNT(*) as unread_count,
                    MAX(m.received_at) as last_message_time,
-                   SUM(CASE WHEN m.text LIKE ? THEN 1 ELSE 0 END) > 0 as has_mention
+                   SUM(CASE WHEN ? <> '' AND INSTR(m.text, ?) > 0 THEN 1 ELSE 0 END) > 0 as has_mention
             FROM messages m
             JOIN channels c ON m.conversation_key = c.key
             WHERE m.type = 'CHAN' AND m.outgoing = 0
               AND m.received_at > COALESCE(c.last_read_at, 0)
             GROUP BY m.conversation_key
             """,
-            (mention_pattern or "",),
+            (mention_token or "", mention_token or ""),
         )
         rows = await cursor.fetchall()
         for row in rows:
             state_key = f"channel-{row['conversation_key']}"
             counts[state_key] = row["unread_count"]
-            if mention_pattern and row["has_mention"]:
+            if mention_token and row["has_mention"]:
                 mention_flags[state_key] = True
 
         # Contact unreads
@@ -555,20 +555,20 @@ class MessageRepository:
             SELECT m.conversation_key,
                    COUNT(*) as unread_count,
                    MAX(m.received_at) as last_message_time,
-                   SUM(CASE WHEN m.text LIKE ? THEN 1 ELSE 0 END) > 0 as has_mention
+                   SUM(CASE WHEN ? <> '' AND INSTR(m.text, ?) > 0 THEN 1 ELSE 0 END) > 0 as has_mention
             FROM messages m
             JOIN contacts ct ON m.conversation_key = ct.public_key
             WHERE m.type = 'PRIV' AND m.outgoing = 0
               AND m.received_at > COALESCE(ct.last_read_at, 0)
             GROUP BY m.conversation_key
             """,
-            (mention_pattern or "",),
+            (mention_token or "", mention_token or ""),
         )
         rows = await cursor.fetchall()
         for row in rows:
             state_key = f"contact-{row['conversation_key']}"
             counts[state_key] = row["unread_count"]
-            if mention_pattern and row["has_mention"]:
+            if mention_token and row["has_mention"]:
                 mention_flags[state_key] = True
 
         # Last message times for all conversations (including read ones)
