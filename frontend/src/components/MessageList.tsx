@@ -485,7 +485,7 @@ export function MessageList({
                         ` ✓${msg.acked > 1 ? msg.acked : ''}`
                       )
                     ) : (
-                      ' ?'
+                      <span title="No repeats heard yet"> ?</span>
                     ))}
                 </div>
               </div>
