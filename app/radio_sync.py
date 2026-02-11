@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from meshcore import EventType
 
 from app.models import Contact
-from app.radio import radio_manager
+from app.radio import RadioOperationBusyError, radio_manager
 from app.repository import (
     AppSettingsRepository,
     ChannelRepository,
@@ -318,7 +318,16 @@ async def _message_poll_loop():
             await asyncio.sleep(MESSAGE_POLL_INTERVAL)
 
             if radio_manager.is_connected and not is_polling_paused():
-                await poll_for_messages()
+                mc = radio_manager.meshcore
+                if mc is not None:
+                    try:
+                        async with radio_manager.radio_operation(
+                            "message_poll_loop",
+                            blocking=False,
+                        ):
+                            await poll_for_messages()
+                    except RadioOperationBusyError:
+                        logger.debug("Skipping message poll: radio busy")
 
         except asyncio.CancelledError:
             break
@@ -414,7 +423,16 @@ async def _periodic_advert_loop():
             # Try to send - send_advertisement() handles all checks
             # (disabled, throttled, not connected)
             if radio_manager.is_connected:
-                await send_advertisement()
+                mc = radio_manager.meshcore
+                if mc is not None:
+                    try:
+                        async with radio_manager.radio_operation(
+                            "periodic_advertisement",
+                            blocking=False,
+                        ):
+                            await send_advertisement()
+                    except RadioOperationBusyError:
+                        logger.debug("Skipping periodic advertisement: radio busy")
 
             # Sleep before next check
             await asyncio.sleep(ADVERT_CHECK_INTERVAL)
@@ -477,9 +495,20 @@ async def _periodic_sync_loop():
     while True:
         try:
             await asyncio.sleep(SYNC_INTERVAL)
-            logger.debug("Running periodic radio sync")
-            await sync_and_offload_all()
-            await sync_radio_time()
+            mc = radio_manager.meshcore
+            if mc is None:
+                continue
+
+            try:
+                async with radio_manager.radio_operation(
+                    "periodic_sync",
+                    blocking=False,
+                ):
+                    logger.debug("Running periodic radio sync")
+                    await sync_and_offload_all()
+                    await sync_radio_time()
+            except RadioOperationBusyError:
+                logger.debug("Skipping periodic sync: radio busy")
         except asyncio.CancelledError:
             logger.info("Periodic sync task cancelled")
             break
@@ -536,93 +565,101 @@ async def sync_recent_contacts_to_radio(force: bool = False) -> dict:
         return {"loaded": 0, "error": "Radio not connected"}
 
     mc = radio_manager.meshcore
-    _last_contact_sync = now
 
     try:
-        # Build prioritized contact list:
-        # 1) favorite contacts, in favorite order
-        # 2) most recent non-repeater contacts (excluding already-selected favorites)
-        app_settings = await AppSettingsRepository.get()
-        max_contacts = app_settings.max_radio_contacts
-        selected_contacts: list[Contact] = []
-        selected_keys: set[str] = set()
+        async with radio_manager.radio_operation(
+            "sync_recent_contacts_to_radio",
+            blocking=False,
+        ):
+            _last_contact_sync = now
 
-        favorite_contacts_loaded = 0
-        for favorite in app_settings.favorites:
-            if favorite.type != "contact":
-                continue
-            contact = await ContactRepository.get_by_key_or_prefix(favorite.id)
-            if not contact:
-                continue
-            key = contact.public_key.lower()
-            if key in selected_keys:
-                continue
-            selected_keys.add(key)
-            selected_contacts.append(contact)
-            favorite_contacts_loaded += 1
-            if len(selected_contacts) >= max_contacts:
-                break
+            # Build prioritized contact list:
+            # 1) favorite contacts, in favorite order
+            # 2) most recent non-repeater contacts (excluding already-selected favorites)
+            app_settings = await AppSettingsRepository.get()
+            max_contacts = app_settings.max_radio_contacts
+            selected_contacts: list[Contact] = []
+            selected_keys: set[str] = set()
 
-        if len(selected_contacts) < max_contacts:
-            recent_contacts = await ContactRepository.get_recent_non_repeaters(limit=max_contacts)
-            for contact in recent_contacts:
+            favorite_contacts_loaded = 0
+            for favorite in app_settings.favorites:
+                if favorite.type != "contact":
+                    continue
+                contact = await ContactRepository.get_by_key_or_prefix(favorite.id)
+                if not contact:
+                    continue
                 key = contact.public_key.lower()
                 if key in selected_keys:
                     continue
                 selected_keys.add(key)
                 selected_contacts.append(contact)
+                favorite_contacts_loaded += 1
                 if len(selected_contacts) >= max_contacts:
                     break
 
-        logger.debug(
-            "Selected %d contacts to sync (%d favorite contacts first, limit=%d)",
-            len(selected_contacts),
-            favorite_contacts_loaded,
-            max_contacts,
-        )
+            if len(selected_contacts) < max_contacts:
+                recent_contacts = await ContactRepository.get_recent_non_repeaters(limit=max_contacts)
+                for contact in recent_contacts:
+                    key = contact.public_key.lower()
+                    if key in selected_keys:
+                        continue
+                    selected_keys.add(key)
+                    selected_contacts.append(contact)
+                    if len(selected_contacts) >= max_contacts:
+                        break
 
-        loaded = 0
-        already_on_radio = 0
-        failed = 0
-
-        for contact in selected_contacts:
-            # Check if already on radio
-            radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
-            if radio_contact:
-                already_on_radio += 1
-                # Update DB if not marked as on_radio
-                if not contact.on_radio:
-                    await ContactRepository.set_on_radio(contact.public_key, True)
-                continue
-
-            try:
-                result = await mc.commands.add_contact(contact.to_radio_dict())
-                if result.type == EventType.OK:
-                    loaded += 1
-                    await ContactRepository.set_on_radio(contact.public_key, True)
-                    logger.debug("Loaded contact %s to radio", contact.public_key[:12])
-                else:
-                    failed += 1
-                    logger.warning(
-                        "Failed to load contact %s: %s", contact.public_key[:12], result.payload
-                    )
-            except Exception as e:
-                failed += 1
-                logger.warning("Error loading contact %s: %s", contact.public_key[:12], e)
-
-        if loaded > 0 or failed > 0:
-            logger.info(
-                "Contact sync: loaded %d, already on radio %d, failed %d",
-                loaded,
-                already_on_radio,
-                failed,
+            logger.debug(
+                "Selected %d contacts to sync (%d favorite contacts first, limit=%d)",
+                len(selected_contacts),
+                favorite_contacts_loaded,
+                max_contacts,
             )
 
-        return {
-            "loaded": loaded,
-            "already_on_radio": already_on_radio,
-            "failed": failed,
-        }
+            loaded = 0
+            already_on_radio = 0
+            failed = 0
+
+            for contact in selected_contacts:
+                # Check if already on radio
+                radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
+                if radio_contact:
+                    already_on_radio += 1
+                    # Update DB if not marked as on_radio
+                    if not contact.on_radio:
+                        await ContactRepository.set_on_radio(contact.public_key, True)
+                    continue
+
+                try:
+                    result = await mc.commands.add_contact(contact.to_radio_dict())
+                    if result.type == EventType.OK:
+                        loaded += 1
+                        await ContactRepository.set_on_radio(contact.public_key, True)
+                        logger.debug("Loaded contact %s to radio", contact.public_key[:12])
+                    else:
+                        failed += 1
+                        logger.warning(
+                            "Failed to load contact %s: %s", contact.public_key[:12], result.payload
+                        )
+                except Exception as e:
+                    failed += 1
+                    logger.warning("Error loading contact %s: %s", contact.public_key[:12], e)
+
+            if loaded > 0 or failed > 0:
+                logger.info(
+                    "Contact sync: loaded %d, already on radio %d, failed %d",
+                    loaded,
+                    already_on_radio,
+                    failed,
+                )
+
+            return {
+                "loaded": loaded,
+                "already_on_radio": already_on_radio,
+                "failed": failed,
+            }
+    except RadioOperationBusyError:
+        logger.debug("Skipping contact sync to radio: radio busy")
+        return {"loaded": 0, "busy": True}
 
     except Exception as e:
         logger.error("Error syncing contacts to radio: %s", e)

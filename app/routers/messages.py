@@ -8,13 +8,11 @@ from meshcore import EventType
 from app.dependencies import require_connected
 from app.event_handlers import track_pending_ack
 from app.models import Message, SendChannelMessageRequest, SendDirectMessageRequest
+from app.radio import radio_manager
 from app.repository import MessageRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/messages", tags=["messages"])
-
-# Serialize channel sends that reuse a temporary radio slot.
-_channel_send_lock = asyncio.Lock()
 
 
 @router.get("", response_model=list[Message])
@@ -60,28 +58,29 @@ async def send_direct_message(request: SendDirectMessageRequest) -> Message:
     # so we can't rely on it to know if the firmware has the contact.
     # add_contact is idempotent - updates if exists, adds if not.
     contact_data = db_contact.to_radio_dict()
-    logger.debug("Ensuring contact %s is on radio before sending", db_contact.public_key[:12])
-    add_result = await mc.commands.add_contact(contact_data)
-    if add_result.type == EventType.ERROR:
-        logger.warning("Failed to add contact to radio: %s", add_result.payload)
-        # Continue anyway - might still work if contact exists
+    async with radio_manager.radio_operation("send_direct_message"):
+        logger.debug("Ensuring contact %s is on radio before sending", db_contact.public_key[:12])
+        add_result = await mc.commands.add_contact(contact_data)
+        if add_result.type == EventType.ERROR:
+            logger.warning("Failed to add contact to radio: %s", add_result.payload)
+            # Continue anyway - might still work if contact exists
 
-    # Get the contact from the library cache (may have updated info like path)
-    contact = mc.get_contact_by_key_prefix(db_contact.public_key[:12])
-    if not contact:
-        contact = contact_data
+        # Get the contact from the library cache (may have updated info like path)
+        contact = mc.get_contact_by_key_prefix(db_contact.public_key[:12])
+        if not contact:
+            contact = contact_data
 
-    logger.info("Sending direct message to %s", db_contact.public_key[:12])
+        logger.info("Sending direct message to %s", db_contact.public_key[:12])
 
-    # Capture timestamp BEFORE sending so we can pass the same value to both the radio
-    # and the database. This ensures consistency for deduplication.
-    now = int(time.time())
+        # Capture timestamp BEFORE sending so we can pass the same value to both the radio
+        # and the database. This ensures consistency for deduplication.
+        now = int(time.time())
 
-    result = await mc.commands.send_msg(
-        dst=contact,
-        msg=request.text,
-        timestamp=now,
-    )
+        result = await mc.commands.send_msg(
+            dst=contact,
+            msg=request.text,
+            timestamp=now,
+        )
 
     if result.type == EventType.ERROR:
         raise HTTPException(status_code=500, detail=f"Failed to send message: {result.payload}")
@@ -179,7 +178,7 @@ async def send_channel_message(request: SendChannelMessageRequest) -> Message:
         expected_hash,
     )
 
-    async with _channel_send_lock:
+    async with radio_manager.radio_operation("send_channel_message"):
         # Load the channel to a temporary radio slot before sending
         set_result = await mc.commands.set_channel(
             channel_idx=TEMP_RADIO_SLOT,

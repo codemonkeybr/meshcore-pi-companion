@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.dependencies import require_connected
 from app.models import Channel
+from app.radio import radio_manager
 from app.radio_sync import ensure_default_channels
 from app.repository import ChannelRepository
 
@@ -89,30 +90,31 @@ async def sync_channels_from_radio(max_channels: int = Query(default=40, ge=1, l
     logger.info("Syncing channels from radio (checking %d slots)", max_channels)
     count = 0
 
-    for idx in range(max_channels):
-        result = await mc.commands.get_channel(idx)
+    async with radio_manager.radio_operation("sync_channels_from_radio"):
+        for idx in range(max_channels):
+            result = await mc.commands.get_channel(idx)
 
-        if result.type == EventType.CHANNEL_INFO:
-            payload = result.payload
-            name = payload.get("channel_name", "")
-            secret = payload.get("channel_secret", b"")
+            if result.type == EventType.CHANNEL_INFO:
+                payload = result.payload
+                name = payload.get("channel_name", "")
+                secret = payload.get("channel_secret", b"")
 
-            # Skip empty channels
-            if not name or name == "\x00" * len(name):
-                continue
+                # Skip empty channels
+                if not name or name == "\x00" * len(name):
+                    continue
 
-            is_hashtag = name.startswith("#")
-            key_bytes = secret if isinstance(secret, bytes) else bytes(secret)
-            key_hex = key_bytes.hex().upper()
+                is_hashtag = name.startswith("#")
+                key_bytes = secret if isinstance(secret, bytes) else bytes(secret)
+                key_hex = key_bytes.hex().upper()
 
-            await ChannelRepository.upsert(
-                key=key_hex,
-                name=name,
-                is_hashtag=is_hashtag,
-                on_radio=True,
-            )
-            count += 1
-            logger.debug("Synced channel %s: %s", key_hex, name)
+                await ChannelRepository.upsert(
+                    key=key_hex,
+                    name=name,
+                    is_hashtag=is_hashtag,
+                    on_radio=True,
+                )
+                count += 1
+                logger.debug("Synced channel %s: %s", key_hex, name)
 
     logger.info("Synced %d channels from radio", count)
     return {"synced": count}

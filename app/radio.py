@@ -2,6 +2,7 @@ import asyncio
 import glob
 import logging
 import platform
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from meshcore import MeshCore
@@ -9,6 +10,20 @@ from meshcore import MeshCore
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class RadioOperationError(RuntimeError):
+    """Base class for shared radio operation lock errors."""
+
+
+class RadioOperationBusyError(RadioOperationError):
+    """Raised when a non-blocking radio operation cannot acquire the lock."""
+
+
+@asynccontextmanager
+async def _noop_context():
+    """No-op async context manager for optional nesting."""
+    yield
 
 
 def detect_serial_devices() -> list[str]:
@@ -106,6 +121,83 @@ class RadioManager:
         self._reconnect_task: asyncio.Task | None = None
         self._last_connected: bool = False
         self._reconnect_lock: asyncio.Lock | None = None
+        self._operation_lock: asyncio.Lock | None = None
+        self._setup_lock: asyncio.Lock | None = None
+        self._setup_in_progress: bool = False
+
+    async def _acquire_operation_lock(
+        self,
+        name: str,
+        *,
+        blocking: bool,
+    ) -> None:
+        """Acquire the shared radio operation lock."""
+
+        if self._operation_lock is None:
+            self._operation_lock = asyncio.Lock()
+
+        if not blocking:
+            if self._operation_lock.locked():
+                raise RadioOperationBusyError(f"Radio is busy (operation: {name})")
+            await self._operation_lock.acquire()
+        else:
+            await self._operation_lock.acquire()
+
+        logger.debug("Acquired radio operation lock (%s)", name)
+
+    def _release_operation_lock(self, name: str) -> None:
+        """Release the shared radio operation lock."""
+        if self._operation_lock and self._operation_lock.locked():
+            self._operation_lock.release()
+            logger.debug("Released radio operation lock (%s)", name)
+        else:
+            logger.error("Attempted to release unlocked radio operation lock (%s)", name)
+
+    @asynccontextmanager
+    async def radio_operation(
+        self,
+        name: str,
+        *,
+        pause_polling: bool = False,
+        suspend_auto_fetch: bool = False,
+        blocking: bool = True,
+        meshcore: MeshCore | None = None,
+    ):
+        """Acquire shared radio lock and optionally pause polling / auto-fetch.
+
+        Args:
+            name: Human-readable operation name for logs/errors.
+            pause_polling: Pause fallback message polling while held.
+            suspend_auto_fetch: Stop MeshCore auto message fetching while held.
+            blocking: If False, fail immediately when lock is held.
+            meshcore: Optional explicit MeshCore instance for auto-fetch control.
+        """
+        await self._acquire_operation_lock(name, blocking=blocking)
+
+        poll_context = _noop_context()
+        if pause_polling:
+            from app.radio_sync import pause_polling as pause_polling_context
+
+            poll_context = pause_polling_context()
+
+        mc = meshcore or self._meshcore
+        auto_fetch_paused = False
+
+        try:
+            async with poll_context:
+                if suspend_auto_fetch and mc is not None:
+                    await mc.stop_auto_message_fetching()
+                    auto_fetch_paused = True
+                yield
+        finally:
+            try:
+                if auto_fetch_paused and mc is not None:
+                    try:
+                        await mc.start_auto_message_fetching()
+                    except Exception as e:
+                        logger.warning("Failed to restart auto message fetching (%s): %s", name, e)
+            finally:
+                self._release_operation_lock(name)
 
     async def post_connect_setup(self) -> None:
         """Full post-connection setup: handlers, key export, sync, advertisements, polling.
@@ -128,39 +220,49 @@ class RadioManager:
         if not self._meshcore:
             return
 
-        register_event_handlers(self._meshcore)
-        await export_and_store_private_key(self._meshcore)
+        if self._setup_lock is None:
+            self._setup_lock = asyncio.Lock()
 
-        # Sync radio clock with system time
-        await sync_radio_time()
+        async with self._setup_lock:
+            if not self._meshcore:
+                return
+            self._setup_in_progress = True
+            try:
+                register_event_handlers(self._meshcore)
+                await export_and_store_private_key(self._meshcore)
 
-        # Sync contacts/channels from radio to DB and clear radio
-        logger.info("Syncing and offloading radio data...")
-        result = await sync_and_offload_all()
-        logger.info("Sync complete: %s", result)
+                # Sync radio clock with system time
+                await sync_radio_time()
 
-        # Start periodic sync (idempotent)
-        start_periodic_sync()
+                # Sync contacts/channels from radio to DB and clear radio
+                logger.info("Syncing and offloading radio data...")
+                result = await sync_and_offload_all()
+                logger.info("Sync complete: %s", result)
 
-        # Send advertisement to announce our presence (if enabled and not throttled)
-        if await send_advertisement():
-            logger.info("Advertisement sent")
-        else:
-            logger.debug("Advertisement skipped (disabled or throttled)")
+                # Start periodic sync (idempotent)
+                start_periodic_sync()
 
-        # Start periodic advertisement (idempotent)
-        start_periodic_advert()
+                # Send advertisement to announce our presence (if enabled and not throttled)
+                if await send_advertisement():
+                    logger.info("Advertisement sent")
+                else:
+                    logger.debug("Advertisement skipped (disabled or throttled)")
 
-        await self._meshcore.start_auto_message_fetching()
-        logger.info("Auto message fetching started")
+                # Start periodic advertisement (idempotent)
+                start_periodic_advert()
 
-        # Drain any messages that were queued before we connected
-        drained = await drain_pending_messages()
-        if drained > 0:
-            logger.info("Drained %d pending message(s)", drained)
+                await self._meshcore.start_auto_message_fetching()
+                logger.info("Auto message fetching started")
 
-        # Start periodic message polling as fallback (idempotent)
-        start_message_polling()
+                # Drain any messages that were queued before we connected
+                drained = await drain_pending_messages()
+                if drained > 0:
+                    logger.info("Drained %d pending message(s)", drained)
+
+                # Start periodic message polling as fallback (idempotent)
+                start_message_polling()
+            finally:
+                self._setup_in_progress = False
 
         logger.info("Post-connect setup complete")
 
@@ -179,6 +281,10 @@ class RadioManager:
     @property
     def is_reconnecting(self) -> bool:
         return self._reconnect_lock is not None and self._reconnect_lock.locked()
+
+    @property
+    def is_setup_in_progress(self) -> bool:
+        return self._setup_in_progress
 
     async def connect(self) -> None:
         """Connect to the radio using the configured transport."""

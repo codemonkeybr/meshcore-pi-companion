@@ -5,6 +5,7 @@ from meshcore import EventType
 from pydantic import BaseModel, Field
 
 from app.dependencies import require_connected
+from app.radio import radio_manager
 from app.radio_sync import send_advertisement as do_send_advertisement
 from app.radio_sync import sync_radio_time
 
@@ -71,43 +72,44 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
     """Update radio configuration. Only provided fields will be updated."""
     mc = require_connected()
 
-    if update.name is not None:
-        logger.info("Setting radio name to %s", update.name)
-        await mc.commands.set_name(update.name)
+    async with radio_manager.radio_operation("update_radio_config"):
+        if update.name is not None:
+            logger.info("Setting radio name to %s", update.name)
+            await mc.commands.set_name(update.name)
 
-    if update.lat is not None or update.lon is not None:
-        current_info = mc.self_info
-        lat = update.lat if update.lat is not None else current_info.get("adv_lat", 0.0)
-        lon = update.lon if update.lon is not None else current_info.get("adv_lon", 0.0)
-        logger.info("Setting radio coordinates to %f, %f", lat, lon)
-        await mc.commands.set_coords(lat=lat, lon=lon)
+        if update.lat is not None or update.lon is not None:
+            current_info = mc.self_info
+            lat = update.lat if update.lat is not None else current_info.get("adv_lat", 0.0)
+            lon = update.lon if update.lon is not None else current_info.get("adv_lon", 0.0)
+            logger.info("Setting radio coordinates to %f, %f", lat, lon)
+            await mc.commands.set_coords(lat=lat, lon=lon)
 
-    if update.tx_power is not None:
-        logger.info("Setting TX power to %d dBm", update.tx_power)
-        await mc.commands.set_tx_power(val=update.tx_power)
+        if update.tx_power is not None:
+            logger.info("Setting TX power to %d dBm", update.tx_power)
+            await mc.commands.set_tx_power(val=update.tx_power)
 
-    if update.radio is not None:
-        logger.info(
-            "Setting radio params: freq=%f MHz, bw=%f kHz, sf=%d, cr=%d",
-            update.radio.freq,
-            update.radio.bw,
-            update.radio.sf,
-            update.radio.cr,
-        )
-        await mc.commands.set_radio(
-            freq=update.radio.freq,
-            bw=update.radio.bw,
-            sf=update.radio.sf,
-            cr=update.radio.cr,
-        )
+        if update.radio is not None:
+            logger.info(
+                "Setting radio params: freq=%f MHz, bw=%f kHz, sf=%d, cr=%d",
+                update.radio.freq,
+                update.radio.bw,
+                update.radio.sf,
+                update.radio.cr,
+            )
+            await mc.commands.set_radio(
+                freq=update.radio.freq,
+                bw=update.radio.bw,
+                sf=update.radio.sf,
+                cr=update.radio.cr,
+            )
 
-    # Sync time with system clock
-    await sync_radio_time()
+        # Sync time with system clock
+        await sync_radio_time()
 
-    # Re-fetch self_info so the response reflects the changes we just made.
-    # Commands like set_name() write to flash but don't update the cached
-    # self_info — send_appstart() triggers a fresh SELF_INFO from the radio.
-    await mc.commands.send_appstart()
+        # Re-fetch self_info so the response reflects the changes we just made.
+        # Commands like set_name() write to flash but don't update the cached
+        # self_info — send_appstart() triggers a fresh SELF_INFO from the radio.
+        await mc.commands.send_appstart()
 
     return await get_radio_config()
 
@@ -162,8 +164,6 @@ async def reboot_radio() -> dict:
     If connected: sends reboot command, connection will temporarily drop and auto-reconnect.
     If not connected: attempts to reconnect (same as /reconnect endpoint).
     """
-    from app.radio import radio_manager
-
     # If connected, send reboot command
     if radio_manager.is_connected and radio_manager.meshcore:
         logger.info("Rebooting radio")
@@ -202,8 +202,6 @@ async def reconnect_radio() -> dict:
     if no specific port is configured. Useful when the radio has been disconnected
     or power-cycled.
     """
-    from app.radio import radio_manager
-
     if radio_manager.is_connected:
         return {"status": "ok", "message": "Already connected", "connected": True}
 

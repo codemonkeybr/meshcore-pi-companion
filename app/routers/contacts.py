@@ -20,7 +20,6 @@ from app.models import (
 )
 from app.packet_processor import start_historical_dm_decryption
 from app.radio import radio_manager
-from app.radio_sync import pause_polling
 from app.repository import ContactRepository, MessageRepository
 
 logger = logging.getLogger(__name__)
@@ -294,117 +293,115 @@ async def request_telemetry(public_key: str, request: TelemetryRequest) -> Telem
             detail=f"Contact is not a repeater (type={contact.type}, expected {CONTACT_TYPE_REPEATER})",
         )
 
-    # Prepare connection (add/remove dance + login)
-    await prepare_repeater_connection(mc, contact, request.password)
+    async with radio_manager.radio_operation(
+        "request_telemetry",
+        meshcore=mc,
+        pause_polling=True,
+        suspend_auto_fetch=True,
+    ):
+        # Prepare connection (add/remove dance + login)
+        await prepare_repeater_connection(mc, contact, request.password)
 
-    # Request status with retries
-    logger.info("Requesting status from repeater %s", contact.public_key[:12])
-    status = None
-    for attempt in range(1, 4):
-        logger.debug("Status request attempt %d/3", attempt)
-        status = await mc.commands.req_status_sync(contact.public_key, timeout=10, min_timeout=5)
-        if status:
-            break
-        logger.debug("Status request timeout, retrying...")
+        # Request status with retries
+        logger.info("Requesting status from repeater %s", contact.public_key[:12])
+        status = None
+        for attempt in range(1, 4):
+            logger.debug("Status request attempt %d/3", attempt)
+            status = await mc.commands.req_status_sync(contact.public_key, timeout=10, min_timeout=5)
+            if status:
+                break
+            logger.debug("Status request timeout, retrying...")
 
-    if not status:
-        raise HTTPException(status_code=504, detail="No response from repeater after 3 attempts")
+        if not status:
+            raise HTTPException(status_code=504, detail="No response from repeater after 3 attempts")
 
-    logger.info("Received telemetry from %s: %s", contact.public_key[:12], status)
+        logger.info("Received telemetry from %s: %s", contact.public_key[:12], status)
 
-    # Fetch neighbors (fetch_all_neighbours handles pagination)
-    logger.info("Fetching neighbors from repeater %s", contact.public_key[:12])
-    neighbors_data = None
-    for attempt in range(1, 4):
-        logger.debug("Neighbors request attempt %d/3", attempt)
-        neighbors_data = await mc.commands.fetch_all_neighbours(
-            contact.public_key, timeout=10, min_timeout=5
-        )
-        if neighbors_data:
-            break
-        logger.debug("Neighbors request timeout, retrying...")
-
-    # Process neighbors - resolve pubkey prefixes to contact names
-    neighbors: list[NeighborInfo] = []
-    if neighbors_data and "neighbours" in neighbors_data:
-        logger.info("Received %d neighbors", len(neighbors_data["neighbours"]))
-        for n in neighbors_data["neighbours"]:
-            pubkey_prefix = n.get("pubkey", "")
-            # Try to resolve to a contact name from our database
-            resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)
-            neighbors.append(
-                NeighborInfo(
-                    pubkey_prefix=pubkey_prefix,
-                    name=resolved_contact.name if resolved_contact else None,
-                    snr=n.get("snr", 0.0),
-                    last_heard_seconds=n.get("secs_ago", 0),
-                )
+        # Fetch neighbors (fetch_all_neighbours handles pagination)
+        logger.info("Fetching neighbors from repeater %s", contact.public_key[:12])
+        neighbors_data = None
+        for attempt in range(1, 4):
+            logger.debug("Neighbors request attempt %d/3", attempt)
+            neighbors_data = await mc.commands.fetch_all_neighbours(
+                contact.public_key, timeout=10, min_timeout=5
             )
+            if neighbors_data:
+                break
+            logger.debug("Neighbors request timeout, retrying...")
 
-    # Fetch ACL
-    logger.info("Fetching ACL from repeater %s", contact.public_key[:12])
-    acl_data = None
-    for attempt in range(1, 4):
-        logger.debug("ACL request attempt %d/3", attempt)
-        acl_data = await mc.commands.req_acl_sync(contact.public_key, timeout=10, min_timeout=5)
-        if acl_data:
-            break
-        logger.debug("ACL request timeout, retrying...")
-
-    # Process ACL - resolve pubkey prefixes to contact names
-    acl_entries: list[AclEntry] = []
-    if acl_data and isinstance(acl_data, list):
-        logger.info("Received %d ACL entries", len(acl_data))
-        for entry in acl_data:
-            pubkey_prefix = entry.get("key", "")
-            perm = entry.get("perm", 0)
-            # Try to resolve to a contact name from our database
-            resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)
-            acl_entries.append(
-                AclEntry(
-                    pubkey_prefix=pubkey_prefix,
-                    name=resolved_contact.name if resolved_contact else None,
-                    permission=perm,
-                    permission_name=ACL_PERMISSION_NAMES.get(perm, f"Unknown({perm})"),
+        # Process neighbors - resolve pubkey prefixes to contact names
+        neighbors: list[NeighborInfo] = []
+        if neighbors_data and "neighbours" in neighbors_data:
+            logger.info("Received %d neighbors", len(neighbors_data["neighbours"]))
+            for n in neighbors_data["neighbours"]:
+                pubkey_prefix = n.get("pubkey", "")
+                # Try to resolve to a contact name from our database
+                resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)
+                neighbors.append(
+                    NeighborInfo(
+                        pubkey_prefix=pubkey_prefix,
+                        name=resolved_contact.name if resolved_contact else None,
+                        snr=n.get("snr", 0.0),
+                        last_heard_seconds=n.get("secs_ago", 0),
+                    )
                 )
-            )
 
-    # Fetch clock output (up to 2 attempts)
-    # Must pause polling and stop auto-fetch to prevent race condition where
-    # the CLI response is consumed before we can call get_msg()
-    logger.info("Fetching clock from repeater %s", contact.public_key[:12])
-    clock_output: str | None = None
+        # Fetch ACL
+        logger.info("Fetching ACL from repeater %s", contact.public_key[:12])
+        acl_data = None
+        for attempt in range(1, 4):
+            logger.debug("ACL request attempt %d/3", attempt)
+            acl_data = await mc.commands.req_acl_sync(contact.public_key, timeout=10, min_timeout=5)
+            if acl_data:
+                break
+            logger.debug("ACL request timeout, retrying...")
 
-    async with pause_polling():
-        await mc.stop_auto_message_fetching()
-        try:
-            for attempt in range(1, 3):
-                logger.debug("Clock request attempt %d/2", attempt)
-                try:
-                    send_result = await mc.commands.send_cmd(contact.public_key, "clock")
-                    if send_result.type == EventType.ERROR:
-                        logger.debug("Clock command send error: %s", send_result.payload)
-                        continue
+        # Process ACL - resolve pubkey prefixes to contact names
+        acl_entries: list[AclEntry] = []
+        if acl_data and isinstance(acl_data, list):
+            logger.info("Received %d ACL entries", len(acl_data))
+            for entry in acl_data:
+                pubkey_prefix = entry.get("key", "")
+                perm = entry.get("perm", 0)
+                # Try to resolve to a contact name from our database
+                resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)
+                acl_entries.append(
+                    AclEntry(
+                        pubkey_prefix=pubkey_prefix,
+                        name=resolved_contact.name if resolved_contact else None,
+                        permission=perm,
+                        permission_name=ACL_PERMISSION_NAMES.get(perm, f"Unknown({perm})"),
+                    )
+                )
 
-                    # Wait for response
-                    wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=5.0)
-                    if wait_result is None:
-                        logger.debug("Clock request timeout, retrying...")
-                        continue
-
-                    response_event = await mc.commands.get_msg()
-                    if response_event.type == EventType.ERROR:
-                        logger.debug("Clock get_msg error: %s", response_event.payload)
-                        continue
-
-                    clock_output = response_event.payload.get("text", "")
-                    logger.info("Received clock output: %s", clock_output)
-                    break
-                except Exception as e:
-                    logger.debug("Clock request exception: %s", e)
+        # Fetch clock output (up to 2 attempts)
+        logger.info("Fetching clock from repeater %s", contact.public_key[:12])
+        clock_output: str | None = None
+        for attempt in range(1, 3):
+            logger.debug("Clock request attempt %d/2", attempt)
+            try:
+                send_result = await mc.commands.send_cmd(contact.public_key, "clock")
+                if send_result.type == EventType.ERROR:
+                    logger.debug("Clock command send error: %s", send_result.payload)
                     continue
-        finally:
-            await mc.start_auto_message_fetching()
+
+                # Wait for response
+                wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=5.0)
+                if wait_result is None:
+                    logger.debug("Clock request timeout, retrying...")
+                    continue
+
+                response_event = await mc.commands.get_msg()
+                if response_event.type == EventType.ERROR:
+                    logger.debug("Clock get_msg error: %s", response_event.payload)
+                    continue
+
+                clock_output = response_event.payload.get("text", "")
+                logger.info("Received clock output: %s", clock_output)
+                break
+            except Exception as e:
+                logger.debug("Clock request exception: %s", e)
+                continue
 
     if clock_output is None:
         clock_output = "Unable to fetch `clock` output (repeater did not respond)"
@@ -469,71 +466,60 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
             detail=f"Contact is not a repeater (type={contact.type}, expected {CONTACT_TYPE_REPEATER})",
         )
 
-    # Pause message polling to prevent it from stealing our response
-    async with pause_polling():
-        # Stop auto-fetch to prevent race condition where it consumes our CLI response
-        # before we can call get_msg(). This was causing every other command to fail
-        # with {'messages_available': False}.
-        await mc.stop_auto_message_fetching()
+    async with radio_manager.radio_operation(
+        "send_repeater_command",
+        meshcore=mc,
+        pause_polling=True,
+        suspend_auto_fetch=True,
+    ):
+        # Add contact to radio with path from DB
+        logger.info("Adding repeater %s to radio", contact.public_key[:12])
+        await mc.commands.add_contact(contact.to_radio_dict())
 
+        # Send the command
+        logger.info("Sending command to repeater %s: %s", contact.public_key[:12], request.command)
+
+        send_result = await mc.commands.send_cmd(contact.public_key, request.command)
+
+        if send_result.type == EventType.ERROR:
+            raise HTTPException(status_code=500, detail=f"Failed to send command: {send_result.payload}")
+
+        # Wait for response (MESSAGES_WAITING event, then get_msg)
         try:
-            # Add contact to radio with path from DB
-            logger.info("Adding repeater %s to radio", contact.public_key[:12])
-            await mc.commands.add_contact(contact.to_radio_dict())
+            wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=10.0)
 
-            # Send the command
-            logger.info(
-                "Sending command to repeater %s: %s", contact.public_key[:12], request.command
-            )
-
-            send_result = await mc.commands.send_cmd(contact.public_key, request.command)
-
-            if send_result.type == EventType.ERROR:
-                raise HTTPException(
-                    status_code=500, detail=f"Failed to send command: {send_result.payload}"
+            if wait_result is None:
+                # Timeout - no response received
+                logger.warning(
+                    "No response from repeater %s for command: %s",
+                    contact.public_key[:12],
+                    request.command,
                 )
-
-            # Wait for response (MESSAGES_WAITING event, then get_msg)
-            try:
-                wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=10.0)
-
-                if wait_result is None:
-                    # Timeout - no response received
-                    logger.warning(
-                        "No response from repeater %s for command: %s",
-                        contact.public_key[:12],
-                        request.command,
-                    )
-                    return CommandResponse(
-                        command=request.command,
-                        response="(no response - command may have been processed)",
-                    )
-
-                response_event = await mc.commands.get_msg()
-
-                if response_event.type == EventType.ERROR:
-                    return CommandResponse(
-                        command=request.command, response=f"(error: {response_event.payload})"
-                    )
-
-                # Extract the response text and timestamp from the payload
-                response_text = response_event.payload.get("text", str(response_event.payload))
-                sender_timestamp = response_event.payload.get("timestamp")
-                logger.info("Received response from %s: %s", contact.public_key[:12], response_text)
-
                 return CommandResponse(
                     command=request.command,
-                    response=response_text,
-                    sender_timestamp=sender_timestamp,
+                    response="(no response - command may have been processed)",
                 )
-            except Exception as e:
-                logger.error("Error waiting for response: %s", e)
-                return CommandResponse(
-                    command=request.command, response=f"(error waiting for response: {e})"
-                )
-        finally:
-            # Always restart auto-fetch, even if an error occurred
-            await mc.start_auto_message_fetching()
+
+            response_event = await mc.commands.get_msg()
+
+            if response_event.type == EventType.ERROR:
+                return CommandResponse(command=request.command, response=f"(error: {response_event.payload})")
+
+            # Extract the response text and timestamp from the payload
+            response_text = response_event.payload.get("text", str(response_event.payload))
+            sender_timestamp = response_event.payload.get("timestamp")
+            logger.info("Received response from %s: %s", contact.public_key[:12], response_text)
+
+            return CommandResponse(
+                command=request.command,
+                response=response_text,
+                sender_timestamp=sender_timestamp,
+            )
+        except Exception as e:
+            logger.error("Error waiting for response: %s", e)
+            return CommandResponse(
+                command=request.command, response=f"(error waiting for response: {e})"
+            )
 
 
 @router.post("/{public_key}/trace", response_model=TraceResponse)
@@ -554,10 +540,9 @@ async def request_trace(public_key: str) -> TraceResponse:
     # First 2 hex chars of pubkey = 1-byte hash used by the trace protocol
     contact_hash = contact.public_key[:2]
 
-    # Note: unlike command/telemetry endpoints, trace does NOT need
-    # stop/start_auto_message_fetching because the response arrives as a
-    # TRACE_DATA event through the reader loop, not via get_msg().
-    async with pause_polling():
+    # Trace does not need auto-fetch suspension: response arrives as TRACE_DATA
+    # from the reader loop, not via get_msg().
+    async with radio_manager.radio_operation("request_trace", pause_polling=True):
         # Ensure contact is on radio so the trace can reach them
         await mc.commands.add_contact(contact.to_radio_dict())
 
