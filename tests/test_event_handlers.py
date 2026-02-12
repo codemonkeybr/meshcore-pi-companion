@@ -1,7 +1,7 @@
 """Tests for event handler logic.
 
 These tests verify the ACK tracking mechanism for direct message
-delivery confirmation.
+delivery confirmation, contact message handling, and event registration.
 """
 
 import time
@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.database import Database
 from app.event_handlers import (
     _active_subscriptions,
     _cleanup_expired_acks,
@@ -16,7 +17,28 @@ from app.event_handlers import (
     register_event_handlers,
     track_pending_ack,
 )
-from app.repository import AmbiguousPublicKeyPrefixError
+from app.repository import (
+    ContactRepository,
+    MessageRepository,
+)
+
+
+@pytest.fixture
+async def test_db():
+    """Create an in-memory test database with schema + migrations."""
+    import app.repository as repo_module
+
+    db = Database(":memory:")
+    await db.connect()
+
+    original_db = repo_module.db
+    repo_module.db = db
+
+    try:
+        yield db
+    finally:
+        repo_module.db = original_db
+        await db.disconnect()
 
 
 @pytest.fixture(autouse=True)
@@ -79,93 +101,93 @@ class TestAckEventHandler:
     """Test the on_ack event handler."""
 
     @pytest.mark.asyncio
-    async def test_ack_matches_pending_message(self):
+    async def test_ack_matches_pending_message(self, test_db):
         """Matching ACK code updates message and broadcasts."""
         from app.event_handlers import on_ack
 
-        # Setup pending ACK
-        track_pending_ack("deadbeef", message_id=123, timeout_ms=10000)
+        # Insert a real message to get a valid ID
+        msg_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Hello",
+            received_at=1700000000,
+            conversation_key="aa" * 32,
+            sender_timestamp=1700000000,
+        )
 
-        # Mock dependencies
-        with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.broadcast_event") as mock_broadcast,
-        ):
-            mock_repo.increment_ack_count = AsyncMock(return_value=1)
+        # Setup pending ACK with the real message ID
+        track_pending_ack("deadbeef", message_id=msg_id, timeout_ms=10000)
 
-            # Create mock event
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
             class MockEvent:
                 payload = {"code": "deadbeef"}
 
             await on_ack(MockEvent())
 
-            # Verify ack count incremented
-            mock_repo.increment_ack_count.assert_called_once_with(123)
+            # Verify ack count incremented (real DB)
+            ack_count = await MessageRepository.get_ack_count(msg_id)
+            assert ack_count == 1
 
             # Verify broadcast sent with ack_count
             mock_broadcast.assert_called_once_with(
-                "message_acked", {"message_id": 123, "ack_count": 1}
+                "message_acked", {"message_id": msg_id, "ack_count": 1}
             )
 
             # Verify pending ACK removed
             assert "deadbeef" not in _pending_acks
 
     @pytest.mark.asyncio
-    async def test_ack_no_match_does_nothing(self):
+    async def test_ack_no_match_does_nothing(self, test_db):
         """Non-matching ACK code is ignored."""
         from app.event_handlers import on_ack
 
-        track_pending_ack("expected", message_id=1, timeout_ms=10000)
+        msg_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Hello",
+            received_at=1700000000,
+            conversation_key="aa" * 32,
+            sender_timestamp=1700000000,
+        )
+        track_pending_ack("expected", message_id=msg_id, timeout_ms=10000)
 
-        with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.broadcast_event") as mock_broadcast,
-        ):
-            mock_repo.increment_ack_count = AsyncMock()
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
             class MockEvent:
                 payload = {"code": "different"}
 
             await on_ack(MockEvent())
 
-            mock_repo.increment_ack_count.assert_not_called()
+            # Ack count should remain 0
+            ack_count = await MessageRepository.get_ack_count(msg_id)
+            assert ack_count == 0
+
             mock_broadcast.assert_not_called()
             assert "expected" in _pending_acks
 
     @pytest.mark.asyncio
-    async def test_ack_empty_code_ignored(self):
+    async def test_ack_empty_code_ignored(self, test_db):
         """ACK with empty code is ignored."""
         from app.event_handlers import on_ack
 
-        with patch("app.event_handlers.MessageRepository") as mock_repo:
-            mock_repo.increment_ack_count = AsyncMock()
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
             class MockEvent:
                 payload = {"code": ""}
 
             await on_ack(MockEvent())
 
-            mock_repo.increment_ack_count.assert_not_called()
+            mock_broadcast.assert_not_called()
 
 
 class TestContactMessageCLIFiltering:
-    """Test that CLI responses (txt_type=1) are filtered out.
-
-    This prevents duplicate messages when sending CLI commands to repeaters:
-    the command endpoint returns the response directly, so we must NOT also
-    persist/broadcast it via the normal message handler.
-    """
+    """Test that CLI responses (txt_type=1) are filtered out."""
 
     @pytest.mark.asyncio
-    async def test_cli_response_skipped_not_stored(self):
+    async def test_cli_response_skipped_not_stored(self, test_db):
         """CLI responses (txt_type=1) are not stored in database."""
         from app.event_handlers import on_contact_message
 
-        with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
-            patch("app.event_handlers.broadcast_event") as mock_broadcast,
-        ):
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
             class MockEvent:
                 payload = {
@@ -177,15 +199,15 @@ class TestContactMessageCLIFiltering:
 
             await on_contact_message(MockEvent())
 
-            # Should NOT store in database
-            mock_repo.create.assert_not_called()
             # Should NOT broadcast via WebSocket
             mock_broadcast.assert_not_called()
-            # Should NOT update contact last_contacted
-            mock_contact_repo.update_last_contacted.assert_not_called()
+
+            # Should NOT have stored anything in DB
+            messages = await MessageRepository.get_all()
+            assert len(messages) == 0
 
     @pytest.mark.asyncio
-    async def test_normal_message_schedules_bot_in_background(self):
+    async def test_normal_message_schedules_bot_in_background(self, test_db):
         """Normal messages should schedule bot execution without blocking."""
         from app.event_handlers import on_contact_message
 
@@ -194,14 +216,10 @@ class TestContactMessageCLIFiltering:
             return MagicMock()
 
         with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event"),
             patch("app.event_handlers.asyncio.create_task", side_effect=_capture_task) as mock_task,
             patch("app.bot.run_bot_for_message", new_callable=AsyncMock) as mock_bot,
         ):
-            mock_repo.create = AsyncMock(return_value=42)
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=None)
 
             class MockEvent:
                 payload = {
@@ -217,18 +235,14 @@ class TestContactMessageCLIFiltering:
             mock_bot.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_normal_message_still_processed(self):
+    async def test_normal_message_still_processed(self, test_db):
         """Normal messages (txt_type=0) are still processed normally."""
         from app.event_handlers import on_contact_message
 
         with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
             patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
-            mock_repo.create = AsyncMock(return_value=42)
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=None)
 
             class MockEvent:
                 payload = {
@@ -240,24 +254,23 @@ class TestContactMessageCLIFiltering:
 
             await on_contact_message(MockEvent())
 
-            # SHOULD store in database
-            mock_repo.create.assert_called_once()
+            # SHOULD be stored in database
+            messages = await MessageRepository.get_all()
+            assert len(messages) == 1
+            assert messages[0].text == "Hello, this is a normal message"
+
             # SHOULD broadcast via WebSocket
             mock_broadcast.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_broadcast_payload_has_correct_acked_type(self):
+    async def test_broadcast_payload_has_correct_acked_type(self, test_db):
         """Broadcast payload should have acked as integer 0, not boolean False."""
         from app.event_handlers import on_contact_message
 
         with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
             patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
-            mock_repo.create = AsyncMock(return_value=42)
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=None)
 
             class MockEvent:
                 payload = {
@@ -281,18 +294,14 @@ class TestContactMessageCLIFiltering:
             assert isinstance(payload["acked"], int)
 
     @pytest.mark.asyncio
-    async def test_missing_txt_type_defaults_to_normal(self):
+    async def test_missing_txt_type_defaults_to_normal(self, test_db):
         """Messages without txt_type field are treated as normal (not filtered)."""
         from app.event_handlers import on_contact_message
 
         with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event"),
             patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
-            mock_repo.create = AsyncMock(return_value=42)
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=None)
 
             class MockEvent:
                 payload = {
@@ -305,29 +314,36 @@ class TestContactMessageCLIFiltering:
             await on_contact_message(MockEvent())
 
             # SHOULD still be processed (defaults to txt_type=0)
-            mock_repo.create.assert_called_once()
+            messages = await MessageRepository.get_all()
+            assert len(messages) == 1
 
     @pytest.mark.asyncio
-    async def test_ambiguous_prefix_stores_dm_under_prefix(self):
+    async def test_ambiguous_prefix_stores_dm_under_prefix(self, test_db):
         """Ambiguous sender prefixes should still be stored under the prefix key."""
         from app.event_handlers import on_contact_message
 
+        # Insert two contacts that share the same prefix to trigger ambiguity
+        await ContactRepository.upsert(
+            {
+                "public_key": "abc123" + "00" * 29,
+                "name": "ContactA",
+                "type": 1,
+                "flags": 0,
+            }
+        )
+        await ContactRepository.upsert(
+            {
+                "public_key": "abc123" + "ff" * 29,
+                "name": "ContactB",
+                "type": 1,
+                "flags": 0,
+            }
+        )
+
         with (
-            patch("app.event_handlers.MessageRepository") as mock_repo,
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
             patch("app.bot.run_bot_for_message", new_callable=AsyncMock),
         ):
-            mock_repo.create = AsyncMock(return_value=77)
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(
-                side_effect=AmbiguousPublicKeyPrefixError(
-                    "abc123",
-                    [
-                        "abc1230000000000000000000000000000000000000000000000000000000000",
-                        "abc123ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                    ],
-                )
-            )
 
             class MockEvent:
                 payload = {
@@ -339,8 +355,10 @@ class TestContactMessageCLIFiltering:
 
             await on_contact_message(MockEvent())
 
-            mock_repo.create.assert_called_once()
-            assert mock_repo.create.await_args.kwargs["conversation_key"] == "abc123"
+            # Should store in DB under the prefix key
+            messages = await MessageRepository.get_all()
+            assert len(messages) == 1
+            assert messages[0].conversation_key == "abc123"
 
             mock_broadcast.assert_called_once()
             _, payload = mock_broadcast.call_args.args
@@ -414,7 +432,6 @@ class TestEventHandlerRegistration:
         mock_meshcore.subscribe.return_value = MagicMock()
 
         # Create subscriptions where unsubscribe raises an exception
-        # (simulates old dispatcher being in a bad state after reconnect)
         bad_sub = MagicMock()
         bad_sub.unsubscribe.side_effect = RuntimeError("Dispatcher is dead")
         _active_subscriptions.append(bad_sub)
@@ -437,86 +454,92 @@ class TestOnPathUpdate:
     """Test the on_path_update event handler."""
 
     @pytest.mark.asyncio
-    async def test_updates_path_for_existing_contact(self):
+    async def test_updates_path_for_existing_contact(self, test_db):
         """Path is updated when the contact exists in the database."""
         from app.event_handlers import on_path_update
 
-        mock_contact = MagicMock()
-        mock_contact.public_key = "aa" * 32
+        await ContactRepository.upsert(
+            {
+                "public_key": "aa" * 32,
+                "name": "Alice",
+                "type": 1,
+                "flags": 0,
+            }
+        )
 
-        with patch("app.event_handlers.ContactRepository") as mock_repo:
-            mock_repo.get_by_key_prefix = AsyncMock(return_value=mock_contact)
-            mock_repo.update_path = AsyncMock()
+        class MockEvent:
+            payload = {
+                "pubkey_prefix": "aaaaaa",
+                "path": "0102",
+                "path_len": 2,
+            }
 
-            class MockEvent:
-                payload = {
-                    "pubkey_prefix": "aaaaaa",
-                    "path": "0102",
-                    "path_len": 2,
-                }
+        await on_path_update(MockEvent())
 
-            await on_path_update(MockEvent())
-
-            mock_repo.get_by_key_prefix.assert_called_once_with("aaaaaa")
-            mock_repo.update_path.assert_called_once_with("aa" * 32, "0102", 2)
+        # Verify path was updated in DB
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_path == "0102"
+        assert contact.last_path_len == 2
 
     @pytest.mark.asyncio
-    async def test_does_nothing_when_contact_not_found(self):
+    async def test_does_nothing_when_contact_not_found(self, test_db):
         """No update is attempted when the contact is not in the database."""
         from app.event_handlers import on_path_update
 
-        with patch("app.event_handlers.ContactRepository") as mock_repo:
-            mock_repo.get_by_key_prefix = AsyncMock(return_value=None)
-            mock_repo.update_path = AsyncMock()
+        class MockEvent:
+            payload = {
+                "pubkey_prefix": "unknown",
+                "path": "0102",
+                "path_len": 2,
+            }
 
-            class MockEvent:
-                payload = {
-                    "pubkey_prefix": "unknown",
-                    "path": "0102",
-                    "path_len": 2,
-                }
-
-            await on_path_update(MockEvent())
-
-            mock_repo.get_by_key_prefix.assert_called_once_with("unknown")
-            mock_repo.update_path.assert_not_called()
+        # Should not raise
+        await on_path_update(MockEvent())
 
     @pytest.mark.asyncio
-    async def test_uses_defaults_for_missing_payload_fields(self):
+    async def test_uses_defaults_for_missing_payload_fields(self, test_db):
         """Missing payload fields fall back to defaults (empty path, -1 length)."""
         from app.event_handlers import on_path_update
 
-        mock_contact = MagicMock()
-        mock_contact.public_key = "bb" * 32
+        await ContactRepository.upsert(
+            {
+                "public_key": "bb" * 32,
+                "name": "Bob",
+                "type": 1,
+                "flags": 0,
+            }
+        )
 
-        with patch("app.event_handlers.ContactRepository") as mock_repo:
-            mock_repo.get_by_key_prefix = AsyncMock(return_value=mock_contact)
-            mock_repo.update_path = AsyncMock()
+        class MockEvent:
+            payload = {}
 
-            class MockEvent:
-                payload = {}
+        await on_path_update(MockEvent())
 
-            await on_path_update(MockEvent())
-
-            mock_repo.get_by_key_prefix.assert_called_once_with("")
-            mock_repo.update_path.assert_called_once_with("bb" * 32, "", -1)
+        # With empty prefix, get_by_key_prefix("") should return None since
+        # no key starts with "" uniquely (if multiple contacts exist) or
+        # the single contact if only one. But with prefix="", the LIKE query
+        # matches all contacts. With exactly one contact, it returns it.
+        # The update_path call sets path="" and path_len=-1.
+        contact = await ContactRepository.get_by_key("bb" * 32)
+        assert contact is not None
+        assert contact.last_path == ""
+        assert contact.last_path_len == -1
 
 
 class TestOnNewContact:
     """Test the on_new_contact event handler."""
 
     @pytest.mark.asyncio
-    async def test_creates_contact_and_broadcasts(self):
+    async def test_creates_contact_and_broadcasts(self, test_db):
         """Valid new contact is upserted and broadcast via WebSocket."""
         from app.event_handlers import on_new_contact
 
         with (
-            patch("app.event_handlers.ContactRepository") as mock_repo,
             patch("app.event_handlers.broadcast_event") as mock_broadcast,
             patch("app.event_handlers.time") as mock_time,
         ):
             mock_time.time.return_value = 1700000000
-            mock_repo.upsert = AsyncMock()
 
             class MockEvent:
                 payload = {
@@ -528,13 +551,12 @@ class TestOnNewContact:
 
             await on_new_contact(MockEvent())
 
-            mock_repo.upsert.assert_called_once()
-            upserted_data = mock_repo.upsert.call_args[0][0]
-
-            assert upserted_data["public_key"] == "cc" * 32
-            assert upserted_data["name"] == "Charlie"
-            assert upserted_data["on_radio"] is True
-            assert upserted_data["last_seen"] == 1700000000
+            # Verify contact was created in real DB
+            contact = await ContactRepository.get_by_key("cc" * 32)
+            assert contact is not None
+            assert contact.name == "Charlie"
+            assert contact.on_radio is True
+            assert contact.last_seen == 1700000000
 
             mock_broadcast.assert_called_once()
             event_type, contact_data = mock_broadcast.call_args[0]
@@ -542,55 +564,50 @@ class TestOnNewContact:
             assert contact_data["public_key"] == "cc" * 32
 
     @pytest.mark.asyncio
-    async def test_returns_early_on_empty_public_key(self):
+    async def test_returns_early_on_empty_public_key(self, test_db):
         """Handler exits without upserting when public_key is empty."""
         from app.event_handlers import on_new_contact
 
-        with (
-            patch("app.event_handlers.ContactRepository") as mock_repo,
-            patch("app.event_handlers.broadcast_event") as mock_broadcast,
-        ):
-            mock_repo.upsert = AsyncMock()
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
             class MockEvent:
                 payload = {"public_key": "", "adv_name": "Ghost"}
 
             await on_new_contact(MockEvent())
 
-            mock_repo.upsert.assert_not_called()
             mock_broadcast.assert_not_called()
 
+            # No contacts should exist
+            contacts = await ContactRepository.get_all()
+            assert len(contacts) == 0
+
     @pytest.mark.asyncio
-    async def test_returns_early_on_missing_public_key(self):
+    async def test_returns_early_on_missing_public_key(self, test_db):
         """Handler exits without upserting when public_key field is absent."""
         from app.event_handlers import on_new_contact
 
-        with (
-            patch("app.event_handlers.ContactRepository") as mock_repo,
-            patch("app.event_handlers.broadcast_event") as mock_broadcast,
-        ):
-            mock_repo.upsert = AsyncMock()
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
             class MockEvent:
                 payload = {"adv_name": "NoKey"}
 
             await on_new_contact(MockEvent())
 
-            mock_repo.upsert.assert_not_called()
             mock_broadcast.assert_not_called()
 
+            contacts = await ContactRepository.get_all()
+            assert len(contacts) == 0
+
     @pytest.mark.asyncio
-    async def test_sets_on_radio_true(self):
+    async def test_sets_on_radio_true(self, test_db):
         """Contact data passed to upsert has on_radio=True."""
         from app.event_handlers import on_new_contact
 
         with (
-            patch("app.event_handlers.ContactRepository") as mock_repo,
             patch("app.event_handlers.broadcast_event"),
             patch("app.event_handlers.time") as mock_time,
         ):
             mock_time.time.return_value = 1700000000
-            mock_repo.upsert = AsyncMock()
 
             class MockEvent:
                 payload = {
@@ -602,21 +619,20 @@ class TestOnNewContact:
 
             await on_new_contact(MockEvent())
 
-            upserted_data = mock_repo.upsert.call_args[0][0]
-            assert upserted_data["on_radio"] is True
+            contact = await ContactRepository.get_by_key("dd" * 32)
+            assert contact is not None
+            assert contact.on_radio is True
 
     @pytest.mark.asyncio
-    async def test_sets_last_seen_to_current_timestamp(self):
+    async def test_sets_last_seen_to_current_timestamp(self, test_db):
         """Contact data includes last_seen set to current time."""
         from app.event_handlers import on_new_contact
 
         with (
-            patch("app.event_handlers.ContactRepository") as mock_repo,
             patch("app.event_handlers.broadcast_event"),
             patch("app.event_handlers.time") as mock_time,
         ):
             mock_time.time.return_value = 1700099999
-            mock_repo.upsert = AsyncMock()
 
             class MockEvent:
                 payload = {
@@ -628,5 +644,6 @@ class TestOnNewContact:
 
             await on_new_contact(MockEvent())
 
-            upserted_data = mock_repo.upsert.call_args[0][0]
-            assert upserted_data["last_seen"] == 1700099999
+            contact = await ContactRepository.get_by_key("ee" * 32)
+            assert contact is not None
+            assert contact.last_seen == 1700099999

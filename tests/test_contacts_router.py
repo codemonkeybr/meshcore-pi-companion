@@ -3,13 +3,17 @@
 Verifies the contact CRUD endpoints, sync, mark-read, delete,
 and add/remove from radio operations.
 
-Uses FastAPI TestClient with mocked dependencies, consistent
-with the test_api.py pattern.
+Uses httpx.AsyncClient with real in-memory SQLite database.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import pytest
 from meshcore import EventType
+
+from app.database import Database
+from app.repository import ContactRepository
 
 # Sample 64-char hex public keys for testing
 KEY_A = "aa" * 32  # aaaa...aa
@@ -17,11 +21,27 @@ KEY_B = "bb" * 32  # bbbb...bb
 KEY_C = "cc" * 32  # cccc...cc
 
 
-def _make_contact(public_key=KEY_A, name="Alice", **overrides):
-    """Create a mock Contact model instance."""
-    from app.models import Contact
+@pytest.fixture
+async def test_db():
+    """Create an in-memory test database with schema + migrations."""
+    import app.repository as repo_module
 
-    defaults = {
+    db = Database(":memory:")
+    await db.connect()
+
+    original_db = repo_module.db
+    repo_module.db = db
+
+    try:
+        yield db
+    finally:
+        repo_module.db = original_db
+        await db.disconnect()
+
+
+async def _insert_contact(public_key=KEY_A, name="Alice", on_radio=False, **overrides):
+    """Insert a contact into the test database."""
+    data = {
         "public_key": public_key,
         "name": name,
         "type": 0,
@@ -32,214 +52,135 @@ def _make_contact(public_key=KEY_A, name="Alice", **overrides):
         "lat": None,
         "lon": None,
         "last_seen": None,
-        "on_radio": False,
+        "on_radio": on_radio,
         "last_contacted": None,
-        "last_read_at": None,
     }
-    defaults.update(overrides)
-    return Contact(**defaults)
+    data.update(overrides)
+    await ContactRepository.upsert(data)
+
+
+@pytest.fixture
+def client():
+    """Create an httpx AsyncClient for testing the app."""
+    from app.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
 class TestListContacts:
     """Test GET /api/contacts."""
 
-    def test_list_returns_contacts(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_list_returns_contacts(self, test_db, client):
+        await _insert_contact(KEY_A, "Alice")
+        await _insert_contact(KEY_B, "Bob")
 
-        contacts = [_make_contact(KEY_A, "Alice"), _make_contact(KEY_B, "Bob")]
-
-        with patch(
-            "app.routers.contacts.ContactRepository.get_all",
-            new_callable=AsyncMock,
-            return_value=contacts,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.get("/api/contacts")
+        response = await client.get("/api/contacts")
 
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
-        assert data[0]["public_key"] == KEY_A
-        assert data[1]["public_key"] == KEY_B
+        keys = {d["public_key"] for d in data}
+        assert KEY_A in keys
+        assert KEY_B in keys
 
-    def test_list_pagination_params(self):
-        """Pagination parameters are forwarded to repository."""
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_list_pagination_params(self, test_db, client):
+        # Insert 3 contacts
+        await _insert_contact(KEY_A, "Alice")
+        await _insert_contact(KEY_B, "Bob")
+        await _insert_contact(KEY_C, "Carol")
 
-        with patch(
-            "app.routers.contacts.ContactRepository.get_all",
-            new_callable=AsyncMock,
-            return_value=[],
-        ) as mock_get_all:
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.get("/api/contacts?limit=5&offset=10")
+        response = await client.get("/api/contacts?limit=2&offset=0")
 
         assert response.status_code == 200
-        mock_get_all.assert_called_once_with(limit=5, offset=10)
+        data = response.json()
+        assert len(data) == 2
 
 
 class TestCreateContact:
     """Test POST /api/contacts."""
 
-    def test_create_new_contact(self):
-        from fastapi.testclient import TestClient
-
-        with (
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.upsert",
-                new_callable=AsyncMock,
-            ) as mock_upsert,
-            patch(
-                "app.routers.contacts.MessageRepository.claim_prefix_messages",
-                new_callable=AsyncMock,
-                return_value=0,
-            ),
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(
-                "/api/contacts",
-                json={"public_key": KEY_A, "name": "NewContact"},
-            )
+    @pytest.mark.asyncio
+    async def test_create_new_contact(self, test_db, client):
+        response = await client.post(
+            "/api/contacts",
+            json={"public_key": KEY_A, "name": "NewContact"},
+        )
 
         assert response.status_code == 200
         data = response.json()
         assert data["public_key"] == KEY_A
         assert data["name"] == "NewContact"
-        mock_upsert.assert_called_once()
 
-    def test_create_invalid_hex(self):
+        # Verify in DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact is not None
+        assert contact.name == "NewContact"
+
+    @pytest.mark.asyncio
+    async def test_create_invalid_hex(self, test_db, client):
         """Non-hex public key returns 400."""
-        from fastapi.testclient import TestClient
-
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(
-                "/api/contacts",
-                json={"public_key": "zz" * 32, "name": "Bad"},
-            )
+        response = await client.post(
+            "/api/contacts",
+            json={"public_key": "zz" * 32, "name": "Bad"},
+        )
 
         assert response.status_code == 400
         assert "hex" in response.json()["detail"].lower()
 
-    def test_create_short_key_rejected(self):
+    @pytest.mark.asyncio
+    async def test_create_short_key_rejected(self, test_db, client):
         """Key shorter than 64 chars is rejected by pydantic validation."""
-        from fastapi.testclient import TestClient
-
-        from app.main import app
-
-        client = TestClient(app)
-        response = client.post(
+        response = await client.post(
             "/api/contacts",
             json={"public_key": "aa" * 16, "name": "Short"},
         )
 
         assert response.status_code == 422
 
-    def test_create_existing_updates_name(self):
+    @pytest.mark.asyncio
+    async def test_create_existing_updates_name(self, test_db, client):
         """Creating a contact that exists updates the name."""
-        from fastapi.testclient import TestClient
+        await _insert_contact(KEY_A, "OldName")
 
-        existing = _make_contact(KEY_A, "OldName")
-
-        with (
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key",
-                new_callable=AsyncMock,
-                return_value=existing,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.upsert",
-                new_callable=AsyncMock,
-            ) as mock_upsert,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(
-                "/api/contacts",
-                json={"public_key": KEY_A, "name": "NewName"},
-            )
+        response = await client.post(
+            "/api/contacts",
+            json={"public_key": KEY_A, "name": "NewName"},
+        )
 
         assert response.status_code == 200
-        # Upsert called with new name
-        mock_upsert.assert_called_once()
-        upsert_data = mock_upsert.call_args[0][0]
-        assert upsert_data["name"] == "NewName"
+        # Verify name was updated in DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact.name == "NewName"
 
 
 class TestGetContact:
     """Test GET /api/contacts/{public_key}."""
 
-    def test_get_existing(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_get_existing(self, test_db, client):
+        await _insert_contact(KEY_A, "Alice")
 
-        contact = _make_contact(KEY_A, "Alice")
-
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-            new_callable=AsyncMock,
-            return_value=contact,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.get(f"/api/contacts/{KEY_A}")
+        response = await client.get(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 200
         assert response.json()["name"] == "Alice"
 
-    def test_get_not_found(self):
-        from fastapi.testclient import TestClient
-
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.get(f"/api/contacts/{KEY_A}")
+    @pytest.mark.asyncio
+    async def test_get_not_found(self, test_db, client):
+        response = await client.get(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 404
 
-    def test_get_ambiguous_prefix_returns_409(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_get_ambiguous_prefix_returns_409(self, test_db, client):
+        # Insert two contacts that share a prefix
+        await _insert_contact("abcd12" + "00" * 29, "ContactA")
+        await _insert_contact("abcd12" + "ff" * 29, "ContactB")
 
-        from app.repository import AmbiguousPublicKeyPrefixError
-
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-            new_callable=AsyncMock,
-            side_effect=AmbiguousPublicKeyPrefixError(
-                "abcd12",
-                [
-                    "abcd120000000000000000000000000000000000000000000000000000000000",
-                    "abcd12ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                ],
-            ),
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.get("/api/contacts/abcd12")
+        response = await client.get("/api/contacts/abcd12")
 
         assert response.status_code == 409
         assert "ambiguous" in response.json()["detail"].lower()
@@ -248,43 +189,22 @@ class TestGetContact:
 class TestMarkRead:
     """Test POST /api/contacts/{public_key}/mark-read."""
 
-    def test_mark_read_updates_timestamp(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_mark_read_updates_timestamp(self, test_db, client):
+        await _insert_contact(KEY_A)
 
-        contact = _make_contact(KEY_A)
-
-        with (
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.update_last_read_at",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/mark-read")
+        response = await client.post(f"/api/contacts/{KEY_A}/mark-read")
 
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
-    def test_mark_read_not_found(self):
-        from fastapi.testclient import TestClient
+        # Verify last_read_at was set in DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact.last_read_at is not None
 
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/mark-read")
+    @pytest.mark.asyncio
+    async def test_mark_read_not_found(self, test_db, client):
+        response = await client.post(f"/api/contacts/{KEY_A}/mark-read")
 
         assert response.status_code == 404
 
@@ -292,79 +212,44 @@ class TestMarkRead:
 class TestDeleteContact:
     """Test DELETE /api/contacts/{public_key}."""
 
-    def test_delete_existing(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_delete_existing(self, test_db, client):
+        await _insert_contact(KEY_A)
 
-        contact = _make_contact(KEY_A)
-
-        with (
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.delete",
-                new_callable=AsyncMock,
-            ),
-            patch("app.routers.contacts.radio_manager") as mock_rm,
-        ):
+        with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = False
             mock_rm.meshcore = None
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.delete(f"/api/contacts/{KEY_A}")
+            response = await client.delete(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
-    def test_delete_not_found(self):
-        from fastapi.testclient import TestClient
+        # Verify deleted from DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact is None
 
-        with patch(
-            "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-            new_callable=AsyncMock,
-            return_value=None,
-        ):
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.delete(f"/api/contacts/{KEY_A}")
+    @pytest.mark.asyncio
+    async def test_delete_not_found(self, test_db, client):
+        response = await client.delete(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 404
 
-    def test_delete_removes_from_radio_if_connected(self):
+    @pytest.mark.asyncio
+    async def test_delete_removes_from_radio_if_connected(self, test_db, client):
         """When radio is connected and contact is on radio, remove it first."""
-        from fastapi.testclient import TestClient
-
-        contact = _make_contact(KEY_A, on_radio=True)
+        await _insert_contact(KEY_A, on_radio=True)
         mock_radio_contact = MagicMock()
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=mock_radio_contact)
         mock_mc.commands.remove_contact = AsyncMock()
 
-        with (
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.delete",
-                new_callable=AsyncMock,
-            ),
-            patch("app.routers.contacts.radio_manager") as mock_rm,
-        ):
+        with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = True
             mock_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.delete(f"/api/contacts/{KEY_A}")
+            response = await client.delete(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 200
         mock_mc.commands.remove_contact.assert_called_once_with(mock_radio_contact)
@@ -373,9 +258,8 @@ class TestDeleteContact:
 class TestSyncContacts:
     """Test POST /api/contacts/sync."""
 
-    def test_sync_from_radio(self):
-        from fastapi.testclient import TestClient
-
+    @pytest.mark.asyncio
+    async def test_sync_from_radio(self, test_db, client):
         mock_mc = MagicMock()
         mock_result = MagicMock()
         mock_result.type = EventType.OK
@@ -385,35 +269,27 @@ class TestSyncContacts:
         }
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
 
-        with (
-            patch("app.dependencies.radio_manager") as mock_dep_rm,
-            patch(
-                "app.routers.contacts.ContactRepository.upsert", new_callable=AsyncMock
-            ) as mock_upsert,
-        ):
+        with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
             mock_dep_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post("/api/contacts/sync")
+            response = await client.post("/api/contacts/sync")
 
         assert response.status_code == 200
         assert response.json()["synced"] == 2
-        assert mock_upsert.call_count == 2
 
-    def test_sync_requires_connection(self):
-        from fastapi.testclient import TestClient
+        # Verify contacts are in real DB
+        alice = await ContactRepository.get_by_key(KEY_A)
+        assert alice is not None
+        assert alice.name == "Alice"
 
+    @pytest.mark.asyncio
+    async def test_sync_requires_connection(self, test_db, client):
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = False
             mock_rm.meshcore = None
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post("/api/contacts/sync")
+            response = await client.post("/api/contacts/sync")
 
         assert response.status_code == 503
 
@@ -421,71 +297,50 @@ class TestSyncContacts:
 class TestAddRemoveRadio:
     """Test add-to-radio and remove-from-radio endpoints."""
 
-    def test_add_to_radio(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_add_to_radio(self, test_db, client):
+        await _insert_contact(KEY_A)
 
-        contact = _make_contact(KEY_A)
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)  # Not on radio
         mock_result = MagicMock()
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        with (
-            patch("app.dependencies.radio_manager") as mock_dep_rm,
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.set_on_radio",
-                new_callable=AsyncMock,
-            ) as mock_set_on_radio,
-        ):
+        with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
             mock_dep_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/add-to-radio")
+            response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
         assert response.status_code == 200
         mock_mc.commands.add_contact.assert_called_once()
-        mock_set_on_radio.assert_called_once_with(KEY_A, True)
 
-    def test_add_already_on_radio(self):
+        # Verify on_radio flag updated in DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact.on_radio is True
+
+    @pytest.mark.asyncio
+    async def test_add_already_on_radio(self, test_db, client):
         """Adding a contact already on radio returns ok without calling add_contact."""
-        from fastapi.testclient import TestClient
+        await _insert_contact(KEY_A, on_radio=True)
 
-        contact = _make_contact(KEY_A, on_radio=True)
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=MagicMock())  # On radio
 
-        with (
-            patch("app.dependencies.radio_manager") as mock_dep_rm,
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-        ):
+        with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
             mock_dep_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/add-to-radio")
+            response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
         assert response.status_code == 200
         assert "already" in response.json()["message"].lower()
 
-    def test_remove_from_radio(self):
-        from fastapi.testclient import TestClient
+    @pytest.mark.asyncio
+    async def test_remove_from_radio(self, test_db, client):
+        await _insert_contact(KEY_A, on_radio=True)
 
-        contact = _make_contact(KEY_A, on_radio=True)
         mock_radio_contact = MagicMock()
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=mock_radio_contact)
@@ -493,63 +348,37 @@ class TestAddRemoveRadio:
         mock_result.type = EventType.OK
         mock_mc.commands.remove_contact = AsyncMock(return_value=mock_result)
 
-        with (
-            patch("app.dependencies.radio_manager") as mock_dep_rm,
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.set_on_radio",
-                new_callable=AsyncMock,
-            ) as mock_set_on_radio,
-        ):
+        with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
             mock_dep_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
+            response = await client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
 
         assert response.status_code == 200
         mock_mc.commands.remove_contact.assert_called_once_with(mock_radio_contact)
-        mock_set_on_radio.assert_called_once_with(KEY_A, False)
 
-    def test_add_requires_connection(self):
-        from fastapi.testclient import TestClient
+        # Verify on_radio flag updated in DB
+        contact = await ContactRepository.get_by_key(KEY_A)
+        assert contact.on_radio is False
 
+    @pytest.mark.asyncio
+    async def test_add_requires_connection(self, test_db, client):
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = False
             mock_rm.meshcore = None
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/add-to-radio")
+            response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
         assert response.status_code == 503
 
-    def test_remove_not_found(self):
-        from fastapi.testclient import TestClient
-
+    @pytest.mark.asyncio
+    async def test_remove_not_found(self, test_db, client):
         mock_mc = MagicMock()
 
-        with (
-            patch("app.dependencies.radio_manager") as mock_dep_rm,
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
+        with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
             mock_dep_rm.meshcore = mock_mc
 
-            from app.main import app
-
-            client = TestClient(app)
-            response = client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
+            response = await client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
 
         assert response.status_code == 404

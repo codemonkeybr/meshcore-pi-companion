@@ -6,10 +6,30 @@ import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 
-from app.models import CommandRequest, Contact, TelemetryRequest
+from app.database import Database
+from app.models import CommandRequest, TelemetryRequest
+from app.repository import ContactRepository
 from app.routers.contacts import request_telemetry, request_trace, send_repeater_command
 
 KEY_A = "aa" * 32
+
+
+@pytest.fixture
+async def test_db():
+    """Create an in-memory test database with schema + migrations."""
+    import app.repository as repo_module
+
+    db = Database(":memory:")
+    await db.connect()
+
+    original_db = repo_module.db
+    repo_module.db = db
+
+    try:
+        yield db
+    finally:
+        repo_module.db = original_db
+        await db.disconnect()
 
 
 def _radio_result(event_type=EventType.OK, payload=None):
@@ -19,8 +39,24 @@ def _radio_result(event_type=EventType.OK, payload=None):
     return result
 
 
-def _make_contact(public_key: str, contact_type: int, name: str = "Node") -> Contact:
-    return Contact(public_key=public_key, name=name, type=contact_type)
+async def _insert_contact(public_key: str, name: str = "Node", contact_type: int = 0):
+    """Insert a contact into the test database."""
+    await ContactRepository.upsert(
+        {
+            "public_key": public_key,
+            "name": name,
+            "type": contact_type,
+            "flags": 0,
+            "last_path": None,
+            "last_path_len": -1,
+            "last_advert": None,
+            "lat": None,
+            "lon": None,
+            "last_seen": None,
+            "on_radio": False,
+            "last_contacted": None,
+        }
+    )
 
 
 def _mock_mc():
@@ -41,33 +77,20 @@ def _mock_mc():
 
 class TestTelemetryRoute:
     @pytest.mark.asyncio
-    async def test_returns_404_when_contact_missing(self):
+    async def test_returns_404_when_contact_missing(self, test_db):
         mc = _mock_mc()
-        with (
-            patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
+        with patch("app.routers.contacts.require_connected", return_value=mc):
             with pytest.raises(HTTPException) as exc:
                 await request_telemetry(KEY_A, TelemetryRequest(password="pw"))
 
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_returns_400_for_non_repeater_contact(self):
+    async def test_returns_400_for_non_repeater_contact(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=1, name="Client")
-        with (
-            patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-        ):
+        await _insert_contact(KEY_A, name="Client", contact_type=1)
+
+        with patch("app.routers.contacts.require_connected", return_value=mc):
             with pytest.raises(HTTPException) as exc:
                 await request_telemetry(KEY_A, TelemetryRequest(password="pw"))
 
@@ -75,18 +98,13 @@ class TestTelemetryRoute:
         assert "not a repeater" in exc.value.detail.lower()
 
     @pytest.mark.asyncio
-    async def test_status_retry_timeout_returns_504(self):
+    async def test_status_retry_timeout_returns_504(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=2, name="Repeater")
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
         mc.commands.req_status_sync = AsyncMock(side_effect=[None, None, None])
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
             patch(
                 "app.routers.contacts.prepare_repeater_connection",
                 new_callable=AsyncMock,
@@ -100,9 +118,9 @@ class TestTelemetryRoute:
         mock_prepare.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_clock_timeout_uses_fallback_message_and_restores_auto_fetch(self):
+    async def test_clock_timeout_uses_fallback_message_and_restores_auto_fetch(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=2, name="Repeater")
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
         mc.commands.req_status_sync = AsyncMock(
             return_value={
                 "pubkey_pre": "aaaaaaaaaaaa",
@@ -119,16 +137,6 @@ class TestTelemetryRoute:
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_prefix",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
             patch(
                 "app.routers.contacts.prepare_repeater_connection",
                 new_callable=AsyncMock,
@@ -147,21 +155,14 @@ class TestTelemetryRoute:
 
 class TestRepeaterCommandRoute:
     @pytest.mark.asyncio
-    async def test_send_cmd_error_raises_and_restores_auto_fetch(self):
+    async def test_send_cmd_error_raises_and_restores_auto_fetch(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=2, name="Repeater")
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
         mc.commands.send_cmd = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "bad"})
         )
 
-        with (
-            patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-        ):
+        with patch("app.routers.contacts.require_connected", return_value=mc):
             with pytest.raises(HTTPException) as exc:
                 await send_repeater_command(KEY_A, CommandRequest(command="ver"))
 
@@ -169,20 +170,13 @@ class TestRepeaterCommandRoute:
         mc.start_auto_message_fetching.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_no_response_message(self):
+    async def test_timeout_returns_no_response_message(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=2, name="Repeater")
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
         mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(return_value=None)
 
-        with (
-            patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-        ):
+        with patch("app.routers.contacts.require_connected", return_value=mc):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
 
         assert response.command == "ver"
@@ -190,9 +184,9 @@ class TestRepeaterCommandRoute:
         mc.start_auto_message_fetching.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_success_returns_command_response_text_and_timestamp(self):
+    async def test_success_returns_command_response_text_and_timestamp(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=2, name="Repeater")
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
         mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(return_value=MagicMock())
         mc.commands.get_msg = AsyncMock(
@@ -202,14 +196,7 @@ class TestRepeaterCommandRoute:
             )
         )
 
-        with (
-            patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
-        ):
+        with patch("app.routers.contacts.require_connected", return_value=mc):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
 
         assert response.command == "ver"
@@ -219,20 +206,15 @@ class TestRepeaterCommandRoute:
 
 class TestTraceRoute:
     @pytest.mark.asyncio
-    async def test_send_trace_error_returns_500(self):
+    async def test_send_trace_error_returns_500(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=1, name="Client")
+        await _insert_contact(KEY_A, name="Client", contact_type=1)
         mc.commands.send_trace = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "x"})
         )
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -241,19 +223,14 @@ class TestTraceRoute:
         assert exc.value.status_code == 500
 
     @pytest.mark.asyncio
-    async def test_wait_timeout_returns_504(self):
+    async def test_wait_timeout_returns_504(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=1, name="Client")
+        await _insert_contact(KEY_A, name="Client", contact_type=1)
         mc.commands.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -262,9 +239,9 @@ class TestTraceRoute:
         assert exc.value.status_code == 504
 
     @pytest.mark.asyncio
-    async def test_success_returns_remote_and_local_snr(self):
+    async def test_success_returns_remote_and_local_snr(self, test_db):
         mc = _mock_mc()
-        contact = _make_contact(KEY_A, contact_type=1, name="Client")
+        await _insert_contact(KEY_A, name="Client", contact_type=1)
         mc.commands.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(
             return_value=MagicMock(payload={"path": [{"snr": 5.5}, {"snr": 3.2}], "path_len": 2})
@@ -272,11 +249,6 @@ class TestTraceRoute:
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch(
-                "app.routers.contacts.ContactRepository.get_by_key_or_prefix",
-                new_callable=AsyncMock,
-                return_value=contact,
-            ),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             response = await request_trace(KEY_A)
