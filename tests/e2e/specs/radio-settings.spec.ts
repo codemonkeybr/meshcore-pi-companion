@@ -27,7 +27,7 @@ test.describe('Radio settings', () => {
 
     // --- Step 1: Change the name via settings UI ---
     await page.getByText('Radio & Config').click();
-    await page.getByRole('tab', { name: 'Identity' }).click();
+    await page.getByRole('button', { name: /Identity/i }).click();
 
     const nameInput = page.locator('#name');
     await nameInput.clear();
@@ -36,8 +36,8 @@ test.describe('Radio settings', () => {
     await page.getByRole('button', { name: 'Save Identity Settings' }).click();
     await expect(page.getByText('Identity settings saved')).toBeVisible({ timeout: 10_000 });
 
-    // Close settings
-    await page.keyboard.press('Escape');
+    // Exit settings page mode
+    await page.getByRole('button', { name: /Back to Chat/i }).click();
 
     // --- Step 2: Verify via API (now returns fresh data after send_appstart fix) ---
     const config = await getRadioConfig();
@@ -48,7 +48,7 @@ test.describe('Radio settings', () => {
     await expect(page.getByText('Connected')).toBeVisible({ timeout: 15_000 });
 
     await page.getByText('Radio & Config').click();
-    await page.getByRole('tab', { name: 'Identity' }).click();
+    await page.getByRole('button', { name: /Identity/i }).click();
     await expect(page.locator('#name')).toHaveValue(testName, { timeout: 10_000 });
   });
 });

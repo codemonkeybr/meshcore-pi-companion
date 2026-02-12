@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react';
 import { api } from './api';
 import { useWebSocket } from './useWebSocket';
 import {
@@ -13,7 +13,12 @@ import { Sidebar } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
 import { MessageInput, type MessageInputHandle } from './components/MessageInput';
 import { NewMessageModal } from './components/NewMessageModal';
-import { SettingsModal } from './components/SettingsModal';
+import {
+  SettingsModal,
+  SETTINGS_SECTION_LABELS,
+  SETTINGS_SECTION_ORDER,
+  type SettingsSection,
+} from './components/SettingsModal';
 import { RawPacketList } from './components/RawPacketList';
 import { MapView } from './components/MapView';
 import { VisualizerView } from './components/VisualizerView';
@@ -78,6 +83,7 @@ export function App() {
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [showNewMessage, setShowNewMessage] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('radio');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [undecryptedCount, setUndecryptedCount] = useState(0);
   const [showCracker, setShowCracker] = useState(false);
@@ -510,7 +516,8 @@ export function App() {
     }
 
     const publicChannel =
-      channels.find((c) => c.key === PUBLIC_CHANNEL_KEY) || channels.find((c) => c.name === 'Public');
+      channels.find((c) => c.key === PUBLIC_CHANNEL_KEY) ||
+      channels.find((c) => c.name === 'Public');
     if (!publicChannel) return;
 
     hasSetDefaultConversation.current = true;
@@ -614,6 +621,15 @@ export function App() {
       toast.error('Failed to send advertisement', {
         description: err instanceof Error ? err.message : 'Check radio connection',
       });
+    }
+  }, []);
+
+  const handleHealthRefresh = useCallback(async () => {
+    try {
+      const data = await api.getHealth();
+      setHealth(data);
+    } catch (err) {
+      console.error('Failed to refresh health:', err);
     }
   }, []);
 
@@ -820,6 +836,18 @@ export function App() {
     [appSettings?.sidebar_sort_order]
   );
 
+  const handleCloseSettingsView = useCallback(() => {
+    startTransition(() => setShowSettings(false));
+    setSidebarOpen(false);
+  }, []);
+
+  const handleToggleSettingsView = useCallback(() => {
+    startTransition(() => {
+      setShowSettings((prev) => !prev);
+    });
+    setSidebarOpen(false);
+  }, []);
+
   // Sidebar content (shared between desktop and mobile)
   const sidebarContent = (
     <Sidebar
@@ -844,18 +872,53 @@ export function App() {
     />
   );
 
+  const settingsSidebarContent = (
+    <div className="sidebar w-60 h-full min-h-0 bg-card border-r border-border flex flex-col">
+      <div className="flex justify-between items-center px-3 py-3 border-b border-border">
+        <h2 className="text-xs uppercase text-muted-foreground font-medium">Settings</h2>
+        <button
+          type="button"
+          onClick={handleCloseSettingsView}
+          className="h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
+          title="Back to conversations"
+          aria-label="Back to conversations"
+        >
+          ←
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto py-1">
+        {SETTINGS_SECTION_ORDER.map((section) => (
+          <button
+            key={section}
+            type="button"
+            className={cn(
+              'w-full px-3 py-2.5 text-left border-l-2 border-transparent hover:bg-accent',
+              settingsSection === section && 'bg-accent border-l-primary'
+            )}
+            onClick={() => setSettingsSection(section)}
+          >
+            {SETTINGS_SECTION_LABELS[section]}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const activeSidebarContent = showSettings ? settingsSidebarContent : sidebarContent;
+
   return (
     <div className="flex flex-col h-full">
       <StatusBar
         health={health}
         config={config}
-        onSettingsClick={() => setShowSettings(true)}
-        onMenuClick={() => setSidebarOpen(true)}
+        settingsMode={showSettings}
+        onSettingsClick={handleToggleSettingsView}
+        onMenuClick={showSettings ? undefined : () => setSidebarOpen(true)}
       />
 
       <div className="flex flex-1 overflow-hidden">
         {/* Desktop sidebar - hidden on mobile */}
-        <div className="hidden md:block">{sidebarContent}</div>
+        <div className="hidden md:block">{activeSidebarContent}</div>
 
         {/* Mobile sidebar - Sheet that slides in */}
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
@@ -863,231 +926,269 @@ export function App() {
             <SheetHeader className="sr-only">
               <SheetTitle>Navigation</SheetTitle>
             </SheetHeader>
-            <div className="flex-1 overflow-hidden">{sidebarContent}</div>
+            <div className="flex-1 overflow-hidden">{activeSidebarContent}</div>
           </SheetContent>
         </Sheet>
 
         <div className="flex-1 flex flex-col bg-background min-w-0">
-          {activeConversation ? (
-            activeConversation.type === 'map' ? (
-              <>
-                <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg">
-                  Node Map
-                </div>
-                <div className="flex-1 overflow-hidden">
-                  <MapView contacts={contacts} focusedKey={activeConversation.mapFocusKey} />
-                </div>
-              </>
-            ) : activeConversation.type === 'visualizer' ? (
-              <VisualizerView
-                packets={rawPackets}
-                contacts={contacts}
-                config={config}
-                onClearPackets={() => setRawPackets([])}
-              />
-            ) : activeConversation.type === 'raw' ? (
-              <>
-                <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg">
-                  Raw Packet Feed
-                </div>
-                <div className="flex-1 overflow-hidden">
-                  <RawPacketList packets={rawPackets} />
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg gap-2">
-                  <span className="flex flex-wrap items-baseline gap-x-2 min-w-0 flex-1">
-                    <span className="flex-shrink-0">
-                      {activeConversation.type === 'channel' &&
-                      !activeConversation.name.startsWith('#') &&
-                      activeConversation.name !== 'Public'
-                        ? '#'
-                        : ''}
-                      {activeConversation.name}
-                    </span>
-                    <span
-                      className="font-normal text-sm text-muted-foreground font-mono truncate cursor-pointer hover:text-primary"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigator.clipboard.writeText(activeConversation.id);
-                        toast.success(
-                          activeConversation.type === 'channel'
-                            ? 'Room key copied!'
-                            : 'Contact key copied!'
-                        );
-                      }}
-                      title="Click to copy"
-                    >
-                      {activeConversation.type === 'channel'
-                        ? activeConversation.id.toLowerCase()
-                        : activeConversation.id}
-                    </span>
-                    {activeConversation.type === 'contact' &&
-                      (() => {
-                        const contact = contacts.find(
-                          (c) => c.public_key === activeConversation.id
-                        );
-                        if (!contact) return null;
-                        const parts: React.ReactNode[] = [];
-                        if (contact.last_seen) {
-                          parts.push(`Last heard: ${formatTime(contact.last_seen)}`);
-                        }
-                        if (contact.last_path_len === -1) {
-                          parts.push('flood');
-                        } else if (contact.last_path_len === 0) {
-                          parts.push('direct');
-                        } else if (contact.last_path_len > 0) {
-                          parts.push(
-                            `${contact.last_path_len} hop${contact.last_path_len > 1 ? 's' : ''}`
+          <div className={cn('flex-1 flex flex-col min-h-0', showSettings && 'hidden')}>
+            {activeConversation ? (
+              activeConversation.type === 'map' ? (
+                <>
+                  <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg">
+                    Node Map
+                  </div>
+                  <div className="flex-1 overflow-hidden">
+                    <MapView contacts={contacts} focusedKey={activeConversation.mapFocusKey} />
+                  </div>
+                </>
+              ) : activeConversation.type === 'visualizer' ? (
+                <VisualizerView
+                  packets={rawPackets}
+                  contacts={contacts}
+                  config={config}
+                  onClearPackets={() => setRawPackets([])}
+                />
+              ) : activeConversation.type === 'raw' ? (
+                <>
+                  <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg">
+                    Raw Packet Feed
+                  </div>
+                  <div className="flex-1 overflow-hidden">
+                    <RawPacketList packets={rawPackets} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg gap-2">
+                    <span className="flex flex-wrap items-baseline gap-x-2 min-w-0 flex-1">
+                      <span className="flex-shrink-0">
+                        {activeConversation.type === 'channel' &&
+                        !activeConversation.name.startsWith('#') &&
+                        activeConversation.name !== 'Public'
+                          ? '#'
+                          : ''}
+                        {activeConversation.name}
+                      </span>
+                      <span
+                        className="font-normal text-sm text-muted-foreground font-mono truncate cursor-pointer hover:text-primary"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigator.clipboard.writeText(activeConversation.id);
+                          toast.success(
+                            activeConversation.type === 'channel'
+                              ? 'Room key copied!'
+                              : 'Contact key copied!'
                           );
-                        }
-                        // Add coordinate link if contact has valid location
-                        if (isValidLocation(contact.lat, contact.lon)) {
-                          // Calculate distance from us if we have valid location
-                          const distFromUs =
-                            config && isValidLocation(config.lat, config.lon)
-                              ? calculateDistance(config.lat, config.lon, contact.lat, contact.lon)
-                              : null;
-                          parts.push(
-                            <span key="coords">
-                              <span
-                                className="font-mono cursor-pointer hover:text-primary hover:underline"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const url =
-                                    window.location.origin +
-                                    window.location.pathname +
-                                    getMapFocusHash(contact.public_key);
-                                  window.open(url, '_blank');
-                                }}
-                                title="View on map"
-                              >
-                                {contact.lat!.toFixed(3)}, {contact.lon!.toFixed(3)}
-                              </span>
-                              {distFromUs !== null && ` (${formatDistance(distFromUs)})`}
-                            </span>
-                          );
-                        }
-                        return parts.length > 0 ? (
-                          <span className="font-normal text-sm text-muted-foreground flex-shrink-0">
-                            (
-                            {parts.map((part, i) => (
-                              <span key={i}>
-                                {i > 0 && ', '}
-                                {part}
-                              </span>
-                            ))}
-                            )
-                          </span>
-                        ) : null;
-                      })()}
-                  </span>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {/* Direct trace button (contacts only) */}
-                    {activeConversation.type === 'contact' && (
-                      <button
-                        className="p-1.5 rounded hover:bg-accent text-xl leading-none"
-                        onClick={handleTrace}
-                        title="Direct Trace"
+                        }}
+                        title="Click to copy"
                       >
-                        &#x1F6CE;
-                      </button>
-                    )}
-                    {/* Favorite button */}
-                    {(activeConversation.type === 'channel' ||
-                      activeConversation.type === 'contact') && (
-                      <button
-                        className="p-1.5 rounded hover:bg-accent text-xl leading-none"
-                        onClick={() =>
-                          handleToggleFavorite(
-                            activeConversation.type as 'channel' | 'contact',
-                            activeConversation.id
-                          )
-                        }
-                        title={
-                          isFavorite(
+                        {activeConversation.type === 'channel'
+                          ? activeConversation.id.toLowerCase()
+                          : activeConversation.id}
+                      </span>
+                      {activeConversation.type === 'contact' &&
+                        (() => {
+                          const contact = contacts.find(
+                            (c) => c.public_key === activeConversation.id
+                          );
+                          if (!contact) return null;
+                          const parts: React.ReactNode[] = [];
+                          if (contact.last_seen) {
+                            parts.push(`Last heard: ${formatTime(contact.last_seen)}`);
+                          }
+                          if (contact.last_path_len === -1) {
+                            parts.push('flood');
+                          } else if (contact.last_path_len === 0) {
+                            parts.push('direct');
+                          } else if (contact.last_path_len > 0) {
+                            parts.push(
+                              `${contact.last_path_len} hop${contact.last_path_len > 1 ? 's' : ''}`
+                            );
+                          }
+                          // Add coordinate link if contact has valid location
+                          if (isValidLocation(contact.lat, contact.lon)) {
+                            // Calculate distance from us if we have valid location
+                            const distFromUs =
+                              config && isValidLocation(config.lat, config.lon)
+                                ? calculateDistance(
+                                    config.lat,
+                                    config.lon,
+                                    contact.lat,
+                                    contact.lon
+                                  )
+                                : null;
+                            parts.push(
+                              <span key="coords">
+                                <span
+                                  className="font-mono cursor-pointer hover:text-primary hover:underline"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const url =
+                                      window.location.origin +
+                                      window.location.pathname +
+                                      getMapFocusHash(contact.public_key);
+                                    window.open(url, '_blank');
+                                  }}
+                                  title="View on map"
+                                >
+                                  {contact.lat!.toFixed(3)}, {contact.lon!.toFixed(3)}
+                                </span>
+                                {distFromUs !== null && ` (${formatDistance(distFromUs)})`}
+                              </span>
+                            );
+                          }
+                          return parts.length > 0 ? (
+                            <span className="font-normal text-sm text-muted-foreground flex-shrink-0">
+                              (
+                              {parts.map((part, i) => (
+                                <span key={i}>
+                                  {i > 0 && ', '}
+                                  {part}
+                                </span>
+                              ))}
+                              )
+                            </span>
+                          ) : null;
+                        })()}
+                    </span>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {/* Direct trace button (contacts only) */}
+                      {activeConversation.type === 'contact' && (
+                        <button
+                          className="p-1.5 rounded hover:bg-accent text-xl leading-none"
+                          onClick={handleTrace}
+                          title="Direct Trace"
+                        >
+                          &#x1F6CE;
+                        </button>
+                      )}
+                      {/* Favorite button */}
+                      {(activeConversation.type === 'channel' ||
+                        activeConversation.type === 'contact') && (
+                        <button
+                          className="p-1.5 rounded hover:bg-accent text-xl leading-none"
+                          onClick={() =>
+                            handleToggleFavorite(
+                              activeConversation.type as 'channel' | 'contact',
+                              activeConversation.id
+                            )
+                          }
+                          title={
+                            isFavorite(
+                              favorites,
+                              activeConversation.type as 'channel' | 'contact',
+                              activeConversation.id
+                            )
+                              ? 'Remove from favorites'
+                              : 'Add to favorites'
+                          }
+                        >
+                          {isFavorite(
                             favorites,
                             activeConversation.type as 'channel' | 'contact',
                             activeConversation.id
-                          )
-                            ? 'Remove from favorites'
-                            : 'Add to favorites'
-                        }
-                      >
-                        {isFavorite(
-                          favorites,
-                          activeConversation.type as 'channel' | 'contact',
-                          activeConversation.id
-                        ) ? (
-                          <span className="text-yellow-500">&#9733;</span>
-                        ) : (
-                          <span className="text-muted-foreground">&#9734;</span>
-                        )}
-                      </button>
-                    )}
-                    {/* Delete button */}
-                    {!(
-                      activeConversation.type === 'channel' && activeConversation.name === 'Public'
-                    ) && (
-                      <button
-                        className="p-1.5 rounded hover:bg-destructive/20 text-destructive text-xl leading-none"
-                        onClick={() => {
-                          if (activeConversation.type === 'channel') {
-                            handleDeleteChannel(activeConversation.id);
-                          } else {
-                            handleDeleteContact(activeConversation.id);
-                          }
-                        }}
-                        title="Delete"
-                      >
-                        &#128465;
-                      </button>
-                    )}
+                          ) ? (
+                            <span className="text-yellow-500">&#9733;</span>
+                          ) : (
+                            <span className="text-muted-foreground">&#9734;</span>
+                          )}
+                        </button>
+                      )}
+                      {/* Delete button */}
+                      {!(
+                        activeConversation.type === 'channel' &&
+                        activeConversation.name === 'Public'
+                      ) && (
+                        <button
+                          className="p-1.5 rounded hover:bg-destructive/20 text-destructive text-xl leading-none"
+                          onClick={() => {
+                            if (activeConversation.type === 'channel') {
+                              handleDeleteChannel(activeConversation.id);
+                            } else {
+                              handleDeleteContact(activeConversation.id);
+                            }
+                          }}
+                          title="Delete"
+                        >
+                          &#128465;
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <MessageList
-                  key={activeConversation.id}
-                  messages={messages}
-                  contacts={contacts}
-                  loading={messagesLoading}
-                  loadingOlder={loadingOlder}
-                  hasOlderMessages={hasOlderMessages}
-                  onSenderClick={
-                    activeConversation.type === 'channel' ? handleSenderClick : undefined
-                  }
-                  onLoadOlder={fetchOlderMessages}
-                  radioName={config?.name}
-                  config={config}
-                />
-                <MessageInput
-                  ref={messageInputRef}
-                  onSend={
-                    activeContactIsRepeater
-                      ? repeaterLoggedIn
-                        ? handleRepeaterCommand
-                        : handleTelemetryRequest
-                      : handleSendMessage
-                  }
-                  disabled={!health?.radio_connected}
-                  isRepeaterMode={activeContactIsRepeater && !repeaterLoggedIn}
-                  conversationType={activeConversation.type}
-                  senderName={config?.name}
-                  placeholder={
-                    !health?.radio_connected
-                      ? 'Radio not connected'
-                      : activeContactIsRepeater
+                  <MessageList
+                    key={activeConversation.id}
+                    messages={messages}
+                    contacts={contacts}
+                    loading={messagesLoading}
+                    loadingOlder={loadingOlder}
+                    hasOlderMessages={hasOlderMessages}
+                    onSenderClick={
+                      activeConversation.type === 'channel' ? handleSenderClick : undefined
+                    }
+                    onLoadOlder={fetchOlderMessages}
+                    radioName={config?.name}
+                    config={config}
+                  />
+                  <MessageInput
+                    ref={messageInputRef}
+                    onSend={
+                      activeContactIsRepeater
                         ? repeaterLoggedIn
-                          ? 'Send CLI command (requires admin login)...'
-                          : `Enter password for ${activeConversation.name} (or . for none)...`
-                        : `Message ${activeConversation.name}...`
-                  }
+                          ? handleRepeaterCommand
+                          : handleTelemetryRequest
+                        : handleSendMessage
+                    }
+                    disabled={!health?.radio_connected}
+                    isRepeaterMode={activeContactIsRepeater && !repeaterLoggedIn}
+                    conversationType={activeConversation.type}
+                    senderName={config?.name}
+                    placeholder={
+                      !health?.radio_connected
+                        ? 'Radio not connected'
+                        : activeContactIsRepeater
+                          ? repeaterLoggedIn
+                            ? 'Send CLI command (requires admin login)...'
+                            : `Enter password for ${activeConversation.name} (or . for none)...`
+                          : `Message ${activeConversation.name}...`
+                    }
+                  />
+                </>
+              )
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                Select a conversation or start a new one
+              </div>
+            )}
+          </div>
+
+          {showSettings && (
+            <div className="flex-1 flex flex-col min-h-0">
+              <div className="flex justify-between items-center px-4 py-3 border-b border-border font-medium text-lg">
+                <span>Radio & Settings</span>
+                <span className="text-sm text-muted-foreground hidden sm:inline">
+                  {SETTINGS_SECTION_LABELS[settingsSection]}
+                </span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-hidden">
+                <SettingsModal
+                  open={showSettings}
+                  pageMode
+                  externalSidebarNav
+                  desktopSection={settingsSection}
+                  config={config}
+                  health={health}
+                  appSettings={appSettings}
+                  onClose={handleCloseSettingsView}
+                  onSave={handleSaveConfig}
+                  onSaveAppSettings={handleSaveAppSettings}
+                  onSetPrivateKey={handleSetPrivateKey}
+                  onReboot={handleReboot}
+                  onAdvertise={handleAdvertise}
+                  onHealthRefresh={handleHealthRefresh}
+                  onRefreshAppSettings={fetchAppSettings}
                 />
-              </>
-            )
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-muted-foreground">
-              Select a conversation or start a new one
+              </div>
             </div>
           )}
         </div>
@@ -1130,24 +1231,6 @@ export function App() {
         onCreateContact={handleCreateContact}
         onCreateChannel={handleCreateChannel}
         onCreateHashtagChannel={handleCreateHashtagChannel}
-      />
-
-      <SettingsModal
-        open={showSettings}
-        config={config}
-        health={health}
-        appSettings={appSettings}
-        onClose={() => setShowSettings(false)}
-        onSave={handleSaveConfig}
-        onSaveAppSettings={handleSaveAppSettings}
-        onSetPrivateKey={handleSetPrivateKey}
-        onReboot={handleReboot}
-        onAdvertise={handleAdvertise}
-        onHealthRefresh={async () => {
-          const data = await api.getHealth();
-          setHealth(data);
-        }}
-        onRefreshAppSettings={fetchAppSettings}
       />
 
       <Toaster position="top-right" />

@@ -44,13 +44,13 @@ test.describe('Bot functionality', () => {
     await expect(page.getByText('Connected')).toBeVisible();
 
     await page.getByText('Radio & Config').click();
-    await page.getByRole('tab', { name: 'Bot' }).click();
+    await page.getByRole('button', { name: /Bot/i }).click();
 
     // The bot name should be visible in the bot list
     await expect(page.getByText('E2E Test Bot')).toBeVisible();
 
-    // Close settings
-    await page.keyboard.press('Escape');
+    // Exit settings page mode
+    await page.getByRole('button', { name: /Back to Chat/i }).click();
 
     // --- Step 3: Trigger the bot ---
     await page.getByText('#flightless', { exact: true }).first().click();

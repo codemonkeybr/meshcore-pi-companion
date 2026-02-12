@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense, type ReactNode } from 'react';
 
 const BotCodeEditor = lazy(() =>
   import('./BotCodeEditor').then((m) => ({ default: m.BotCodeEditor }))
@@ -11,8 +11,6 @@ import type {
   RadioConfig,
   RadioConfigUpdate,
 } from '../types';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Button } from './ui/button';
@@ -48,8 +46,27 @@ const RADIO_PRESETS: RadioPreset[] = [
   { name: 'Vietnam', freq: 920.25, bw: 250, sf: 11, cr: 5 },
 ];
 
-interface SettingsModalProps {
+export type SettingsSection = 'radio' | 'identity' | 'connectivity' | 'database' | 'bot';
+
+export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
+  'radio',
+  'identity',
+  'connectivity',
+  'database',
+  'bot',
+];
+
+export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
+  radio: '📻 Radio',
+  identity: '🪪 Identity',
+  connectivity: '📡 Connectivity',
+  database: '🗄️ Database',
+  bot: '🤖 Bot',
+};
+
+interface SettingsModalBaseProps {
   open: boolean;
+  pageMode?: boolean;
   config: RadioConfig | null;
   health: HealthStatus | null;
   appSettings: AppSettings | null;
@@ -63,23 +80,47 @@ interface SettingsModalProps {
   onRefreshAppSettings: () => Promise<void>;
 }
 
-export function SettingsModal({
-  open,
-  config,
-  health,
-  appSettings,
-  onClose,
-  onSave,
-  onSaveAppSettings,
-  onSetPrivateKey,
-  onReboot,
-  onAdvertise,
-  onHealthRefresh,
-  onRefreshAppSettings,
-}: SettingsModalProps) {
-  // Tab state
-  type SettingsTab = 'radio' | 'identity' | 'connectivity' | 'database' | 'bot';
-  const [activeTab, setActiveTab] = useState<SettingsTab>('radio');
+type SettingsModalProps = SettingsModalBaseProps &
+  (
+    | { externalSidebarNav: true; desktopSection: SettingsSection }
+    | { externalSidebarNav?: false; desktopSection?: never }
+  );
+
+export function SettingsModal(props: SettingsModalProps) {
+  const {
+    open,
+    pageMode = false,
+    config,
+    health,
+    appSettings,
+    onClose,
+    onSave,
+    onSaveAppSettings,
+    onSetPrivateKey,
+    onReboot,
+    onAdvertise,
+    onHealthRefresh,
+    onRefreshAppSettings,
+  } = props;
+  const externalSidebarNav = props.externalSidebarNav === true;
+  const desktopSection = props.externalSidebarNav ? props.desktopSection : undefined;
+
+  const getIsMobileLayout = () => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    return window.matchMedia('(max-width: 767px)').matches;
+  };
+
+  const [isMobileLayout, setIsMobileLayout] = useState(getIsMobileLayout);
+  const [expandedSections, setExpandedSections] = useState<Record<SettingsSection, boolean>>(() => {
+    const isMobile = getIsMobileLayout();
+    return {
+      radio: !isMobile,
+      identity: false,
+      connectivity: false,
+      database: false,
+      bot: false,
+    };
+  });
 
   // Radio config state
   const [name, setName] = useState('');
@@ -95,11 +136,14 @@ export function SettingsModal({
   const [experimentalChannelDoubleSend, setExperimentalChannelDoubleSend] = useState(false);
 
   // Loading states
-  const [loading, setLoading] = useState(false);
+  const [busySection, setBusySection] = useState<SettingsSection | null>(null);
   const [rebooting, setRebooting] = useState(false);
   const [advertising, setAdvertising] = useState(false);
   const [gettingLocation, setGettingLocation] = useState(false);
-  const [error, setError] = useState('');
+  const [sectionError, setSectionError] = useState<{
+    section: SettingsSection;
+    message: string;
+  } | null>(null);
 
   // Database maintenance state
   const [retentionDays, setRetentionDays] = useState('14');
@@ -172,10 +216,34 @@ export function SettingsModal({
   // Refresh settings from server when modal opens
   // This ensures UI reflects actual server state (prevents stale UI after checkbox toggle without save)
   useEffect(() => {
-    if (open) {
+    if (open || pageMode) {
       onRefreshAppSettings();
     }
-  }, [open, onRefreshAppSettings]);
+  }, [open, pageMode, onRefreshAppSettings]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+
+    const query = window.matchMedia('(max-width: 767px)');
+    const onChange = (event: MediaQueryListEvent) => {
+      setIsMobileLayout(event.matches);
+    };
+
+    setIsMobileLayout(query.matches);
+
+    if (typeof query.addEventListener === 'function') {
+      query.addEventListener('change', onChange);
+      return () => query.removeEventListener('change', onChange);
+    }
+
+    query.addListener(onChange);
+    return () => query.removeListener(onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!externalSidebarNav) return;
+    setSectionError(null);
+  }, [externalSidebarNav, desktopSection]);
 
   // Detect current preset from form values
   const currentPreset = useMemo(() => {
@@ -235,8 +303,8 @@ export function SettingsModal({
   };
 
   const handleSaveRadioConfig = async () => {
-    setError('');
-    setLoading(true);
+    setSectionError(null);
+    setBusySection('radio');
 
     try {
       const update: RadioConfigUpdate = {
@@ -252,21 +320,25 @@ export function SettingsModal({
       };
       await onSave(update);
       toast.success('Radio config saved, rebooting...');
-      setLoading(false);
       setRebooting(true);
       await onReboot();
-      onClose();
+      if (!pageMode) {
+        onClose();
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
-      setLoading(false);
+      setSectionError({
+        section: 'radio',
+        message: err instanceof Error ? err.message : 'Failed to save',
+      });
     } finally {
       setRebooting(false);
+      setBusySection(null);
     }
   };
 
   const handleSaveIdentity = async () => {
-    setError('');
-    setLoading(true);
+    setSectionError(null);
+    setBusySection('identity');
 
     try {
       // Save radio name
@@ -281,15 +353,18 @@ export function SettingsModal({
 
       toast.success('Identity settings saved');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setSectionError({
+        section: 'identity',
+        message: err instanceof Error ? err.message : 'Failed to save',
+      });
     } finally {
-      setLoading(false);
+      setBusySection(null);
     }
   };
 
   const handleSaveConnectivity = async () => {
-    setError('');
-    setLoading(true);
+    setSectionError(null);
+    setBusySection('connectivity');
 
     try {
       const update: AppSettingsUpdate = {};
@@ -305,33 +380,40 @@ export function SettingsModal({
       }
       toast.success('Connectivity settings saved');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setSectionError({
+        section: 'connectivity',
+        message: err instanceof Error ? err.message : 'Failed to save',
+      });
     } finally {
-      setLoading(false);
+      setBusySection(null);
     }
   };
 
   const handleSetPrivateKey = async () => {
     if (!privateKey.trim()) {
-      setError('Private key is required');
+      setSectionError({ section: 'identity', message: 'Private key is required' });
       return;
     }
-    setError('');
-    setLoading(true);
+    setSectionError(null);
+    setBusySection('identity');
 
     try {
       await onSetPrivateKey(privateKey.trim());
       setPrivateKey('');
       toast.success('Private key set, rebooting...');
-      setLoading(false);
       setRebooting(true);
       await onReboot();
-      onClose();
+      if (!pageMode) {
+        onClose();
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to set private key');
-      setLoading(false);
+      setSectionError({
+        section: 'identity',
+        message: err instanceof Error ? err.message : 'Failed to set private key',
+      });
     } finally {
       setRebooting(false);
+      setBusySection(null);
     }
   };
 
@@ -341,16 +423,23 @@ export function SettingsModal({
     ) {
       return;
     }
-    setError('');
+    setSectionError(null);
+    setBusySection('connectivity');
     setRebooting(true);
 
     try {
       await onReboot();
-      onClose();
+      if (!pageMode) {
+        onClose();
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reboot radio');
+      setSectionError({
+        section: 'connectivity',
+        message: err instanceof Error ? err.message : 'Failed to reboot radio',
+      });
     } finally {
       setRebooting(false);
+      setBusySection(null);
     }
   };
 
@@ -391,24 +480,27 @@ export function SettingsModal({
   };
 
   const handleSaveDatabaseSettings = async () => {
-    setLoading(true);
-    setError('');
+    setBusySection('database');
+    setSectionError(null);
 
     try {
       await onSaveAppSettings({ auto_decrypt_dm_on_advert: autoDecryptOnAdvert });
       toast.success('Database settings saved');
     } catch (err) {
       console.error('Failed to save database settings:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setSectionError({
+        section: 'database',
+        message: err instanceof Error ? err.message : 'Failed to save',
+      });
       toast.error('Failed to save settings');
     } finally {
-      setLoading(false);
+      setBusySection(null);
     }
   };
 
   const handleSaveBotSettings = async () => {
-    setLoading(true);
-    setError('');
+    setBusySection('bot');
+    setSectionError(null);
 
     try {
       await onSaveAppSettings({ bots });
@@ -416,10 +508,10 @@ export function SettingsModal({
     } catch (err) {
       console.error('Failed to save bot settings:', err);
       const errorMsg = err instanceof Error ? err.message : 'Failed to save';
-      setError(errorMsg);
+      setSectionError({ section: 'bot', message: errorMsg });
       toast.error(errorMsg);
     } finally {
-      setLoading(false);
+      setBusySection(null);
     }
   };
 
@@ -474,42 +566,65 @@ export function SettingsModal({
     setBots(bots.map((b) => (b.id === botId ? { ...b, code: DEFAULT_BOT_CODE } : b)));
   };
 
-  return (
-    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <DialogContent className="sm:max-w-[50vw] sm:min-w-[500px] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Radio & Settings</DialogTitle>
-          <DialogDescription className="sr-only">
-            {activeTab === 'radio' && 'Configure radio frequency, power, and location settings'}
-            {activeTab === 'identity' &&
-              'Manage radio name, public key, private key, and advertising settings'}
-            {activeTab === 'connectivity' && 'View connection status and configure contact sync'}
-            {activeTab === 'database' && 'View database statistics and clean up old packets'}
-            {activeTab === 'bot' && 'Configure automatic message bot with Python code'}
-          </DialogDescription>
-        </DialogHeader>
+  const toggleSection = (section: SettingsSection) => {
+    setExpandedSections((prev) => ({
+      ...prev,
+      [section]: !prev[section],
+    }));
+    setSectionError(null);
+  };
 
-        {!config ? (
-          <div className="py-8 text-center text-muted-foreground">Loading configuration...</div>
-        ) : (
-          <Tabs
-            value={activeTab}
-            onValueChange={(v) => {
-              setActiveTab(v as SettingsTab);
-              setError('');
-            }}
-            className="w-full"
-          >
-            <TabsList className="grid w-full grid-cols-5">
-              <TabsTrigger value="radio">Radio</TabsTrigger>
-              <TabsTrigger value="identity">Identity</TabsTrigger>
-              <TabsTrigger value="connectivity">Connectivity</TabsTrigger>
-              <TabsTrigger value="database">Database</TabsTrigger>
-              <TabsTrigger value="bot">Bot</TabsTrigger>
-            </TabsList>
+  const externalDesktopSidebarMode = externalSidebarNav && !isMobileLayout;
 
-            {/* Radio Config Tab */}
-            <TabsContent value="radio" className="space-y-4 mt-4">
+  const isSectionVisible = (section: SettingsSection) =>
+    externalDesktopSidebarMode ? desktopSection === section : expandedSections[section];
+
+  const showSectionButton = !externalDesktopSidebarMode;
+  const shouldRenderSection = (section: SettingsSection) =>
+    !externalDesktopSidebarMode || desktopSection === section;
+
+  const sectionWrapperClass = 'border border-input rounded-md overflow-hidden';
+
+  const sectionContentClass = externalDesktopSidebarMode
+    ? 'space-y-4 p-4 h-full overflow-y-auto'
+    : 'space-y-4 p-4 border-t border-input';
+
+  const settingsContainerClass = externalDesktopSidebarMode
+    ? 'w-full h-full'
+    : 'w-full h-full overflow-y-auto space-y-3';
+
+  const sectionButtonClasses =
+    'w-full flex items-center justify-between px-4 py-3 text-left hover:bg-muted/40';
+
+  const renderSectionHeader = (section: SettingsSection): ReactNode => {
+    if (!showSectionButton) return null;
+    return (
+      <button type="button" className={sectionButtonClasses} onClick={() => toggleSection(section)}>
+        <span className="font-medium">{SETTINGS_SECTION_LABELS[section]}</span>
+        <span className="text-muted-foreground md:hidden">
+          {expandedSections[section] ? '−' : '+'}
+        </span>
+      </button>
+    );
+  };
+
+  const isSectionBusy = (section: SettingsSection) => busySection === section;
+  const getSectionError = (section: SettingsSection) =>
+    sectionError?.section === section ? sectionError.message : null;
+
+  if (!pageMode && !open) {
+    return null;
+  }
+
+  return !config ? (
+    <div className="py-8 text-center text-muted-foreground">Loading configuration...</div>
+  ) : (
+    <div className={settingsContainerClass}>
+      {shouldRenderSection('radio') && (
+        <div className={sectionWrapperClass}>
+          {renderSectionHeader('radio')}
+          {isSectionVisible('radio') && (
+            <div className={sectionContentClass}>
               <div className="space-y-2">
                 <Label htmlFor="preset">Preset</Label>
                 <select
@@ -634,19 +749,29 @@ export function SettingsModal({
                 </div>
               </div>
 
-              {error && <div className="text-sm text-destructive">{error}</div>}
+              {getSectionError('radio') && (
+                <div className="text-sm text-destructive">{getSectionError('radio')}</div>
+              )}
 
               <Button
                 onClick={handleSaveRadioConfig}
-                disabled={loading || rebooting}
+                disabled={isSectionBusy('radio') || rebooting}
                 className="w-full"
               >
-                {loading || rebooting ? 'Saving & Rebooting...' : 'Save Radio Config & Reboot'}
+                {isSectionBusy('radio') || rebooting
+                  ? 'Saving & Rebooting...'
+                  : 'Save Radio Config & Reboot'}
               </Button>
-            </TabsContent>
+            </div>
+          )}
+        </div>
+      )}
 
-            {/* Identity Tab */}
-            <TabsContent value="identity" className="space-y-4 mt-4">
+      {shouldRenderSection('identity') && (
+        <div className={sectionWrapperClass}>
+          {renderSectionHeader('identity')}
+          {isSectionVisible('identity') && (
+            <div className={sectionContentClass}>
               <div className="space-y-2">
                 <Label htmlFor="public-key">Public Key</Label>
                 <Input
@@ -681,8 +806,12 @@ export function SettingsModal({
                 </p>
               </div>
 
-              <Button onClick={handleSaveIdentity} disabled={loading} className="w-full">
-                {loading ? 'Saving...' : 'Save Identity Settings'}
+              <Button
+                onClick={handleSaveIdentity}
+                disabled={isSectionBusy('identity')}
+                className="w-full"
+              >
+                {isSectionBusy('identity') ? 'Saving...' : 'Save Identity Settings'}
               </Button>
 
               <Separator />
@@ -699,10 +828,12 @@ export function SettingsModal({
                 />
                 <Button
                   onClick={handleSetPrivateKey}
-                  disabled={loading || rebooting || !privateKey.trim()}
+                  disabled={isSectionBusy('identity') || rebooting || !privateKey.trim()}
                   className="w-full"
                 >
-                  {loading || rebooting ? 'Setting & Rebooting...' : 'Set Private Key & Reboot'}
+                  {isSectionBusy('identity') || rebooting
+                    ? 'Setting & Rebooting...'
+                    : 'Set Private Key & Reboot'}
                 </Button>
               </div>
 
@@ -725,11 +856,19 @@ export function SettingsModal({
                 )}
               </div>
 
-              {error && <div className="text-sm text-destructive">{error}</div>}
-            </TabsContent>
+              {getSectionError('identity') && (
+                <div className="text-sm text-destructive">{getSectionError('identity')}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-            {/* Connectivity Tab */}
-            <TabsContent value="connectivity" className="space-y-4 mt-4">
+      {shouldRenderSection('connectivity') && (
+        <div className={sectionWrapperClass}>
+          {renderSectionHeader('connectivity')}
+          {isSectionVisible('connectivity') && (
+            <div className={sectionContentClass}>
               <div className="space-y-2">
                 <Label>Connection</Label>
                 {health?.connection_info ? (
@@ -786,8 +925,12 @@ export function SettingsModal({
                 </p>
               </div>
 
-              <Button onClick={handleSaveConnectivity} disabled={loading} className="w-full">
-                {loading ? 'Saving...' : 'Save Settings'}
+              <Button
+                onClick={handleSaveConnectivity}
+                disabled={isSectionBusy('connectivity')}
+                className="w-full"
+              >
+                {isSectionBusy('connectivity') ? 'Saving...' : 'Save Settings'}
               </Button>
 
               <Separator />
@@ -795,17 +938,25 @@ export function SettingsModal({
               <Button
                 variant="outline"
                 onClick={handleReboot}
-                disabled={rebooting || loading}
+                disabled={rebooting || isSectionBusy('connectivity')}
                 className="w-full border-red-500/50 text-red-400 hover:bg-red-500/10"
               >
                 {rebooting ? 'Rebooting...' : 'Reboot Radio'}
               </Button>
 
-              {error && <div className="text-sm text-destructive">{error}</div>}
-            </TabsContent>
+              {getSectionError('connectivity') && (
+                <div className="text-sm text-destructive">{getSectionError('connectivity')}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-            {/* Database Tab */}
-            <TabsContent value="database" className="space-y-4 mt-4">
+      {shouldRenderSection('database') && (
+        <div className={sectionWrapperClass}>
+          {renderSectionHeader('database')}
+          {isSectionVisible('database') && (
+            <div className={sectionContentClass}>
               <div className="space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">Database size</span>
@@ -885,15 +1036,27 @@ export function SettingsModal({
                 </p>
               </div>
 
-              {error && <div className="text-sm text-destructive">{error}</div>}
+              {getSectionError('database') && (
+                <div className="text-sm text-destructive">{getSectionError('database')}</div>
+              )}
 
-              <Button onClick={handleSaveDatabaseSettings} disabled={loading} className="w-full">
-                {loading ? 'Saving...' : 'Save Settings'}
+              <Button
+                onClick={handleSaveDatabaseSettings}
+                disabled={isSectionBusy('database')}
+                className="w-full"
+              >
+                {isSectionBusy('database') ? 'Saving...' : 'Save Settings'}
               </Button>
-            </TabsContent>
+            </div>
+          )}
+        </div>
+      )}
 
-            {/* Bot Tab */}
-            <TabsContent value="bot" className="space-y-4 mt-4">
+      {shouldRenderSection('bot') && (
+        <div className={sectionWrapperClass}>
+          {renderSectionHeader('bot')}
+          {isSectionVisible('bot') && (
+            <div className={sectionContentClass}>
               <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-md">
                 <p className="text-sm text-red-500">
                   <strong>Experimental:</strong> This is an alpha feature and introduces automated
@@ -935,11 +1098,9 @@ export function SettingsModal({
                 <div className="space-y-2">
                   {bots.map((bot) => (
                     <div key={bot.id} className="border border-input rounded-md overflow-hidden">
-                      {/* Bot header row */}
                       <div
                         className="flex items-center gap-2 px-3 py-2 bg-muted/50 cursor-pointer hover:bg-muted/80"
                         onClick={(e) => {
-                          // Don't toggle if clicking on interactive elements
                           if ((e.target as HTMLElement).closest('input, button')) return;
                           setExpandedBotId(expandedBotId === bot.id ? null : bot.id);
                         }}
@@ -948,7 +1109,6 @@ export function SettingsModal({
                           {expandedBotId === bot.id ? '▼' : '▶'}
                         </span>
 
-                        {/* Bot name (click to edit) */}
                         {editingNameId === bot.id ? (
                           <input
                             type="text"
@@ -979,7 +1139,6 @@ export function SettingsModal({
                           </span>
                         )}
 
-                        {/* Enabled checkbox */}
                         <label
                           className="flex items-center gap-1.5 cursor-pointer"
                           onClick={(e) => e.stopPropagation()}
@@ -993,7 +1152,6 @@ export function SettingsModal({
                           <span className="text-xs text-muted-foreground">Enabled</span>
                         </label>
 
-                        {/* Delete button */}
                         <Button
                           type="button"
                           variant="ghost"
@@ -1009,7 +1167,6 @@ export function SettingsModal({
                         </Button>
                       </div>
 
-                      {/* Bot expanded content */}
                       {expandedBotId === bot.id && (
                         <div className="p-3 space-y-3 border-t border-input">
                           <div className="flex items-center justify-between">
@@ -1028,7 +1185,7 @@ export function SettingsModal({
                           </div>
                           <Suspense
                             fallback={
-                              <div className="h-64 rounded-md border border-input bg-[#282c34] flex items-center justify-center text-muted-foreground">
+                              <div className="h-64 md:h-96 rounded-md border border-input bg-[#282c34] flex items-center justify-center text-muted-foreground">
                                 Loading editor...
                               </div>
                             }
@@ -1037,6 +1194,7 @@ export function SettingsModal({
                               value={bot.code}
                               onChange={(code) => handleBotCodeChange(bot.id, code)}
                               id={`bot-code-${bot.id}`}
+                              height={isMobileLayout ? '256px' : '384px'}
                             />
                           </Suspense>
                         </div>
@@ -1064,15 +1222,21 @@ export function SettingsModal({
                 </p>
               </div>
 
-              {error && <div className="text-sm text-destructive">{error}</div>}
+              {getSectionError('bot') && (
+                <div className="text-sm text-destructive">{getSectionError('bot')}</div>
+              )}
 
-              <Button onClick={handleSaveBotSettings} disabled={loading} className="w-full">
-                {loading ? 'Saving...' : 'Save Bot Settings'}
+              <Button
+                onClick={handleSaveBotSettings}
+                disabled={isSectionBusy('bot')}
+                className="w-full"
+              >
+                {isSectionBusy('bot') ? 'Saving...' : 'Save Bot Settings'}
               </Button>
-            </TabsContent>
-          </Tabs>
-        )}
-      </DialogContent>
-    </Dialog>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

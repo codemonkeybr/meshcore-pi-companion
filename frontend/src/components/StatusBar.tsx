@@ -7,11 +7,18 @@ import { toast } from './ui/sonner';
 interface StatusBarProps {
   health: HealthStatus | null;
   config: RadioConfig | null;
+  settingsMode?: boolean;
   onSettingsClick: () => void;
   onMenuClick?: () => void;
 }
 
-export function StatusBar({ health, config, onSettingsClick, onMenuClick }: StatusBarProps) {
+export function StatusBar({
+  health,
+  config,
+  settingsMode = false,
+  onSettingsClick,
+  onMenuClick,
+}: StatusBarProps) {
   const connected = health?.radio_connected ?? false;
   const [reconnecting, setReconnecting] = useState(false);
 
@@ -85,7 +92,7 @@ export function StatusBar({ health, config, onSettingsClick, onMenuClick }: Stat
         <span role="img" aria-label="Settings">
           &#128295;
         </span>{' '}
-        Radio & Config
+        {settingsMode ? 'Back to Chat' : 'Radio & Config'}
       </button>
     </div>
   );

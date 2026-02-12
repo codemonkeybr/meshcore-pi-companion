@@ -88,7 +88,17 @@ vi.mock('../messageCache', () => ({
 }));
 
 vi.mock('../components/StatusBar', () => ({
-  StatusBar: () => <div data-testid="status-bar" />,
+  StatusBar: ({
+    settingsMode,
+    onSettingsClick,
+  }: {
+    settingsMode?: boolean;
+    onSettingsClick: () => void;
+  }) => (
+    <button type="button" onClick={onSettingsClick} data-testid="status-bar-settings-toggle">
+      {settingsMode ? 'Back to Chat' : 'Radio & Config'}
+    </button>
+  ),
 }));
 
 vi.mock('../components/Sidebar', () => ({
@@ -111,7 +121,17 @@ vi.mock('../components/NewMessageModal', () => ({
 }));
 
 vi.mock('../components/SettingsModal', () => ({
-  SettingsModal: () => null,
+  SettingsModal: ({ desktopSection }: { desktopSection?: string }) => (
+    <div data-testid="settings-modal-section">{desktopSection ?? 'none'}</div>
+  ),
+  SETTINGS_SECTION_ORDER: ['radio', 'identity', 'connectivity', 'database', 'bot'],
+  SETTINGS_SECTION_LABELS: {
+    radio: '📻 Radio',
+    identity: '🪪 Identity',
+    connectivity: '📡 Connectivity',
+    database: '🗄️ Database',
+    bot: '🤖 Bot',
+  },
 }));
 
 vi.mock('../components/RawPacketList', () => ({
@@ -242,6 +262,34 @@ describe('App favorite toggle flow', () => {
 
     await waitFor(() => {
       expect(screen.getByTitle('Add to favorites')).toBeInTheDocument();
+    });
+  });
+
+  it('toggles settings page mode and syncs selected section into SettingsModal', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Radio & Config' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Radio & Config' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Back to Chat' })).toBeInTheDocument();
+      expect(screen.getByTestId('settings-modal-section')).toHaveTextContent('radio');
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: /Identity/i })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-modal-section')).toHaveTextContent('identity');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Chat' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Radio & Config' })).toBeInTheDocument();
+      expect(screen.queryByTestId('settings-modal-section')).not.toBeInTheDocument();
     });
   });
 });
