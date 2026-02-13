@@ -365,7 +365,8 @@ export function MessageList({
           const prevSenderKey = prevMsg
             ? getSenderKey(prevMsg, parseSenderFromText(prevMsg.text).sender)
             : null;
-          const showAvatar = !msg.outgoing && currentSenderKey !== prevSenderKey;
+          const isFirstInGroup = currentSenderKey !== prevSenderKey;
+          const showAvatar = !msg.outgoing && isFirstInGroup;
           const isFirstMessage = index === 0;
 
           // Get avatar info for incoming messages
@@ -390,7 +391,7 @@ export function MessageList({
               className={cn(
                 'flex items-start max-w-[85%]',
                 msg.outgoing && 'flex-row-reverse self-end',
-                showAvatar && !isFirstMessage && 'mt-3'
+                isFirstInGroup && !isFirstMessage && 'mt-3'
               )}
             >
               {!msg.outgoing && (
