@@ -325,7 +325,7 @@ export function Sidebar({
                   crackerRunning ? 'text-green-500' : 'text-muted-foreground'
                 )}
               >
-                ({crackerRunning ? 'running' : 'stopped'})
+                ({crackerRunning ? 'running' : 'idle'})
               </span>
             </span>
           </div>
