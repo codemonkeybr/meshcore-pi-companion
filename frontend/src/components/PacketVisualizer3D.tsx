@@ -1045,10 +1045,11 @@ export function PacketVisualizer3D({
       if (cssRenderer.domElement.parentNode) {
         cssRenderer.domElement.parentNode.removeChild(cssRenderer.domElement);
       }
-      // Clean up node meshes
+      // Clean up node meshes and their CSS2D label DOM elements
       for (const nd of nodeMeshesRef.current.values()) {
+        nd.mesh.remove(nd.label);
+        nd.labelDiv.remove();
         scene.remove(nd.mesh);
-        scene.remove(nd.label);
         nd.mesh.geometry.dispose();
         (nd.mesh.material as THREE.Material).dispose();
       }
@@ -1214,6 +1215,8 @@ export function PacketVisualizer3D({
 
       for (const [id, nd] of nodeMeshesRef.current) {
         if (!currentNodeIds.has(id)) {
+          nd.mesh.remove(nd.label);
+          nd.labelDiv.remove();
           scene.remove(nd.mesh);
           nd.mesh.geometry.dispose();
           (nd.mesh.material as THREE.Material).dispose();
