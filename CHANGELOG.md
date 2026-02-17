@@ -1,3 +1,7 @@
+## [2.0.1] - 2026-02-16
+
+Bugfix: Fix missing trigger condition on statistics pane expansion on mobile
+
 ## [2.0.0] - 2026-02-16
 
 Feature: Frontend UX + log overhaul
