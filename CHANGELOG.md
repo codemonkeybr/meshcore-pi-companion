@@ -1,3 +1,16 @@
+## [2.0.0] - 2026-02-16
+
+Feature: Frontend UX + log overhaul
+Bugfix: Use contact object from DB for broadcast rather than handrolling
+Bugfix: Fix our of order path WS messages voerwriting each other
+Bugfix: Make broadcast timestamp match fallback logic used in storage code
+Bugfix: Fir repeater command timestamp selection logic
+Bugfix: Use actual pubkey matching for path update, and don't action serial path update events (use RX packet)
+Bugfix: Add missing radio operation locks in a few sports
+Bugfix: Fix dedupe for frontend raw packet delivery (mesh visualizer much more active now!)
+Bugfix: Less aggressive dedupe for advert packets (we don't care about the payload, we care about the path, duh)
+Misc: Visualizer layout refinement & option labels
+
 ## [1.10.0] - 2026-02-16
 
 Feature: Collapsible sidebar sections with per-section unread badge (thanks @rgregg !)
