@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import random
+import time
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from meshcore import EventType
@@ -22,6 +24,9 @@ from app.packet_processor import start_historical_dm_decryption
 from app.radio import radio_manager
 from app.repository import AmbiguousPublicKeyPrefixError, ContactRepository, MessageRepository
 
+if TYPE_CHECKING:
+    from meshcore.events import Event
+
 logger = logging.getLogger(__name__)
 
 # ACL permission level names
@@ -35,6 +40,86 @@ router = APIRouter(prefix="/contacts", tags=["contacts"])
 
 # Delay between repeater radio operations to allow key exchange and path establishment
 REPEATER_OP_DELAY_SECONDS = 2.0
+
+
+def _monotonic() -> float:
+    """Wrapper around time.monotonic() for testability.
+
+    Patching time.monotonic directly breaks the asyncio event loop which also
+    uses it. This indirection allows tests to control the clock safely.
+    """
+    return time.monotonic()
+
+
+async def _fetch_repeater_response(
+    mc,
+    target_pubkey_prefix: str,
+    timeout: float = 20.0,
+) -> "Event | None":
+    """Fetch a CLI response from a specific repeater via a validated get_msg() loop.
+
+    Calls get_msg() repeatedly until a matching CLI response (txt_type=1) from the
+    target repeater arrives or the wall-clock deadline expires. Unrelated messages
+    are safe to skip — meshcore's event dispatcher already delivers them to the
+    normal subscription handlers (on_contact_message, etc.) when get_msg() returns.
+
+    Args:
+        mc: MeshCore instance
+        target_pubkey_prefix: 12-char hex prefix of the repeater's public key
+        timeout: Wall-clock seconds before giving up
+
+    Returns:
+        The matching Event, or None if no response arrived before the deadline.
+    """
+    deadline = _monotonic() + timeout
+
+    while _monotonic() < deadline:
+        try:
+            result = await mc.commands.get_msg(timeout=2.0)
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            logger.debug("get_msg() exception: %s", e)
+            await asyncio.sleep(1.0)
+            continue
+
+        if result.type == EventType.NO_MORE_MSGS:
+            # No messages queued yet — wait and retry
+            await asyncio.sleep(1.0)
+            continue
+
+        if result.type == EventType.ERROR:
+            logger.debug("get_msg() error: %s", result.payload)
+            await asyncio.sleep(1.0)
+            continue
+
+        if result.type == EventType.CONTACT_MSG_RECV:
+            msg_prefix = result.payload.get("pubkey_prefix", "")
+            txt_type = result.payload.get("txt_type", 0)
+            if msg_prefix == target_pubkey_prefix and txt_type == 1:
+                return result
+            # Not our target — already dispatched to subscribers by meshcore,
+            # so just continue draining the queue.
+            logger.debug(
+                "Skipping non-target message (from=%s, txt_type=%d) while waiting for %s",
+                msg_prefix,
+                txt_type,
+                target_pubkey_prefix,
+            )
+            continue
+
+        if result.type == EventType.CHANNEL_MSG_RECV:
+            # Already dispatched to subscribers by meshcore; skip.
+            logger.debug(
+                "Skipping channel message (channel_idx=%s) during repeater fetch",
+                result.payload.get("channel_idx"),
+            )
+            continue
+
+        logger.debug("Unexpected event type %s during repeater fetch, skipping", result.type)
+
+    logger.warning("No CLI response from repeater %s within %.1fs", target_pubkey_prefix, timeout)
+    return None
 
 
 def _ambiguous_contact_detail(err: AmbiguousPublicKeyPrefixError) -> str:
@@ -402,29 +487,21 @@ async def request_telemetry(public_key: str, request: TelemetryRequest) -> Telem
         clock_output: str | None = None
         for attempt in range(1, 3):
             logger.debug("Clock request attempt %d/2", attempt)
-            try:
-                send_result = await mc.commands.send_cmd(contact.public_key, "clock")
-                if send_result.type == EventType.ERROR:
-                    logger.debug("Clock command send error: %s", send_result.payload)
-                    continue
-
-                # Wait for response
-                wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=5.0)
-                if wait_result is None:
-                    logger.debug("Clock request timeout, retrying...")
-                    continue
-
-                response_event = await mc.commands.get_msg()
-                if response_event.type == EventType.ERROR:
-                    logger.debug("Clock get_msg error: %s", response_event.payload)
-                    continue
-
-                clock_output = response_event.payload.get("text", "")
-                logger.info("Received clock output: %s", clock_output)
-                break
-            except Exception as e:
-                logger.debug("Clock request exception: %s", e)
+            send_result = await mc.commands.send_cmd(contact.public_key, "clock")
+            if send_result.type == EventType.ERROR:
+                logger.debug("Clock command send error: %s", send_result.payload)
                 continue
+
+            response_event = await _fetch_repeater_response(
+                mc, contact.public_key[:12], timeout=10.0
+            )
+            if response_event is None:
+                logger.debug("Clock request timeout, retrying...")
+                continue
+
+            clock_output = response_event.payload.get("text", "")
+            logger.info("Received clock output: %s", clock_output)
+            break
 
     if clock_output is None:
         clock_output = "Unable to fetch `clock` output (repeater did not respond)"
@@ -507,47 +584,33 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
                 status_code=500, detail=f"Failed to send command: {send_result.payload}"
             )
 
-        # Wait for response (MESSAGES_WAITING event, then get_msg)
-        try:
-            wait_result = await mc.wait_for_event(EventType.MESSAGES_WAITING, timeout=10.0)
+        # Wait for response using validated fetch loop
+        response_event = await _fetch_repeater_response(mc, contact.public_key[:12])
 
-            if wait_result is None:
-                # Timeout - no response received
-                logger.warning(
-                    "No response from repeater %s for command: %s",
-                    contact.public_key[:12],
-                    request.command,
-                )
-                return CommandResponse(
-                    command=request.command,
-                    response="(no response - command may have been processed)",
-                )
-
-            response_event = await mc.commands.get_msg()
-
-            if response_event.type == EventType.ERROR:
-                return CommandResponse(
-                    command=request.command, response=f"(error: {response_event.payload})"
-                )
-
-            # CONTACT_MSG_RECV payloads use sender_timestamp in meshcore.
-            response_text = response_event.payload.get("text", str(response_event.payload))
-            sender_timestamp = response_event.payload.get(
-                "sender_timestamp",
-                response_event.payload.get("timestamp"),
+        if response_event is None:
+            logger.warning(
+                "No response from repeater %s for command: %s",
+                contact.public_key[:12],
+                request.command,
             )
-            logger.info("Received response from %s: %s", contact.public_key[:12], response_text)
-
             return CommandResponse(
                 command=request.command,
-                response=response_text,
-                sender_timestamp=sender_timestamp,
+                response="(no response - command may have been processed)",
             )
-        except Exception as e:
-            logger.error("Error waiting for response: %s", e)
-            return CommandResponse(
-                command=request.command, response=f"(error waiting for response: {e})"
-            )
+
+        # CONTACT_MSG_RECV payloads use sender_timestamp in meshcore.
+        response_text = response_event.payload.get("text", str(response_event.payload))
+        sender_timestamp = response_event.payload.get(
+            "sender_timestamp",
+            response_event.payload.get("timestamp"),
+        )
+        logger.info("Received response from %s: %s", contact.public_key[:12], response_text)
+
+        return CommandResponse(
+            command=request.command,
+            response=response_text,
+            sender_timestamp=sender_timestamp,
+        )
 
 
 @router.post("/{public_key}/trace", response_model=TraceResponse)
