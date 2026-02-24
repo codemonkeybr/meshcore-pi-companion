@@ -8,10 +8,11 @@
  * between backend and frontend - both sides test against the same data.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import fixtures from './fixtures/websocket_events.json';
 import { getMessageContentKey } from '../hooks/useConversationMessages';
 import { getStateKey } from '../utils/conversationState';
+import * as messageCache from '../messageCache';
 import type { Message, Contact, Channel } from '../types';
 
 /**
@@ -24,7 +25,8 @@ interface MockState {
   channels: Channel[];
   unreadCounts: Record<string, number>;
   lastMessageTimes: Record<string, number>;
-  seenMessageContent: Set<string>;
+  /** Active-conversation dedup (mirrors useConversationMessages internal set) */
+  seenActiveContent: Set<string>;
 }
 
 function createMockState(): MockState {
@@ -34,13 +36,16 @@ function createMockState(): MockState {
     channels: [],
     unreadCounts: {},
     lastMessageTimes: {},
-    seenMessageContent: new Set(),
+    seenActiveContent: new Set(),
   };
 }
 
 /**
  * Simulate handling a message WebSocket event.
  * Mirrors the logic in App.tsx onMessage handler.
+ *
+ * Non-active conversation dedup uses messageCache.addMessage (single source of truth).
+ * Active conversation dedup uses seenActiveContent (mirrors useConversationMessages).
  */
 function handleMessageEvent(
   state: MockState,
@@ -57,8 +62,8 @@ function handleMessageEvent(
 
   // Add to messages if for active conversation (with deduplication)
   if (isForActiveConversation) {
-    if (!state.seenMessageContent.has(contentKey)) {
-      state.seenMessageContent.add(contentKey);
+    if (!state.seenActiveContent.has(contentKey)) {
+      state.seenActiveContent.add(contentKey);
       state.messages.push(msg);
       added = true;
     }
@@ -73,10 +78,10 @@ function handleMessageEvent(
   state.lastMessageTimes[stateKey] = msg.received_at;
 
   // Increment unread if not for active conversation and not outgoing
-  if (!msg.outgoing && !isForActiveConversation) {
-    // Deduplicate by content
-    if (!state.seenMessageContent.has(contentKey)) {
-      state.seenMessageContent.add(contentKey);
+  // Uses messageCache.addMessage as single source of truth for dedup
+  if (!isForActiveConversation) {
+    const isNew = messageCache.addMessage(msg.conversation_key, msg, contentKey);
+    if (!msg.outgoing && isNew) {
       state.unreadCounts[stateKey] = (state.unreadCounts[stateKey] || 0) + 1;
       unreadIncremented = true;
     }
@@ -110,6 +115,11 @@ function handleMessageAckedEvent(state: MockState, messageId: number, ackCount: 
   }
   return false;
 }
+
+// Clear messageCache between tests to avoid cross-test contamination
+beforeEach(() => {
+  messageCache.clear();
+});
 
 describe('Integration: Channel Message Events', () => {
   const fixture = fixtures.channel_message;
@@ -314,6 +324,61 @@ describe('Integration: ACK Events', () => {
     handleMessageAckedEvent(state, 42, 3);
 
     expect(state.messages[0].acked).toBe(3);
+  });
+});
+
+describe('Integration: No phantom unreads from mesh echoes (hitlist #8 regression)', () => {
+  it('does not increment unread when a mesh echo arrives after many unique messages', () => {
+    const state = createMockState();
+    const convKey = 'channel_busy';
+
+    // Deliver 1001 unique messages — exceeding the old global
+    // seenMessageContentRef prune threshold (1000→500). Under the old
+    // dual-set design the global set would drop msg-0's key during pruning,
+    // so a later mesh echo of msg-0 would pass the global check and
+    // phantom-increment unread. With the fix, messageCache's per-conversation
+    // seenContent is the single source of truth and is never pruned.
+    const MESSAGE_COUNT = 1001;
+    for (let i = 0; i < MESSAGE_COUNT; i++) {
+      const msg: Message = {
+        id: i,
+        type: 'CHAN',
+        conversation_key: convKey,
+        text: `msg-${i}`,
+        sender_timestamp: 1700000000 + i,
+        received_at: 1700000000 + i,
+        paths: null,
+        txt_type: 0,
+        signature: null,
+        outgoing: false,
+        acked: 0,
+      };
+      handleMessageEvent(state, msg, 'other_active_conv');
+    }
+
+    const stateKey = getStateKey('channel', convKey);
+    expect(state.unreadCounts[stateKey]).toBe(MESSAGE_COUNT);
+
+    // Now a mesh echo of msg-0 arrives (same content, different id).
+    // msg-0's key would have been evicted by the old 1000→500 prune.
+    const echo: Message = {
+      id: 9999,
+      type: 'CHAN',
+      conversation_key: convKey,
+      text: 'msg-0',
+      sender_timestamp: 1700000000, // same sender_timestamp as original
+      received_at: 1700001000,
+      paths: null,
+      txt_type: 0,
+      signature: null,
+      outgoing: false,
+      acked: 0,
+    };
+    const result = handleMessageEvent(state, echo, 'other_active_conv');
+
+    // Must NOT increment unread — the echo is a duplicate
+    expect(result.unreadIncremented).toBe(false);
+    expect(state.unreadCounts[stateKey]).toBe(MESSAGE_COUNT);
   });
 });
 

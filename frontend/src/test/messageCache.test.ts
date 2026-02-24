@@ -150,38 +150,45 @@ describe('messageCache', () => {
   });
 
   describe('addMessage', () => {
-    it('adds message to existing cached conversation', () => {
+    it('adds message to existing cached conversation and returns true', () => {
       messageCache.set('conv1', createEntry([]));
 
       const msg = createMessage({ id: 10, text: 'New message' });
-      messageCache.addMessage('conv1', msg, 'CHAN-channel123-New message-1700000000');
+      const result = messageCache.addMessage(
+        'conv1',
+        msg,
+        'CHAN-channel123-New message-1700000000'
+      );
 
+      expect(result).toBe(true);
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(1);
       expect(entry!.messages[0].text).toBe('New message');
     });
 
-    it('deduplicates by content key', () => {
+    it('deduplicates by content key and returns false', () => {
       messageCache.set('conv1', createEntry([]));
 
       const msg1 = createMessage({ id: 10, text: 'Hello' });
       const contentKey = 'CHAN-channel123-Hello-1700000000';
-      messageCache.addMessage('conv1', msg1, contentKey);
+      expect(messageCache.addMessage('conv1', msg1, contentKey)).toBe(true);
 
       // Same content key, different message id
       const msg2 = createMessage({ id: 11, text: 'Hello' });
-      messageCache.addMessage('conv1', msg2, contentKey);
+      expect(messageCache.addMessage('conv1', msg2, contentKey)).toBe(false);
 
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(1);
     });
 
-    it('deduplicates by message id', () => {
+    it('deduplicates by message id and returns false', () => {
       messageCache.set('conv1', createEntry([createMessage({ id: 10, text: 'Original' })]));
 
       // Same id, different content key
       const msg = createMessage({ id: 10, text: 'Different' });
-      messageCache.addMessage('conv1', msg, 'CHAN-channel123-Different-1700000000');
+      expect(messageCache.addMessage('conv1', msg, 'CHAN-channel123-Different-1700000000')).toBe(
+        false
+      );
 
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(1);
@@ -200,8 +207,13 @@ describe('messageCache', () => {
         text: 'newest',
         received_at: 1700000000 + MAX_MESSAGES_PER_ENTRY,
       });
-      messageCache.addMessage('conv1', newMsg, `CHAN-channel123-newest-${newMsg.sender_timestamp}`);
+      const result = messageCache.addMessage(
+        'conv1',
+        newMsg,
+        `CHAN-channel123-newest-${newMsg.sender_timestamp}`
+      );
 
+      expect(result).toBe(true);
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(MAX_MESSAGES_PER_ENTRY);
       // Newest message should be kept
@@ -210,11 +222,34 @@ describe('messageCache', () => {
       expect(entry!.messages.some((m) => m.id === 0)).toBe(false);
     });
 
-    it('ignores messages for non-cached conversations', () => {
-      const msg = createMessage({ id: 10 });
-      // Should not throw
-      messageCache.addMessage('nonexistent', msg, 'key');
-      expect(messageCache.size()).toBe(0);
+    it('auto-creates a minimal entry for never-visited conversations and returns true', () => {
+      const msg = createMessage({ id: 10, text: 'First contact' });
+      const result = messageCache.addMessage(
+        'new_conv',
+        msg,
+        'CHAN-channel123-First contact-1700000000'
+      );
+
+      expect(result).toBe(true);
+      expect(messageCache.size()).toBe(1);
+      const entry = messageCache.get('new_conv');
+      expect(entry).toBeDefined();
+      expect(entry!.messages).toHaveLength(1);
+      expect(entry!.messages[0].text).toBe('First contact');
+      expect(entry!.hasOlderMessages).toBe(true);
+      expect(entry!.seenContent.has('CHAN-channel123-First contact-1700000000')).toBe(true);
+    });
+
+    it('returns false for duplicate delivery to auto-created entry', () => {
+      const msg = createMessage({ id: 10, text: 'Echo' });
+      const contentKey = 'CHAN-channel123-Echo-1700000000';
+
+      expect(messageCache.addMessage('new_conv', msg, contentKey)).toBe(true);
+      // Duplicate via mesh echo
+      expect(messageCache.addMessage('new_conv', msg, contentKey)).toBe(false);
+
+      const entry = messageCache.get('new_conv');
+      expect(entry!.messages).toHaveLength(1);
     });
   });
 

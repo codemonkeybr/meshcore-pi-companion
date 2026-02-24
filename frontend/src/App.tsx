@@ -57,8 +57,6 @@ const MAX_RAW_PACKETS = 500;
 
 export function App() {
   const messageInputRef = useRef<MessageInputHandle>(null);
-  // Track seen message content to prevent duplicate unread increments
-  const seenMessageContentRef = useRef<Set<string>>(new Set());
   const [rawPackets, setRawPackets] = useState<RawPacket[]>([]);
   const [showNewMessage, setShowNewMessage] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -248,25 +246,13 @@ export function App() {
 
         const contentKey = getMessageContentKey(msg);
 
-        // Dedup: check if we've already seen this content BEFORE marking it seen.
-        const alreadySeen = !msg.outgoing && seenMessageContentRef.current.has(contentKey);
-        if (!msg.outgoing) {
-          seenMessageContentRef.current.add(contentKey);
-
-          // Limit set size to prevent memory issues
-          if (seenMessageContentRef.current.size > 1000) {
-            const keys = Array.from(seenMessageContentRef.current);
-            seenMessageContentRef.current = new Set(keys.slice(-500));
-          }
-        }
-
         // For non-active conversations: update cache and count unreads
         if (!isForActiveConversation) {
-          // Update message cache (instant restore on switch)
-          messageCache.addMessage(msg.conversation_key, msg, contentKey);
+          // Update message cache (instant restore on switch) — returns true if new
+          const isNew = messageCache.addMessage(msg.conversation_key, msg, contentKey);
 
           // Count unread for incoming messages (skip duplicates from multiple mesh paths)
-          if (!msg.outgoing && !alreadySeen) {
+          if (!msg.outgoing && isNew) {
             let stateKey: string | null = null;
             if (msg.type === 'CHAN' && msg.conversation_key) {
               stateKey = getStateKey('channel', msg.conversation_key);

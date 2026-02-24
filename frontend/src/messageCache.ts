@@ -49,12 +49,25 @@ export function set(id: string, entry: CacheEntry): void {
   }
 }
 
-/** Add a message to a cached (non-active) conversation with dedup. */
-export function addMessage(id: string, msg: Message, contentKey: string): void {
+/** Add a message to a cached conversation with dedup. Returns true if new, false if duplicate. */
+export function addMessage(id: string, msg: Message, contentKey: string): boolean {
   const entry = cache.get(id);
-  if (!entry) return;
-  if (entry.seenContent.has(contentKey)) return;
-  if (entry.messages.some((m) => m.id === msg.id)) return;
+  if (!entry) {
+    // Auto-create a minimal entry for never-visited conversations
+    cache.set(id, {
+      messages: [msg],
+      seenContent: new Set([contentKey]),
+      hasOlderMessages: true,
+    });
+    // Evict LRU if over capacity
+    if (cache.size > MAX_CACHED_CONVERSATIONS) {
+      const lruKey = cache.keys().next().value as string;
+      cache.delete(lruKey);
+    }
+    return true;
+  }
+  if (entry.seenContent.has(contentKey)) return false;
+  if (entry.messages.some((m) => m.id === msg.id)) return false;
   entry.seenContent.add(contentKey);
   entry.messages = [...entry.messages, msg];
   // Trim if over limit (drop oldest by received_at)
@@ -63,6 +76,7 @@ export function addMessage(id: string, msg: Message, contentKey: string): void {
       .sort((a, b) => b.received_at - a.received_at)
       .slice(0, MAX_MESSAGES_PER_ENTRY);
   }
+  return true;
 }
 
 /** Scan all cached entries for a message ID and update its ack/paths. */
