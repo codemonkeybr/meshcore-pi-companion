@@ -148,6 +148,20 @@ class TestExportAndStorePrivateKey:
         assert not has_private_key()
 
     @pytest.mark.asyncio
+    async def test_no_event_received_raises_runtime_error(self):
+        """no_event_received indicates command channel failure and should fail setup."""
+        mock_mc = MagicMock()
+        mock_result = MagicMock()
+        mock_result.type = EventType.ERROR
+        mock_result.payload = {"reason": "no_event_received"}
+        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+
+        with pytest.raises(RuntimeError, match="cannot proceed"):
+            await export_and_store_private_key(mock_mc)
+
+        assert not has_private_key()
+
+    @pytest.mark.asyncio
     async def test_exception_returns_false(self):
         """Exception during export returns False without storing."""
         mock_mc = MagicMock()

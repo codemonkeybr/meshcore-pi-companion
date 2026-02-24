@@ -18,6 +18,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+NO_EVENT_RECEIVED_GUIDANCE = (
+    "Radio command channel is unresponsive (no_event_received). Possible causes: "
+    "incompatible firmware for the meshcore_py command interface; or another "
+    "serial/TCP/BLE connectivity error. The app cannot proceed because it cannot "
+    "issue commands to the radio."
+)
+
 # In-memory storage for the private key and derived public key
 _private_key: bytes | None = None
 _public_key: bytes | None = None
@@ -91,8 +98,14 @@ async def export_and_store_private_key(mc: "MeshCore") -> bool:
             )
             return False
         else:
+            reason = result.payload.get("reason") if isinstance(result.payload, dict) else None
+            if result.type == EventType.ERROR and reason == "no_event_received":
+                logger.error("%s Raw response: %s", NO_EVENT_RECEIVED_GUIDANCE, result.payload)
+                raise RuntimeError(NO_EVENT_RECEIVED_GUIDANCE)
             logger.error("Failed to export private key: %s", result.payload)
             return False
+    except RuntimeError:
+        raise
     except Exception as e:
         logger.error("Error exporting private key: %s", e)
         return False
