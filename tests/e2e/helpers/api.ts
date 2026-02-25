@@ -163,6 +163,22 @@ export function sendChannelMessage(
   });
 }
 
+// --- Read state ---
+
+export interface UnreadCounts {
+  counts: Record<string, number>;
+  mentions: Record<string, boolean>;
+  last_message_times: Record<string, number>;
+}
+
+export function getUnreads(): Promise<UnreadCounts> {
+  return fetchJson('/read-state/unreads');
+}
+
+export function markAllRead(): Promise<{ status: string; timestamp: number }> {
+  return fetchJson('/read-state/mark-all-read', { method: 'POST' });
+}
+
 // --- Settings ---
 
 export interface BotConfig {
