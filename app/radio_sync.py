@@ -253,8 +253,9 @@ async def sync_and_offload_all(mc: MeshCore) -> dict:
 
     # Reload favorites and recent contacts back onto the radio immediately
     # so favorited contacts don't stay in the on_radio=False limbo until the
-    # next advertisement arrives.
-    reload_result = await sync_recent_contacts_to_radio(force=True)
+    # next advertisement arrives.  Pass mc directly since the caller already
+    # holds the radio operation lock (asyncio.Lock is not reentrant).
+    reload_result = await sync_recent_contacts_to_radio(force=True, mc=mc)
 
     return {
         "contacts": contacts_result,
@@ -556,13 +557,122 @@ _last_contact_sync: float = 0.0
 CONTACT_SYNC_THROTTLE_SECONDS = 30  # Don't sync more than once per 30 seconds
 
 
-async def sync_recent_contacts_to_radio(force: bool = False) -> dict:
+async def _sync_contacts_to_radio_inner(mc: MeshCore) -> dict:
+    """
+    Core logic for loading contacts onto the radio.
+
+    Favorite contacts are prioritized first, then recent non-repeater contacts
+    fill remaining slots up to max_radio_contacts.
+
+    Caller must hold the radio operation lock and pass a valid MeshCore instance.
+    """
+    app_settings = await AppSettingsRepository.get()
+    max_contacts = app_settings.max_radio_contacts
+    selected_contacts: list[Contact] = []
+    selected_keys: set[str] = set()
+
+    favorite_contacts_loaded = 0
+    for favorite in app_settings.favorites:
+        if favorite.type != "contact":
+            continue
+        try:
+            contact = await ContactRepository.get_by_key_or_prefix(favorite.id)
+        except AmbiguousPublicKeyPrefixError:
+            logger.warning(
+                "Skipping favorite contact '%s': ambiguous key prefix; use full key",
+                favorite.id,
+            )
+            continue
+        if not contact:
+            continue
+        key = contact.public_key.lower()
+        if key in selected_keys:
+            continue
+        selected_keys.add(key)
+        selected_contacts.append(contact)
+        favorite_contacts_loaded += 1
+        if len(selected_contacts) >= max_contacts:
+            break
+
+    if len(selected_contacts) < max_contacts:
+        recent_contacts = await ContactRepository.get_recent_non_repeaters(
+            limit=max_contacts
+        )
+        for contact in recent_contacts:
+            key = contact.public_key.lower()
+            if key in selected_keys:
+                continue
+            selected_keys.add(key)
+            selected_contacts.append(contact)
+            if len(selected_contacts) >= max_contacts:
+                break
+
+    logger.debug(
+        "Selected %d contacts to sync (%d favorite contacts first, limit=%d)",
+        len(selected_contacts),
+        favorite_contacts_loaded,
+        max_contacts,
+    )
+
+    loaded = 0
+    already_on_radio = 0
+    failed = 0
+
+    for contact in selected_contacts:
+        # Check if already on radio
+        radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
+        if radio_contact:
+            already_on_radio += 1
+            # Update DB if not marked as on_radio
+            if not contact.on_radio:
+                await ContactRepository.set_on_radio(contact.public_key, True)
+            continue
+
+        try:
+            result = await mc.commands.add_contact(contact.to_radio_dict())
+            if result.type == EventType.OK:
+                loaded += 1
+                await ContactRepository.set_on_radio(contact.public_key, True)
+                logger.debug("Loaded contact %s to radio", contact.public_key[:12])
+            else:
+                failed += 1
+                logger.warning(
+                    "Failed to load contact %s: %s", contact.public_key[:12], result.payload
+                )
+        except Exception as e:
+            failed += 1
+            logger.warning("Error loading contact %s: %s", contact.public_key[:12], e)
+
+    if loaded > 0 or failed > 0:
+        logger.info(
+            "Contact sync: loaded %d, already on radio %d, failed %d",
+            loaded,
+            already_on_radio,
+            failed,
+        )
+
+    return {
+        "loaded": loaded,
+        "already_on_radio": already_on_radio,
+        "failed": failed,
+    }
+
+
+async def sync_recent_contacts_to_radio(
+    force: bool = False, mc: MeshCore | None = None
+) -> dict:
     """
     Load contacts to the radio for DM ACK support.
 
     Favorite contacts are prioritized first, then recent non-repeater contacts
     fill remaining slots up to max_radio_contacts.
     Only runs at most once every CONTACT_SYNC_THROTTLE_SECONDS unless forced.
+
+    Args:
+        force: Skip the throttle check.
+        mc: Optional MeshCore instance. When provided, the caller already holds
+            the radio operation lock and the inner logic runs directly.
+            When None, this function acquires its own lock.
 
     Returns counts of contacts loaded.
     """
@@ -574,6 +684,11 @@ async def sync_recent_contacts_to_radio(force: bool = False) -> dict:
         logger.debug("Contact sync throttled (last sync %ds ago)", int(now - _last_contact_sync))
         return {"loaded": 0, "throttled": True}
 
+    # If caller provided a MeshCore instance, use it directly (caller holds the lock)
+    if mc is not None:
+        _last_contact_sync = now
+        return await _sync_contacts_to_radio_inner(mc)
+
     if not radio_manager.is_connected or radio_manager.meshcore is None:
         logger.debug("Cannot sync contacts to radio: not connected")
         return {"loaded": 0, "error": "Radio not connected"}
@@ -584,100 +699,7 @@ async def sync_recent_contacts_to_radio(force: bool = False) -> dict:
             blocking=False,
         ) as mc:
             _last_contact_sync = now
-
-            # Build prioritized contact list:
-            # 1) favorite contacts, in favorite order
-            # 2) most recent non-repeater contacts (excluding already-selected favorites)
-            app_settings = await AppSettingsRepository.get()
-            max_contacts = app_settings.max_radio_contacts
-            selected_contacts: list[Contact] = []
-            selected_keys: set[str] = set()
-
-            favorite_contacts_loaded = 0
-            for favorite in app_settings.favorites:
-                if favorite.type != "contact":
-                    continue
-                try:
-                    contact = await ContactRepository.get_by_key_or_prefix(favorite.id)
-                except AmbiguousPublicKeyPrefixError:
-                    logger.warning(
-                        "Skipping favorite contact '%s': ambiguous key prefix; use full key",
-                        favorite.id,
-                    )
-                    continue
-                if not contact:
-                    continue
-                key = contact.public_key.lower()
-                if key in selected_keys:
-                    continue
-                selected_keys.add(key)
-                selected_contacts.append(contact)
-                favorite_contacts_loaded += 1
-                if len(selected_contacts) >= max_contacts:
-                    break
-
-            if len(selected_contacts) < max_contacts:
-                recent_contacts = await ContactRepository.get_recent_non_repeaters(
-                    limit=max_contacts
-                )
-                for contact in recent_contacts:
-                    key = contact.public_key.lower()
-                    if key in selected_keys:
-                        continue
-                    selected_keys.add(key)
-                    selected_contacts.append(contact)
-                    if len(selected_contacts) >= max_contacts:
-                        break
-
-            logger.debug(
-                "Selected %d contacts to sync (%d favorite contacts first, limit=%d)",
-                len(selected_contacts),
-                favorite_contacts_loaded,
-                max_contacts,
-            )
-
-            loaded = 0
-            already_on_radio = 0
-            failed = 0
-
-            for contact in selected_contacts:
-                # Check if already on radio
-                radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
-                if radio_contact:
-                    already_on_radio += 1
-                    # Update DB if not marked as on_radio
-                    if not contact.on_radio:
-                        await ContactRepository.set_on_radio(contact.public_key, True)
-                    continue
-
-                try:
-                    result = await mc.commands.add_contact(contact.to_radio_dict())
-                    if result.type == EventType.OK:
-                        loaded += 1
-                        await ContactRepository.set_on_radio(contact.public_key, True)
-                        logger.debug("Loaded contact %s to radio", contact.public_key[:12])
-                    else:
-                        failed += 1
-                        logger.warning(
-                            "Failed to load contact %s: %s", contact.public_key[:12], result.payload
-                        )
-                except Exception as e:
-                    failed += 1
-                    logger.warning("Error loading contact %s: %s", contact.public_key[:12], e)
-
-            if loaded > 0 or failed > 0:
-                logger.info(
-                    "Contact sync: loaded %d, already on radio %d, failed %d",
-                    loaded,
-                    already_on_radio,
-                    failed,
-                )
-
-            return {
-                "loaded": loaded,
-                "already_on_radio": already_on_radio,
-                "failed": failed,
-            }
+            return await _sync_contacts_to_radio_inner(mc)
     except RadioOperationBusyError:
         logger.debug("Skipping contact sync to radio: radio busy")
         return {"loaded": 0, "busy": True}
