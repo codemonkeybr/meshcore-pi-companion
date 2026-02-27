@@ -87,6 +87,7 @@ const contacts: Contact[] = [
     on_radio: false,
     last_contacted: null,
     last_read_at: null,
+    first_seen: null,
   },
 ];
 
