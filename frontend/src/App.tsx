@@ -12,7 +12,6 @@ import { api } from './api';
 import { takePrefetch } from './prefetch';
 import { useWebSocket } from './useWebSocket';
 import {
-  useRepeaterMode,
   useUnreadCounts,
   useConversationMessages,
   getMessageContentKey,
@@ -35,8 +34,12 @@ import {
 } from './components/settingsConstants';
 import { RawPacketList } from './components/RawPacketList';
 import { ContactInfoPane } from './components/ContactInfoPane';
+import { CONTACT_TYPE_REPEATER } from './types';
 
 // Lazy-load heavy components to reduce initial bundle
+const RepeaterDashboard = lazy(() =>
+  import('./components/RepeaterDashboard').then((m) => ({ default: m.RepeaterDashboard }))
+);
 const MapView = lazy(() => import('./components/MapView').then((m) => ({ default: m.MapView })));
 const VisualizerView = lazy(() =>
   import('./components/VisualizerView').then((m) => ({ default: m.VisualizerView }))
@@ -167,7 +170,6 @@ export function App() {
     messagesLoading,
     loadingOlder,
     hasOlderMessages,
-    setMessages,
     fetchOlderMessages,
     addMessageIfNew,
     updateMessageAck,
@@ -182,12 +184,12 @@ export function App() {
     trackNewMessage,
   } = useUnreadCounts(channels, contacts, activeConversation);
 
-  const {
-    repeaterLoggedIn,
-    activeContactIsRepeater,
-    handleTelemetryRequest,
-    handleRepeaterCommand,
-  } = useRepeaterMode(activeConversation, contacts, setMessages, activeConversationRef);
+  // Determine if active contact is a repeater (used for routing to dashboard)
+  const activeContactIsRepeater = useMemo(() => {
+    if (!activeConversation || activeConversation.type !== 'contact') return false;
+    const contact = contacts.find((c) => c.public_key === activeConversation.id);
+    return contact?.type === CONTACT_TYPE_REPEATER;
+  }, [activeConversation, contacts]);
 
   // WebSocket handlers - memoized to prevent reconnection loops
   const wsHandlers = useMemo(
@@ -562,6 +564,27 @@ export function App() {
                     <RawPacketList packets={rawPackets} />
                   </div>
                 </>
+              ) : activeContactIsRepeater ? (
+                <Suspense
+                  fallback={
+                    <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                      Loading dashboard...
+                    </div>
+                  }
+                >
+                  <RepeaterDashboard
+                    key={activeConversation.id}
+                    conversation={activeConversation}
+                    contacts={contacts}
+                    favorites={favorites}
+                    radioLat={config?.lat ?? null}
+                    radioLon={config?.lon ?? null}
+                    radioName={config?.name ?? null}
+                    onTrace={handleTrace}
+                    onToggleFavorite={handleToggleFavorite}
+                    onDeleteContact={handleDeleteContact}
+                  />
+                </Suspense>
               ) : (
                 <>
                   <ChatHeader
@@ -595,25 +618,14 @@ export function App() {
                   />
                   <MessageInput
                     ref={messageInputRef}
-                    onSend={
-                      activeContactIsRepeater
-                        ? repeaterLoggedIn
-                          ? handleRepeaterCommand
-                          : handleTelemetryRequest
-                        : handleSendMessage
-                    }
+                    onSend={handleSendMessage}
                     disabled={!health?.radio_connected}
-                    isRepeaterMode={activeContactIsRepeater && !repeaterLoggedIn}
                     conversationType={activeConversation.type}
                     senderName={config?.name}
                     placeholder={
                       !health?.radio_connected
                         ? 'Radio not connected'
-                        : activeContactIsRepeater
-                          ? repeaterLoggedIn
-                            ? 'Send CLI command (requires admin login)...'
-                            : `Enter password for ${activeConversation.name} (or . for none)...`
-                          : `Message ${activeConversation.name}...`
+                        : `Message ${activeConversation.name}...`
                     }
                   />
                 </>

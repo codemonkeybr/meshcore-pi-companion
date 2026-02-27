@@ -44,12 +44,6 @@ vi.mock('../hooks', async (importOriginal) => {
       markAllRead: vi.fn(),
       trackNewMessage: vi.fn(),
     }),
-    useRepeaterMode: () => ({
-      repeaterLoggedIn: false,
-      activeContactIsRepeater: false,
-      handleTelemetryRequest: vi.fn(),
-      handleRepeaterCommand: vi.fn(),
-    }),
     getMessageContentKey: () => 'content-key',
   };
 });

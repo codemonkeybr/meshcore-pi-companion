@@ -211,10 +211,85 @@ class SendChannelMessageRequest(SendMessageRequest):
     channel_key: str = Field(description="Channel key (32-char hex)")
 
 
-class TelemetryRequest(BaseModel):
+class RepeaterLoginRequest(BaseModel):
+    """Request to log in to a repeater."""
+
     password: str = Field(
-        default="", description="Repeater password (empty string for no password)"
+        default="", description="Repeater password (empty string for guest login)"
     )
+
+
+class RepeaterLoginResponse(BaseModel):
+    """Response from repeater login."""
+
+    status: str = Field(description="Login result status")
+
+
+class RepeaterStatusResponse(BaseModel):
+    """Status telemetry from a repeater (single attempt, no retries)."""
+
+    battery_volts: float = Field(description="Battery voltage in volts")
+    tx_queue_len: int = Field(description="Transmit queue length")
+    noise_floor_dbm: int = Field(description="Noise floor in dBm")
+    last_rssi_dbm: int = Field(description="Last RSSI in dBm")
+    last_snr_db: float = Field(description="Last SNR in dB")
+    packets_received: int = Field(description="Total packets received")
+    packets_sent: int = Field(description="Total packets sent")
+    airtime_seconds: int = Field(description="TX airtime in seconds")
+    rx_airtime_seconds: int = Field(description="RX airtime in seconds")
+    uptime_seconds: int = Field(description="Uptime in seconds")
+    sent_flood: int = Field(description="Flood packets sent")
+    sent_direct: int = Field(description="Direct packets sent")
+    recv_flood: int = Field(description="Flood packets received")
+    recv_direct: int = Field(description="Direct packets received")
+    flood_dups: int = Field(description="Duplicate flood packets")
+    direct_dups: int = Field(description="Duplicate direct packets")
+    full_events: int = Field(description="Full event queue count")
+
+
+class RepeaterRadioSettingsResponse(BaseModel):
+    """Radio settings from a repeater (batch CLI get commands)."""
+
+    firmware_version: str | None = Field(default=None, description="Firmware version string")
+    radio: str | None = Field(default=None, description="Radio settings (freq,bw,sf,cr)")
+    tx_power: str | None = Field(default=None, description="TX power in dBm")
+    airtime_factor: str | None = Field(default=None, description="Airtime factor")
+    repeat_enabled: str | None = Field(default=None, description="Repeat mode enabled")
+    flood_max: str | None = Field(default=None, description="Max flood hops")
+    name: str | None = Field(default=None, description="Repeater name")
+    lat: str | None = Field(default=None, description="Latitude")
+    lon: str | None = Field(default=None, description="Longitude")
+    clock_utc: str | None = Field(default=None, description="Repeater clock in UTC")
+
+
+class RepeaterAdvertIntervalsResponse(BaseModel):
+    """Advertisement intervals from a repeater."""
+
+    advert_interval: str | None = Field(default=None, description="Local advert interval")
+    flood_advert_interval: str | None = Field(default=None, description="Flood advert interval")
+
+
+class RepeaterOwnerInfoResponse(BaseModel):
+    """Owner info and guest password from a repeater."""
+
+    owner_info: str | None = Field(default=None, description="Owner info string")
+    guest_password: str | None = Field(default=None, description="Guest password")
+
+
+class LppSensor(BaseModel):
+    """A single CayenneLPP sensor reading from req_telemetry_sync."""
+
+    channel: int = Field(description="LPP channel number")
+    type_name: str = Field(description="Sensor type name (e.g. temperature, humidity)")
+    value: float | dict = Field(
+        description="Scalar value or dict for multi-value sensors (GPS, accel)"
+    )
+
+
+class RepeaterLppTelemetryResponse(BaseModel):
+    """CayenneLPP sensor telemetry from a repeater."""
+
+    sensors: list[LppSensor] = Field(default_factory=list, description="List of sensor readings")
 
 
 class NeighborInfo(BaseModel):
@@ -237,34 +312,18 @@ class AclEntry(BaseModel):
     permission_name: str = Field(description="Human-readable permission name")
 
 
-class TelemetryResponse(BaseModel):
-    """Telemetry data from a repeater, formatted for human readability."""
+class RepeaterNeighborsResponse(BaseModel):
+    """Neighbors list from a repeater."""
 
-    pubkey_prefix: str = Field(description="12-char public key prefix")
-    battery_volts: float = Field(description="Battery voltage in volts")
-    tx_queue_len: int = Field(description="Transmit queue length")
-    noise_floor_dbm: int = Field(description="Noise floor in dBm")
-    last_rssi_dbm: int = Field(description="Last RSSI in dBm")
-    last_snr_db: float = Field(description="Last SNR in dB")
-    packets_received: int = Field(description="Total packets received")
-    packets_sent: int = Field(description="Total packets sent")
-    airtime_seconds: int = Field(description="TX airtime in seconds")
-    rx_airtime_seconds: int = Field(description="RX airtime in seconds")
-    uptime_seconds: int = Field(description="Uptime in seconds")
-    sent_flood: int = Field(description="Flood packets sent")
-    sent_direct: int = Field(description="Direct packets sent")
-    recv_flood: int = Field(description="Flood packets received")
-    recv_direct: int = Field(description="Direct packets received")
-    flood_dups: int = Field(description="Duplicate flood packets")
-    direct_dups: int = Field(description="Duplicate direct packets")
-    full_events: int = Field(description="Full event queue count")
     neighbors: list[NeighborInfo] = Field(
         default_factory=list, description="List of neighbors seen by repeater"
     )
+
+
+class RepeaterAclResponse(BaseModel):
+    """ACL list from a repeater."""
+
     acl: list[AclEntry] = Field(default_factory=list, description="Access control list")
-    clock_output: str | None = Field(
-        default=None, description="Output from 'clock' command (or error message)"
-    )
 
 
 class TraceResponse(BaseModel):

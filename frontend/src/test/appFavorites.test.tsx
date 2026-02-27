@@ -39,8 +39,6 @@ const mocks = vi.hoisted(() => ({
     incrementUnread: vi.fn(),
     markAllRead: vi.fn(),
     trackNewMessage: vi.fn(),
-    handleTelemetryRequest: vi.fn(),
-    handleRepeaterCommand: vi.fn(),
   },
 }));
 
@@ -74,12 +72,6 @@ vi.mock('../hooks', async (importOriginal) => {
       incrementUnread: mocks.hookFns.incrementUnread,
       markAllRead: mocks.hookFns.markAllRead,
       trackNewMessage: mocks.hookFns.trackNewMessage,
-    }),
-    useRepeaterMode: () => ({
-      repeaterLoggedIn: false,
-      activeContactIsRepeater: false,
-      handleTelemetryRequest: mocks.hookFns.handleTelemetryRequest,
-      handleRepeaterCommand: mocks.hookFns.handleRepeaterCommand,
     }),
     getMessageContentKey: () => 'content-key',
   };

@@ -218,8 +218,19 @@ export interface AclEntry {
   permission_name: string;
 }
 
-export interface TelemetryResponse {
-  pubkey_prefix: string;
+export interface CommandResponse {
+  command: string;
+  response: string;
+  sender_timestamp: number | null;
+}
+
+// --- Granular repeater endpoint types ---
+
+export interface RepeaterLoginResponse {
+  status: string;
+}
+
+export interface RepeaterStatusResponse {
   battery_volts: number;
   tx_queue_len: number;
   noise_floor_dbm: number;
@@ -237,15 +248,62 @@ export interface TelemetryResponse {
   flood_dups: number;
   direct_dups: number;
   full_events: number;
-  neighbors: NeighborInfo[];
-  acl: AclEntry[];
-  clock_output: string | null;
 }
 
-export interface CommandResponse {
-  command: string;
-  response: string;
-  sender_timestamp: number | null;
+export interface RepeaterNeighborsResponse {
+  neighbors: NeighborInfo[];
+}
+
+export interface RepeaterAclResponse {
+  acl: AclEntry[];
+}
+
+export interface RepeaterRadioSettingsResponse {
+  firmware_version: string | null;
+  radio: string | null;
+  tx_power: string | null;
+  airtime_factor: string | null;
+  repeat_enabled: string | null;
+  flood_max: string | null;
+  name: string | null;
+  lat: string | null;
+  lon: string | null;
+  clock_utc: string | null;
+}
+
+export interface RepeaterAdvertIntervalsResponse {
+  advert_interval: string | null;
+  flood_advert_interval: string | null;
+}
+
+export interface RepeaterOwnerInfoResponse {
+  owner_info: string | null;
+  guest_password: string | null;
+}
+
+export interface LppSensor {
+  channel: number;
+  type_name: string;
+  value: number | Record<string, number>;
+}
+
+export interface RepeaterLppTelemetryResponse {
+  sensors: LppSensor[];
+}
+
+export type PaneName =
+  | 'status'
+  | 'neighbors'
+  | 'acl'
+  | 'radioSettings'
+  | 'advertIntervals'
+  | 'ownerInfo'
+  | 'lppTelemetry';
+
+export interface PaneState {
+  loading: boolean;
+  attempt: number;
+  error: string | null;
 }
 
 export interface TraceResponse {

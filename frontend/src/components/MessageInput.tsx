@@ -33,8 +33,6 @@ interface MessageInputProps {
   onSend: (text: string) => Promise<void>;
   disabled: boolean;
   placeholder?: string;
-  /** When true, input becomes password field for repeater telemetry */
-  isRepeaterMode?: boolean;
   /** Conversation type for character limit calculation */
   conversationType?: 'contact' | 'channel' | 'raw';
   /** Sender name (radio name) for channel message limit calculation */
@@ -48,7 +46,7 @@ export interface MessageInputHandle {
 }
 
 export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(function MessageInput(
-  { onSend, disabled, placeholder, isRepeaterMode, conversationType, senderName },
+  { onSend, disabled, placeholder, conversationType, senderName },
   ref
 ) {
   const [text, setText] = useState('');
@@ -112,45 +110,25 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     async (e: FormEvent) => {
       e.preventDefault();
       const trimmed = text.trim();
+      if (!trimmed || sending || disabled) return;
 
-      // For repeater mode, empty password means guest login
-      if (isRepeaterMode) {
-        if (sending || disabled) return;
-        setSending(true);
-        try {
-          await onSend(trimmed);
-          setText('');
-        } catch (err) {
-          console.error('Failed to request telemetry:', err);
-          toast.error('Failed to request telemetry', {
-            description: err instanceof Error ? err.message : 'Check radio connection',
-          });
-          return;
-        } finally {
-          setSending(false);
-        }
-        // Refocus after React re-enables the input (now in CLI command mode)
-        setTimeout(() => inputRef.current?.focus(), 0);
-      } else {
-        if (!trimmed || sending || disabled) return;
-        setSending(true);
-        try {
-          await onSend(trimmed);
-          setText('');
-        } catch (err) {
-          console.error('Failed to send message:', err);
-          toast.error('Failed to send message', {
-            description: err instanceof Error ? err.message : 'Check radio connection',
-          });
-          return;
-        } finally {
-          setSending(false);
-        }
-        // Refocus after React re-enables the input
-        setTimeout(() => inputRef.current?.focus(), 0);
+      setSending(true);
+      try {
+        await onSend(trimmed);
+        setText('');
+      } catch (err) {
+        console.error('Failed to send message:', err);
+        toast.error('Failed to send message', {
+          description: err instanceof Error ? err.message : 'Check radio connection',
+        });
+        return;
+      } finally {
+        setSending(false);
       }
+      // Refocus after React re-enables the input
+      setTimeout(() => inputRef.current?.focus(), 0);
     },
-    [text, sending, disabled, onSend, isRepeaterMode]
+    [text, sending, disabled, onSend]
   );
 
   const handleKeyDown = useCallback(
@@ -163,12 +141,11 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
     [handleSubmit]
   );
 
-  // For repeater mode, always allow submit (empty = guest login)
-  const canSubmit = isRepeaterMode ? true : text.trim().length > 0;
+  const canSubmit = text.trim().length > 0;
 
-  // Show counter for messages (not repeater mode or raw).
+  // Show counter for messages (not raw).
   // Desktop: always visible. Mobile: only show count after 100 characters.
-  const showCharCounter = !isRepeaterMode && limits !== null;
+  const showCharCounter = limits !== null;
   const showMobileCounterValue = text.length > 100;
 
   return (
@@ -180,7 +157,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
       <div className="flex gap-2">
         <Input
           ref={inputRef}
-          type={isRepeaterMode ? 'password' : 'text'}
+          type="text"
           autoComplete="off"
           name="chat-message-input"
           data-lpignore="true"
@@ -189,10 +166,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={
-            placeholder ||
-            (isRepeaterMode ? 'Enter password for admin login...' : 'Type a message...')
-          }
+          placeholder={placeholder || 'Type a message...'}
           disabled={disabled || sending}
           className="flex-1 min-w-0"
         />
@@ -201,15 +175,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
           disabled={disabled || sending || !canSubmit}
           className="flex-shrink-0"
         >
-          {sending
-            ? isRepeaterMode
-              ? 'Logging in...'
-              : 'Sending...'
-            : isRepeaterMode
-              ? text.trim()
-                ? 'Log in with password'
-                : 'Log in as guest/use repeater ACLs'
-              : 'Send'}
+          {sending ? 'Sending...' : 'Send'}
         </Button>
       </div>
       {showCharCounter && (

@@ -178,7 +178,7 @@ When only a 1-byte prefix is known (from packet path bytes), the node is marked 
 
 **Problem:** When multiple repeaters share a 1-byte prefix, the visualizer can't tell which physical repeater a path hop refers to.
 
-**Solution:** The backend tracks recent unique advertisement paths per repeater in `repeater_advert_paths` (see root `AGENTS.md` § "Repeater Advert Path Memory"). On mount (and when new contacts appear), the visualizer fetches this data via `GET /api/contacts/repeaters/advert-paths` and builds an index keyed by 12-char prefix.
+**Solution:** The backend tracks recent unique advertisement paths per contact in `contact_advert_paths` (see root `AGENTS.md` § "Contact Advert Path Memory"). On mount (and when new contacts appear), the visualizer fetches this data via `GET /api/contacts/repeaters/advert-paths` and builds an index keyed by 12-char prefix.
 
 **Scoring:** `pickLikelyRepeaterByAdvertPath(candidates, nextPrefix)` scores each candidate repeater by how often its stored advert paths' `next_hop` matches the packet's actual next-hop prefix. It requires:
 

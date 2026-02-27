@@ -124,9 +124,16 @@ app/
 - `POST /contacts/{public_key}/add-to-radio`
 - `POST /contacts/{public_key}/remove-from-radio`
 - `POST /contacts/{public_key}/mark-read`
-- `POST /contacts/{public_key}/telemetry`
 - `POST /contacts/{public_key}/command`
 - `POST /contacts/{public_key}/trace`
+- `POST /contacts/{public_key}/repeater/login`
+- `POST /contacts/{public_key}/repeater/status`
+- `POST /contacts/{public_key}/repeater/lpp-telemetry`
+- `POST /contacts/{public_key}/repeater/neighbors`
+- `POST /contacts/{public_key}/repeater/acl`
+- `POST /contacts/{public_key}/repeater/radio-settings`
+- `POST /contacts/{public_key}/repeater/advert-intervals`
+- `POST /contacts/{public_key}/repeater/owner-info`
 
 ### Channels
 - `GET /channels`
@@ -237,7 +244,7 @@ tests/
 ├── test_radio_operation.py     # radio_operation() context manager
 ├── test_radio_router.py        # Radio router endpoints
 ├── test_radio_sync.py          # Polling, sync, advertisement
-├── test_repeater_routes.py     # Repeater command/telemetry/trace
+├── test_repeater_routes.py     # Repeater command/telemetry/trace + granular pane endpoints
 ├── test_repository.py          # Data access layer
 ├── test_send_messages.py       # Outgoing messages, bot triggers, concurrent sends
 ├── test_settings_router.py     # Settings endpoints, advert validation

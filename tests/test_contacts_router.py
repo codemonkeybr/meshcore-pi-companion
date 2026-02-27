@@ -76,6 +76,7 @@ async def _insert_contact(public_key=KEY_A, name="Alice", on_radio=False, **over
         "last_seen": None,
         "on_radio": on_radio,
         "last_contacted": None,
+        "first_seen": None,
     }
     data.update(overrides)
     await ContactRepository.upsert(data)

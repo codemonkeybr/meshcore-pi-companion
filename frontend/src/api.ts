@@ -15,8 +15,15 @@ import type {
   MigratePreferencesResponse,
   RadioConfig,
   RadioConfigUpdate,
+  RepeaterAclResponse,
+  RepeaterAdvertIntervalsResponse,
+  RepeaterLoginResponse,
+  RepeaterLppTelemetryResponse,
+  RepeaterNeighborsResponse,
+  RepeaterOwnerInfoResponse,
+  RepeaterRadioSettingsResponse,
+  RepeaterStatusResponse,
   StatisticsResponse,
-  TelemetryResponse,
   TraceResponse,
   UnreadCounts,
 } from './types';
@@ -117,11 +124,6 @@ export const api = {
   markContactRead: (publicKey: string) =>
     fetchJson<{ status: string; public_key: string }>(`/contacts/${publicKey}/mark-read`, {
       method: 'POST',
-    }),
-  requestTelemetry: (publicKey: string, password: string) =>
-    fetchJson<TelemetryResponse>(`/contacts/${publicKey}/telemetry`, {
-      method: 'POST',
-      body: JSON.stringify({ password }),
     }),
   sendRepeaterCommand: (publicKey: string, command: string) =>
     fetchJson<CommandResponse>(`/contacts/${publicKey}/command`, {
@@ -240,4 +242,39 @@ export const api = {
 
   // Statistics
   getStatistics: () => fetchJson<StatisticsResponse>('/statistics'),
+
+  // Granular repeater endpoints
+  repeaterLogin: (publicKey: string, password: string) =>
+    fetchJson<RepeaterLoginResponse>(`/contacts/${publicKey}/repeater/login`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  repeaterStatus: (publicKey: string) =>
+    fetchJson<RepeaterStatusResponse>(`/contacts/${publicKey}/repeater/status`, {
+      method: 'POST',
+    }),
+  repeaterNeighbors: (publicKey: string) =>
+    fetchJson<RepeaterNeighborsResponse>(`/contacts/${publicKey}/repeater/neighbors`, {
+      method: 'POST',
+    }),
+  repeaterAcl: (publicKey: string) =>
+    fetchJson<RepeaterAclResponse>(`/contacts/${publicKey}/repeater/acl`, {
+      method: 'POST',
+    }),
+  repeaterRadioSettings: (publicKey: string) =>
+    fetchJson<RepeaterRadioSettingsResponse>(`/contacts/${publicKey}/repeater/radio-settings`, {
+      method: 'POST',
+    }),
+  repeaterAdvertIntervals: (publicKey: string) =>
+    fetchJson<RepeaterAdvertIntervalsResponse>(`/contacts/${publicKey}/repeater/advert-intervals`, {
+      method: 'POST',
+    }),
+  repeaterOwnerInfo: (publicKey: string) =>
+    fetchJson<RepeaterOwnerInfoResponse>(`/contacts/${publicKey}/repeater/owner-info`, {
+      method: 'POST',
+    }),
+  repeaterLppTelemetry: (publicKey: string) =>
+    fetchJson<RepeaterLppTelemetryResponse>(`/contacts/${publicKey}/repeater/lpp-telemetry`, {
+      method: 'POST',
+    }),
 };
