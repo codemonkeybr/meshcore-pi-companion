@@ -20,14 +20,35 @@
     <script>
       // Start critical data fetches before React loads — shaves ~1-2s off startup.
       // React hooks consume the promises via window.__prefetch.
-      var j = function(r) { return r.json(); };
+      var fetchJsonOrThrow = function(url) {
+        return fetch(url).then(function(response) {
+          if (response.ok) {
+            return response.json();
+          }
+          return response.text().then(function(rawError) {
+            var message = rawError || response.statusText || ('HTTP ' + response.status);
+            try {
+              var parsed = JSON.parse(rawError);
+              if (parsed && typeof parsed.detail === 'string' && parsed.detail.length > 0) {
+                message = parsed.detail;
+              }
+            } catch {
+              // Keep raw text fallback when body is not JSON.
+            }
+            throw new Error('Prefetch failed for ' + url + ': ' + message);
+          });
+        }).catch(function(err) {
+          console.error(err);
+          throw err;
+        });
+      };
       window.__prefetch = {
-        config: fetch('/api/radio/config').then(j),
-        settings: fetch('/api/settings').then(j),
-        channels: fetch('/api/channels').then(j),
-        contacts: fetch('/api/contacts?limit=1000&offset=0').then(j),
-        unreads: fetch('/api/read-state/unreads').then(j),
-        undecryptedCount: fetch('/api/packets/undecrypted/count').then(j),
+        config: fetchJsonOrThrow('/api/radio/config'),
+        settings: fetchJsonOrThrow('/api/settings'),
+        channels: fetchJsonOrThrow('/api/channels'),
+        contacts: fetchJsonOrThrow('/api/contacts?limit=1000&offset=0'),
+        unreads: fetchJsonOrThrow('/api/read-state/unreads'),
+        undecryptedCount: fetchJsonOrThrow('/api/packets/undecrypted/count'),
       };
     </script>
     <script type="module" src="/src/main.tsx"></script>

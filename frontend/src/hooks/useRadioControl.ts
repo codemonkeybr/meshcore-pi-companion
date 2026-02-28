@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../api';
-import { takePrefetch } from '../prefetch';
+import { takePrefetchOrFetch } from '../prefetch';
 import { toast } from '../components/ui/sonner';
 import type { HealthStatus, RadioConfig, RadioConfigUpdate } from '../types';
 
@@ -20,7 +20,7 @@ export function useRadioControl() {
 
   const fetchConfig = useCallback(async () => {
     try {
-      const data = await (takePrefetch('config') ?? api.getRadioConfig());
+      const data = await takePrefetchOrFetch('config', api.getRadioConfig);
       setConfig(data);
     } catch (err) {
       console.error('Failed to fetch config:', err);

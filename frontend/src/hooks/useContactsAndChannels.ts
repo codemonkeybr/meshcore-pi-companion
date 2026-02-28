@@ -1,6 +1,6 @@
 import { useState, useCallback, type MutableRefObject } from 'react';
 import { api } from '../api';
-import { takePrefetch } from '../prefetch';
+import { takePrefetchOrFetch } from '../prefetch';
 import { toast } from '../components/ui/sonner';
 import * as messageCache from '../messageCache';
 import { getContactDisplayName } from '../utils/pubkey';
@@ -26,7 +26,7 @@ export function useContactsAndChannels({
 
   const fetchUndecryptedCountInternal = useCallback(async () => {
     try {
-      const data = await (takePrefetch('undecryptedCount') ?? api.getUndecryptedPacketCount());
+      const data = await takePrefetchOrFetch('undecryptedCount', api.getUndecryptedPacketCount);
       setUndecryptedCount(data.count);
     } catch (err) {
       console.error('Failed to fetch undecrypted count:', err);
@@ -36,7 +36,7 @@ export function useContactsAndChannels({
   // Fetch all contacts, paginating if >1000
   const fetchAllContacts = useCallback(async (): Promise<Contact[]> => {
     const pageSize = 1000;
-    const first = await (takePrefetch('contacts') ?? api.getContacts(pageSize, 0));
+    const first = await takePrefetchOrFetch('contacts', () => api.getContacts(pageSize, 0));
     if (first.length < pageSize) return first;
     let all = [...first];
     let offset = pageSize;

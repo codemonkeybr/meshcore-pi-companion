@@ -9,7 +9,7 @@ import {
   Suspense,
 } from 'react';
 import { api } from './api';
-import { takePrefetch } from './prefetch';
+import { takePrefetchOrFetch } from './prefetch';
 import { useWebSocket } from './useWebSocket';
 import {
   useUnreadCounts,
@@ -319,7 +319,7 @@ export function App() {
     fetchUndecryptedCount();
 
     // Fetch contacts and channels via REST (parallel, faster than WS serial push)
-    (takePrefetch('channels') ?? api.getChannels()).then(setChannels).catch(console.error);
+    takePrefetchOrFetch('channels', api.getChannels).then(setChannels).catch(console.error);
     fetchAllContacts()
       .then((data) => {
         setContacts(data);

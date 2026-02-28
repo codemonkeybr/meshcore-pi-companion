@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../api';
-import { takePrefetch } from '../prefetch';
+import { takePrefetchOrFetch } from '../prefetch';
 import { toast } from '../components/ui/sonner';
 import {
   initLastMessageTimes,
@@ -27,7 +27,7 @@ export function useAppSettings() {
 
   const fetchAppSettings = useCallback(async () => {
     try {
-      const data = await (takePrefetch('settings') ?? api.getSettings());
+      const data = await takePrefetchOrFetch('settings', api.getSettings);
       setAppSettings(data);
       initLastMessageTimes(data.last_message_times ?? {});
     } catch (err) {

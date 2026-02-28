@@ -7,7 +7,7 @@ import {
   type ConversationTimes,
 } from '../utils/conversationState';
 import type { Channel, Contact, Conversation, Message, UnreadCounts } from '../types';
-import { takePrefetch } from '../prefetch';
+import { takePrefetchOrFetch } from '../prefetch';
 
 interface UseUnreadCountsResult {
   unreadCounts: Record<string, number>;
@@ -59,13 +59,12 @@ export function useUnreadCounts(
   const contactsLen = contacts.length;
   const prevLens = useRef({ channels: 0, contacts: 0 });
   useEffect(() => {
-    const prefetched = takePrefetch('unreads');
-    if (prefetched) {
-      prefetched.then(applyUnreads).catch(() => fetchUnreads());
-    } else {
-      fetchUnreads();
-    }
-  }, [fetchUnreads, applyUnreads]);
+    takePrefetchOrFetch('unreads', api.getUnreads)
+      .then(applyUnreads)
+      .catch((err) => {
+        console.error('Failed to fetch unreads:', err);
+      });
+  }, [applyUnreads]);
   useEffect(() => {
     const prev = prevLens.current;
     prevLens.current = { channels: channelsLen, contacts: contactsLen };
