@@ -14,11 +14,10 @@
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
-  </head>
-  <body>
-    <div id="root"></div>
     <script>
-      // Start critical data fetches before React loads — shaves ~1-2s off startup.
+      // Start critical data fetches before React/Vite JS loads.
+      // Must be in <head> BEFORE the module script so the browser queues these
+      // fetches before it discovers and starts downloading the JS bundle.
       // React hooks consume the promises via window.__prefetch.
       var fetchJsonOrThrow = function(url) {
         return fetch(url).then(function(response) {
@@ -51,6 +50,9 @@
         undecryptedCount: fetchJsonOrThrow('/api/packets/undecrypted/count'),
       };
     </script>
+  </head>
+  <body>
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
