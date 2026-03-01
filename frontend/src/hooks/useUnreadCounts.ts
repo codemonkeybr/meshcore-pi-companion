@@ -69,7 +69,7 @@ export function useUnreadCounts(
     const prev = prevLens.current;
     prevLens.current = { channels: channelsLen, contacts: contactsLen };
     // Skip the initial load (0→N); only refetch on mid-session count changes
-    if (prev.channels === 0 && prev.contacts === 0) return;
+    if (prev.channels === 0 || prev.contacts === 0) return;
     fetchUnreads();
   }, [channelsLen, contactsLen, fetchUnreads]);
 
