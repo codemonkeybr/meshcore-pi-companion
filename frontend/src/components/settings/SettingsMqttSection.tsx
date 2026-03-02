@@ -30,7 +30,8 @@ export function SettingsMqttSection({
   // Community MQTT state
   const [communityMqttEnabled, setCommunityMqttEnabled] = useState(false);
   const [communityMqttIata, setCommunityMqttIata] = useState('');
-  const [communityMqttBroker, setCommunityMqttBroker] = useState('mqtt-us-v1.letsmesh.net');
+  const [communityMqttBrokerHost, setCommunityMqttBrokerHost] = useState('mqtt-us-v1.letsmesh.net');
+  const [communityMqttBrokerPort, setCommunityMqttBrokerPort] = useState('443');
   const [communityMqttEmail, setCommunityMqttEmail] = useState('');
 
   const [busy, setBusy] = useState(false);
@@ -48,7 +49,8 @@ export function SettingsMqttSection({
     setMqttPublishRawPackets(appSettings.mqtt_publish_raw_packets ?? false);
     setCommunityMqttEnabled(appSettings.community_mqtt_enabled ?? false);
     setCommunityMqttIata(appSettings.community_mqtt_iata ?? '');
-    setCommunityMqttBroker(appSettings.community_mqtt_broker ?? 'mqtt-us-v1.letsmesh.net');
+    setCommunityMqttBrokerHost(appSettings.community_mqtt_broker_host ?? 'mqtt-us-v1.letsmesh.net');
+    setCommunityMqttBrokerPort(String(appSettings.community_mqtt_broker_port ?? 443));
     setCommunityMqttEmail(appSettings.community_mqtt_email ?? '');
   }, [appSettings]);
 
@@ -69,7 +71,8 @@ export function SettingsMqttSection({
         mqtt_publish_raw_packets: mqttPublishRawPackets,
         community_mqtt_enabled: communityMqttEnabled,
         community_mqtt_iata: communityMqttIata,
-        community_mqtt_broker: communityMqttBroker || 'mqtt-us-v1.letsmesh.net',
+        community_mqtt_broker_host: communityMqttBrokerHost || 'mqtt-us-v1.letsmesh.net',
+        community_mqtt_broker_port: parseInt(communityMqttBrokerPort, 10) || 443,
         community_mqtt_email: communityMqttEmail,
       };
       await onSaveAppSettings(update);
@@ -113,49 +116,53 @@ export function SettingsMqttSection({
 
       <Separator />
 
-      <div className="space-y-2">
-        <Label htmlFor="mqtt-host">Broker Host</Label>
-        <Input
-          id="mqtt-host"
-          type="text"
-          placeholder="e.g. 192.168.1.100"
-          value={mqttBrokerHost}
-          onChange={(e) => setMqttBrokerHost(e.target.value)}
-        />
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="mqtt-host">Broker Host</Label>
+          <Input
+            id="mqtt-host"
+            type="text"
+            placeholder="e.g. 192.168.1.100"
+            value={mqttBrokerHost}
+            onChange={(e) => setMqttBrokerHost(e.target.value)}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="mqtt-port">Broker Port</Label>
+          <Input
+            id="mqtt-port"
+            type="number"
+            min="1"
+            max="65535"
+            value={mqttBrokerPort}
+            onChange={(e) => setMqttBrokerPort(e.target.value)}
+          />
+        </div>
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="mqtt-port">Broker Port</Label>
-        <Input
-          id="mqtt-port"
-          type="number"
-          min="1"
-          max="65535"
-          value={mqttBrokerPort}
-          onChange={(e) => setMqttBrokerPort(e.target.value)}
-        />
-      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="mqtt-username">Username</Label>
+          <Input
+            id="mqtt-username"
+            type="text"
+            placeholder="Optional"
+            value={mqttUsername}
+            onChange={(e) => setMqttUsername(e.target.value)}
+          />
+        </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="mqtt-username">Username</Label>
-        <Input
-          id="mqtt-username"
-          type="text"
-          placeholder="Optional"
-          value={mqttUsername}
-          onChange={(e) => setMqttUsername(e.target.value)}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="mqtt-password">Password</Label>
-        <Input
-          id="mqtt-password"
-          type="password"
-          placeholder="Optional"
-          value={mqttPassword}
-          onChange={(e) => setMqttPassword(e.target.value)}
-        />
+        <div className="space-y-2">
+          <Label htmlFor="mqtt-password">Password</Label>
+          <Input
+            id="mqtt-password"
+            type="password"
+            placeholder="Optional"
+            value={mqttPassword}
+            onChange={(e) => setMqttPassword(e.target.value)}
+          />
+        </div>
       </div>
 
       <label className="flex items-center gap-3 cursor-pointer">
@@ -278,15 +285,29 @@ export function SettingsMqttSection({
 
         {communityMqttEnabled && (
           <div className="space-y-2">
-            <Label htmlFor="community-broker">Broker Address</Label>
-            <Input
-              id="community-broker"
-              type="text"
-              placeholder="mqtt-us-v1.letsmesh.net:443"
-              value={communityMqttBroker}
-              onChange={(e) => setCommunityMqttBroker(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">host or host:port (default port 443)</p>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="community-broker-host">Broker Host</Label>
+                <Input
+                  id="community-broker-host"
+                  type="text"
+                  placeholder="mqtt-us-v1.letsmesh.net"
+                  value={communityMqttBrokerHost}
+                  onChange={(e) => setCommunityMqttBrokerHost(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="community-broker-port">Broker Port</Label>
+                <Input
+                  id="community-broker-port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  value={communityMqttBrokerPort}
+                  onChange={(e) => setCommunityMqttBrokerPort(e.target.value)}
+                />
+              </div>
+            </div>
             <Label htmlFor="community-iata">Region Code (IATA)</Label>
             <Input
               id="community-iata"

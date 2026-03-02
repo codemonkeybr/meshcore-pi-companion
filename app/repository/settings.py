@@ -31,7 +31,8 @@ class AppSettingsRepository:
                    mqtt_use_tls, mqtt_tls_insecure, mqtt_topic_prefix,
                    mqtt_publish_messages, mqtt_publish_raw_packets,
                    community_mqtt_enabled, community_mqtt_iata,
-                   community_mqtt_broker, community_mqtt_email
+                   community_mqtt_broker_host, community_mqtt_broker_port,
+                   community_mqtt_email
             FROM app_settings WHERE id = 1
             """
         )
@@ -107,7 +108,9 @@ class AppSettingsRepository:
             mqtt_publish_raw_packets=bool(row["mqtt_publish_raw_packets"]),
             community_mqtt_enabled=bool(row["community_mqtt_enabled"]),
             community_mqtt_iata=row["community_mqtt_iata"] or "",
-            community_mqtt_broker=row["community_mqtt_broker"] or "mqtt-us-v1.letsmesh.net",
+            community_mqtt_broker_host=row["community_mqtt_broker_host"]
+            or "mqtt-us-v1.letsmesh.net",
+            community_mqtt_broker_port=row["community_mqtt_broker_port"] or 443,
             community_mqtt_email=row["community_mqtt_email"] or "",
         )
 
@@ -133,7 +136,8 @@ class AppSettingsRepository:
         mqtt_publish_raw_packets: bool | None = None,
         community_mqtt_enabled: bool | None = None,
         community_mqtt_iata: str | None = None,
-        community_mqtt_broker: str | None = None,
+        community_mqtt_broker_host: str | None = None,
+        community_mqtt_broker_port: int | None = None,
         community_mqtt_email: str | None = None,
     ) -> AppSettings:
         """Update app settings. Only provided fields are updated."""
@@ -222,9 +226,13 @@ class AppSettingsRepository:
             updates.append("community_mqtt_iata = ?")
             params.append(community_mqtt_iata)
 
-        if community_mqtt_broker is not None:
-            updates.append("community_mqtt_broker = ?")
-            params.append(community_mqtt_broker)
+        if community_mqtt_broker_host is not None:
+            updates.append("community_mqtt_broker_host = ?")
+            params.append(community_mqtt_broker_host)
+
+        if community_mqtt_broker_port is not None:
+            updates.append("community_mqtt_broker_port = ?")
+            params.append(community_mqtt_broker_port)
 
         if community_mqtt_email is not None:
             updates.append("community_mqtt_email = ?")

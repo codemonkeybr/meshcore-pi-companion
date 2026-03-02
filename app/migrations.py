@@ -1916,7 +1916,8 @@ async def _migrate_032_add_community_mqtt_columns(conn: aiosqlite.Connection) ->
     new_columns = [
         ("community_mqtt_enabled", "INTEGER DEFAULT 0"),
         ("community_mqtt_iata", "TEXT DEFAULT ''"),
-        ("community_mqtt_broker", "TEXT DEFAULT 'mqtt-us-v1.letsmesh.net'"),
+        ("community_mqtt_broker_host", "TEXT DEFAULT 'mqtt-us-v1.letsmesh.net'"),
+        ("community_mqtt_broker_port", "INTEGER DEFAULT 443"),
         ("community_mqtt_email", "TEXT DEFAULT ''"),
     ]
 

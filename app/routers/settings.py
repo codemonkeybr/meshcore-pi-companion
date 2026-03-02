@@ -106,9 +106,15 @@ class AppSettingsUpdate(BaseModel):
         default=None,
         description="IATA region code for community MQTT topic routing (3 alpha chars)",
     )
-    community_mqtt_broker: str | None = Field(
+    community_mqtt_broker_host: str | None = Field(
         default=None,
         description="Community MQTT broker hostname",
+    )
+    community_mqtt_broker_port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Community MQTT broker port",
     )
     community_mqtt_email: str | None = Field(
         default=None,
@@ -214,8 +220,12 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
         kwargs["community_mqtt_iata"] = iata
         community_mqtt_changed = True
 
-    if update.community_mqtt_broker is not None:
-        kwargs["community_mqtt_broker"] = update.community_mqtt_broker
+    if update.community_mqtt_broker_host is not None:
+        kwargs["community_mqtt_broker_host"] = update.community_mqtt_broker_host
+        community_mqtt_changed = True
+
+    if update.community_mqtt_broker_port is not None:
+        kwargs["community_mqtt_broker_port"] = update.community_mqtt_broker_port
         community_mqtt_changed = True
 
     if update.community_mqtt_email is not None:

@@ -195,7 +195,8 @@ export interface AppSettings {
   mqtt_publish_raw_packets: boolean;
   community_mqtt_enabled: boolean;
   community_mqtt_iata: string;
-  community_mqtt_broker: string;
+  community_mqtt_broker_host: string;
+  community_mqtt_broker_port: number;
   community_mqtt_email: string;
 }
 
@@ -216,7 +217,8 @@ export interface AppSettingsUpdate {
   mqtt_publish_raw_packets?: boolean;
   community_mqtt_enabled?: boolean;
   community_mqtt_iata?: string;
-  community_mqtt_broker?: string;
+  community_mqtt_broker_host?: string;
+  community_mqtt_broker_port?: number;
   community_mqtt_email?: string;
 }
 

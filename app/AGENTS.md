@@ -122,13 +122,13 @@ app/
 - Independent from the private `MqttPublisher` — different broker, authentication, and topic structure.
 - Connects to the community broker (default `mqtt-us-v1.letsmesh.net:443`) via WebSockets over TLS.
 - Authentication: Ed25519 JWT tokens signed with the radio's expanded "orlp" private key. Tokens expire after 24 hours; proactive renewal at 23 hours.
-- Broker address supports `host:port` format; defaults to port 443 if omitted.
+- Broker address: separate `community_mqtt_broker_host` and `community_mqtt_broker_port` fields; defaults to `mqtt-us-v1.letsmesh.net:443`.
 - JWT claims include `publicKey`, `owner` (radio pubkey), `client` (app identifier), and optional `email` (for node claiming on the community aggregator).
 - Topic: `meshcore/{IATA}/{pubkey}/packets` — IATA is a 3-letter region code (required to enable; no default).
 - Only raw packets are published — never decrypted messages.
 - Publishes are fire-and-forget. The connection loop detects publish failures via `connected` flag and reconnects within 60 seconds.
 - Health endpoint includes `community_mqtt_status` field.
-- Settings: `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker`, `community_mqtt_email`.
+- Settings: `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker_host`, `community_mqtt_broker_port`, `community_mqtt_email`.
 
 ## API Surface (all under `/api`)
 
@@ -238,7 +238,7 @@ Main tables:
 - `bots`
 - `mqtt_broker_host`, `mqtt_broker_port`, `mqtt_username`, `mqtt_password`
 - `mqtt_use_tls`, `mqtt_tls_insecure`, `mqtt_topic_prefix`, `mqtt_publish_messages`, `mqtt_publish_raw_packets`
-- `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker`, `community_mqtt_email`
+- `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker_host`, `community_mqtt_broker_port`, `community_mqtt_email`
 
 ## Security Posture (intentional)
 

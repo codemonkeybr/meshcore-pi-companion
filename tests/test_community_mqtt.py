@@ -9,14 +9,12 @@ import pytest
 from app.community_mqtt import (
     _CLIENT_ID,
     _DEFAULT_BROKER,
-    _DEFAULT_PORT,
     CommunityMqttPublisher,
     _base64url_encode,
     _calculate_packet_hash,
     _ed25519_sign_expanded,
     _format_raw_packet,
     _generate_jwt_token,
-    _parse_broker_address,
     community_mqtt_broadcast,
 )
 from app.models import AppSettings
@@ -421,33 +419,6 @@ class TestCommunityMqttBroadcast:
             mock_pub._settings = None
             community_mqtt_broadcast("raw_packet", {"data": "00"})
             mock_task.assert_not_called()
-
-
-class TestParseBrokerAddress:
-    def test_hostname_only_uses_default_port(self):
-        host, port = _parse_broker_address("mqtt-us-v1.letsmesh.net")
-        assert host == "mqtt-us-v1.letsmesh.net"
-        assert port == _DEFAULT_PORT
-
-    def test_hostname_with_port(self):
-        host, port = _parse_broker_address("mqtt-us-v1.letsmesh.net:8883")
-        assert host == "mqtt-us-v1.letsmesh.net"
-        assert port == 8883
-
-    def test_hostname_with_port_443(self):
-        host, port = _parse_broker_address("broker.example.com:443")
-        assert host == "broker.example.com"
-        assert port == 443
-
-    def test_invalid_port_uses_default(self):
-        host, port = _parse_broker_address("broker.example.com:abc")
-        assert host == "broker.example.com:abc"
-        assert port == _DEFAULT_PORT
-
-    def test_empty_string(self):
-        host, port = _parse_broker_address("")
-        assert host == ""
-        assert port == _DEFAULT_PORT
 
 
 class TestPublishFailureSetsDisconnected:

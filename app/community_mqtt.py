@@ -43,17 +43,6 @@ _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _ROUTE_MAP = {0: "F", 1: "F", 2: "D", 3: "T"}
 
 
-def _parse_broker_address(broker_str: str) -> tuple[str, int]:
-    """Parse 'host' or 'host:port' into (host, port). Defaults to _DEFAULT_PORT."""
-    if ":" in broker_str:
-        host, port_str = broker_str.rsplit(":", 1)
-        try:
-            return host, int(port_str)
-        except ValueError:
-            pass
-    return broker_str, _DEFAULT_PORT
-
-
 def _base64url_encode(data: bytes) -> str:
     """Base64url encode without padding."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -308,8 +297,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         assert private_key is not None and public_key is not None  # guaranteed by _pre_connect
 
         pubkey_hex = public_key.hex().upper()
-        broker_raw = settings.community_mqtt_broker or _DEFAULT_BROKER
-        broker_host, broker_port = _parse_broker_address(broker_raw)
+        broker_host = settings.community_mqtt_broker_host or _DEFAULT_BROKER
+        broker_port = settings.community_mqtt_broker_port or _DEFAULT_PORT
         jwt_token = _generate_jwt_token(
             private_key,
             public_key,
@@ -330,8 +319,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         }
 
     def _on_connected(self, settings: AppSettings) -> tuple[str, str]:
-        broker_raw = settings.community_mqtt_broker or _DEFAULT_BROKER
-        broker_host, broker_port = _parse_broker_address(broker_raw)
+        broker_host = settings.community_mqtt_broker_host or _DEFAULT_BROKER
+        broker_port = settings.community_mqtt_broker_port or _DEFAULT_PORT
         return ("Community MQTT connected", f"{broker_host}:{broker_port}")
 
     def _on_error(self) -> tuple[str, str]:

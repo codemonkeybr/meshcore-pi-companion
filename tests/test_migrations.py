@@ -929,13 +929,15 @@ class TestMigration032:
             # Verify all columns exist with correct defaults
             cursor = await conn.execute(
                 """SELECT community_mqtt_enabled, community_mqtt_iata,
-                          community_mqtt_broker, community_mqtt_email
+                          community_mqtt_broker_host, community_mqtt_broker_port,
+                          community_mqtt_email
                    FROM app_settings WHERE id = 1"""
             )
             row = await cursor.fetchone()
             assert row["community_mqtt_enabled"] == 0
             assert row["community_mqtt_iata"] == ""
-            assert row["community_mqtt_broker"] == "mqtt-us-v1.letsmesh.net"
+            assert row["community_mqtt_broker_host"] == "mqtt-us-v1.letsmesh.net"
+            assert row["community_mqtt_broker_port"] == 443
             assert row["community_mqtt_email"] == ""
         finally:
             await conn.close()

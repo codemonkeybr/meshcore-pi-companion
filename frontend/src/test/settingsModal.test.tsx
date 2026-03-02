@@ -63,7 +63,8 @@ const baseSettings: AppSettings = {
   mqtt_publish_raw_packets: false,
   community_mqtt_enabled: false,
   community_mqtt_iata: '',
-  community_mqtt_broker: 'mqtt-us-v1.letsmesh.net',
+  community_mqtt_broker_host: 'mqtt-us-v1.letsmesh.net',
+  community_mqtt_broker_port: 443,
   community_mqtt_email: '',
 };
 

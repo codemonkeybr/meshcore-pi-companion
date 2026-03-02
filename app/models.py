@@ -471,9 +471,13 @@ class AppSettings(BaseModel):
         default="",
         description="IATA region code for community MQTT topic routing (3 alpha chars)",
     )
-    community_mqtt_broker: str = Field(
+    community_mqtt_broker_host: str = Field(
         default="mqtt-us-v1.letsmesh.net",
         description="Community MQTT broker hostname",
+    )
+    community_mqtt_broker_port: int = Field(
+        default=443,
+        description="Community MQTT broker port",
     )
     community_mqtt_email: str = Field(
         default="",

@@ -126,21 +126,24 @@ class TestUpdateSettings:
                 AppSettingsUpdate(
                     community_mqtt_enabled=True,
                     community_mqtt_iata="DEN",
-                    community_mqtt_broker="custom-broker.example.com",
+                    community_mqtt_broker_host="custom-broker.example.com",
+                    community_mqtt_broker_port=8883,
                     community_mqtt_email="test@example.com",
                 )
             )
 
         assert result.community_mqtt_enabled is True
         assert result.community_mqtt_iata == "DEN"
-        assert result.community_mqtt_broker == "custom-broker.example.com"
+        assert result.community_mqtt_broker_host == "custom-broker.example.com"
+        assert result.community_mqtt_broker_port == 8883
         assert result.community_mqtt_email == "test@example.com"
 
         # Verify persistence
         fresh = await AppSettingsRepository.get()
         assert fresh.community_mqtt_enabled is True
         assert fresh.community_mqtt_iata == "DEN"
-        assert fresh.community_mqtt_broker == "custom-broker.example.com"
+        assert fresh.community_mqtt_broker_host == "custom-broker.example.com"
+        assert fresh.community_mqtt_broker_port == 8883
         assert fresh.community_mqtt_email == "test@example.com"
 
         # Verify restart was called

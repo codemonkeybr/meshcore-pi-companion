@@ -370,10 +370,10 @@ Separate from private MQTT, the community publisher (`app/community_mqtt.py`) sh
 
 - Connects to community broker (default `mqtt-us-v1.letsmesh.net:443`) via WebSockets over TLS.
 - Authentication via Ed25519 JWT signed with the radio's private key. Tokens auto-renew before 24h expiry.
-- Broker address field supports `host:port` format (default port 443 if omitted).
+- Broker address: separate `community_mqtt_broker_host` and `community_mqtt_broker_port` fields; defaults to `mqtt-us-v1.letsmesh.net:443`.
 - Topic: `meshcore/{IATA}/{pubkey}/packets` — IATA is a 3-letter region code.
 - JWT `email` claim enables node claiming on the community aggregator.
-- Config: `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker`, `community_mqtt_email` in `app_settings`.
+- Config: `community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker_host`, `community_mqtt_broker_port`, `community_mqtt_email` in `app_settings`.
 
 ### Server-Side Decryption
 
@@ -416,7 +416,7 @@ mc.subscribe(EventType.ACK, handler)
 | `MESHCORE_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`/`INFO`/`WARNING`/`ERROR`) |
 | `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database location |
 
-**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `sidebar_sort_order`, `advert_interval`, `last_advert_time`, `favorites`, `last_message_times`, `bots`, all MQTT configuration (`mqtt_broker_host`, `mqtt_broker_port`, `mqtt_username`, `mqtt_password`, `mqtt_use_tls`, `mqtt_tls_insecure`, `mqtt_topic_prefix`, `mqtt_publish_messages`, `mqtt_publish_raw_packets`), and community MQTT configuration (`community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker`, `community_mqtt_email`). They are configured via `GET/PATCH /api/settings` (and related settings endpoints).
+**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `sidebar_sort_order`, `advert_interval`, `last_advert_time`, `favorites`, `last_message_times`, `bots`, all MQTT configuration (`mqtt_broker_host`, `mqtt_broker_port`, `mqtt_username`, `mqtt_password`, `mqtt_use_tls`, `mqtt_tls_insecure`, `mqtt_topic_prefix`, `mqtt_publish_messages`, `mqtt_publish_raw_packets`), and community MQTT configuration (`community_mqtt_enabled`, `community_mqtt_iata`, `community_mqtt_broker_host`, `community_mqtt_broker_port`, `community_mqtt_email`). They are configured via `GET/PATCH /api/settings` (and related settings endpoints).
 
 Byte-perfect channel retries are user-triggered via `POST /api/messages/channel/{message_id}/resend` and are allowed for 30 seconds after the original send.
 
