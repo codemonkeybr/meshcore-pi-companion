@@ -270,6 +270,30 @@ class CommunityMqttPublisher(BaseMqttPublisher):
     _log_prefix = "Community MQTT"
     _not_configured_timeout: float | None = 30
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._key_unavailable_warned: bool = False
+
+    async def start(self, settings: AppSettings) -> None:
+        self._key_unavailable_warned = False
+        await super().start(settings)
+
+    def _on_not_configured(self) -> None:
+        from app.keystore import has_private_key
+        from app.websocket import broadcast_error
+
+        if (
+            self._settings
+            and self._settings.community_mqtt_enabled
+            and not has_private_key()
+            and not self._key_unavailable_warned
+        ):
+            broadcast_error(
+                "Community MQTT unavailable",
+                "Radio firmware does not support private key export.",
+            )
+            self._key_unavailable_warned = True
+
     def _is_configured(self) -> bool:
         """Check if community MQTT is enabled and keys are available."""
         from app.keystore import has_private_key

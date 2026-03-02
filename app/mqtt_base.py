@@ -120,6 +120,10 @@ class BaseMqttPublisher(ABC):
         """Called before connecting. Return True to proceed, False to retry."""
         return True
 
+    def _on_not_configured(self) -> None:
+        """Called each time the loop finds the publisher not configured."""
+        return  # no-op by default; subclasses may override
+
     # ── Connection loop ────────────────────────────────────────────────
 
     async def _connection_loop(self) -> None:
@@ -130,6 +134,7 @@ class BaseMqttPublisher(ABC):
 
         while True:
             if not self._is_configured():
+                self._on_not_configured()
                 self.connected = False
                 self._client = None
                 self._version_event.clear()
