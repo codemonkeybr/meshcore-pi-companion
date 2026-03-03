@@ -56,6 +56,7 @@ interface GraphNode extends SimulationNodeDatum3D {
   type: NodeType;
   isAmbiguous: boolean;
   lastActivity: number;
+  lastActivityReason?: string;
   lastSeen?: number | null;
   probableIdentity?: string | null;
   ambiguousNames?: string[];
@@ -108,6 +109,15 @@ function arraysEqual(a: string[], b: string[]): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return secs > 0 ? `${minutes}m ${secs}s ago` : `${minutes}m ago`;
 }
 
 // =============================================================================
@@ -724,6 +734,15 @@ function useVisualizerData3D({
 
       const path = buildPath(parsed, packet, myPrefix);
       if (path.length < 2) continue;
+
+      // Tag each node with why it's considered active
+      const label = getPacketLabel(parsed.payloadType);
+      for (let i = 0; i < path.length; i++) {
+        const n = nodesRef.current.get(path[i]);
+        if (n && n.id !== 'self') {
+          n.lastActivityReason = i === 0 ? `${label} source` : `Relayed ${label}`;
+        }
+      }
 
       for (let i = 0; i < path.length - 1; i++) {
         if (path[i] !== path[i + 1]) {
@@ -1907,6 +1926,12 @@ export function PacketVisualizer3D({
                   <div className="text-muted-foreground">
                     {node.probableIdentity ? 'Other possible: ' : 'Possible: '}
                     {node.ambiguousNames.join(', ')}
+                  </div>
+                )}
+                {pinnedNodeId && node.type !== 'self' && (
+                  <div className="text-muted-foreground border-t border-border pt-1 mt-1">
+                    <div>Last active: {formatRelativeTime(node.lastActivity)}</div>
+                    {node.lastActivityReason && <div>Reason: {node.lastActivityReason}</div>}
                   </div>
                 )}
                 {neighbors.length > 0 && (
