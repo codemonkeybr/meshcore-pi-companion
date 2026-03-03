@@ -60,11 +60,6 @@ include = ["app"]
 exclude = ["references", ".venv", "tests"]
 reportMissingImports = true
 reportMissingTypeStubs = false
-# Temporarily lenient - fix these incrementally
-reportOptionalMemberAccess = "warning"
-reportArgumentType = "warning"
-reportReturnType = "warning"
-reportAttributeAccessIssue = "warning"
 
 [dependency-groups]
 dev = [

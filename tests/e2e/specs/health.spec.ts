@@ -16,7 +16,7 @@ test.describe('Health & UI basics', () => {
   test('sidebar shows Channels and Contacts sections', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByText('Channels')).toBeVisible();
-    await expect(page.getByText('Contacts')).toBeVisible();
+    await expect(page.getByText('Channels', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Contacts', { exact: true }).first()).toBeVisible();
   });
 });

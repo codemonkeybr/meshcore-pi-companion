@@ -35,8 +35,18 @@ export default defineConfig({
   ],
 
   webServer: {
-    command:
-      'bash -c "if [ ! -d frontend/dist ]; then cd frontend && npm install && npm run build; fi; uv run uvicorn app.main:app --host 127.0.0.1 --port 8000"',
+    command: `bash -c '
+      echo "[e2e] $(date +%T.%3N) Starting webServer command..."
+      if [ ! -d frontend/dist ]; then
+        echo "[e2e] $(date +%T.%3N) frontend/dist missing — running npm install + build"
+        cd frontend && npm install && npm run build
+        echo "[e2e] $(date +%T.%3N) Frontend build complete"
+      else
+        echo "[e2e] $(date +%T.%3N) frontend/dist exists — skipping build"
+      fi
+      echo "[e2e] $(date +%T.%3N) Launching uvicorn..."
+      uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+    '`,
     cwd: projectRoot,
     port: 8000,
     reuseExistingServer: false,

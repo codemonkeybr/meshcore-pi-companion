@@ -46,10 +46,6 @@ export function SettingsDatabaseSection({
     setAutoDecryptOnAdvert(appSettings.auto_decrypt_dm_on_advert);
   }, [appSettings]);
 
-  useEffect(() => {
-    setReopenLastConversation(getReopenLastConversationEnabled());
-  }, []);
-
   const handleCleanup = async () => {
     const days = parseInt(retentionDays, 10);
     if (isNaN(days) || days < 1) {

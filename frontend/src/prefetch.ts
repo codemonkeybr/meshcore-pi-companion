@@ -22,7 +22,7 @@ const store: Partial<PrefetchMap> =
 type PrefetchResolved<K extends keyof PrefetchMap> = Awaited<PrefetchMap[K]>;
 
 /** Take a prefetched promise (consumed once, then gone). */
-export function takePrefetch<K extends keyof PrefetchMap>(key: K): PrefetchMap[K] | undefined {
+function takePrefetch<K extends keyof PrefetchMap>(key: K): PrefetchMap[K] | undefined {
   const p = store[key];
   delete store[key];
   return p;

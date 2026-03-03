@@ -291,7 +291,7 @@ npm run test:run
 
 **E2E:**
 
-Warning: these tests are only guaranteed to run correctly in a narrow subset of environments; they require a busy mesh with messages arriving constantly. E2E tests are generally not necessary to run for normal development work.
+Warning: these tests are only guaranteed to run correctly in a narrow subset of environments; they require a busy mesh with messages arriving constantly and an available autodetect-able radio, as well as a contact in the test database (which you can provide in `tests/e2e/.tmp/e2e-test.db` after an initial run). E2E tests are generally not necessary to run for normal development work.
 
 ```bash
 cd tests/e2e

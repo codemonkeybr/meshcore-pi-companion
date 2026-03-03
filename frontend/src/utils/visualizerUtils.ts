@@ -93,7 +93,6 @@ export const PARTICLE_COLOR_MAP: Record<PacketLabel, string> = {
 };
 
 export const PARTICLE_SPEED = 0.008;
-export const DEFAULT_OBSERVATION_WINDOW_SEC = 15;
 // Traffic pattern analysis thresholds
 // Be conservative - once split, we can't unsplit, so require strong evidence
 const MIN_OBSERVATIONS_TO_SPLIT = 20; // Need at least this many unique sources per next-hop group
