@@ -24,11 +24,13 @@ export function ChannelInfoPane({
 }: ChannelInfoPaneProps) {
   const [detail, setDetail] = useState<ChannelDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
   // Get live channel data from channels array (real-time via WS)
   const liveChannel = channelKey ? (channels.find((c) => c.key === channelKey) ?? null) : null;
 
   useEffect(() => {
+    setShowKey(false);
     if (!channelKey) {
       setDetail(null);
       return;
@@ -74,23 +76,33 @@ export function ChannelInfoPane({
             {/* Header */}
             <div className="px-5 pt-5 pb-4 border-b border-border">
               <h2 className="text-lg font-semibold truncate">
-                {channel.name.startsWith('#') || channel.name === 'Public'
-                  ? channel.name
-                  : `#${channel.name}`}
+                {channel.is_hashtag && !channel.name.startsWith('#')
+                  ? `#${channel.name}`
+                  : channel.name}
               </h2>
-              <span
-                className="text-xs font-mono text-muted-foreground cursor-pointer hover:text-primary transition-colors block truncate"
-                role="button"
-                tabIndex={0}
-                onKeyDown={handleKeyboardActivate}
-                onClick={() => {
-                  navigator.clipboard.writeText(channel.key);
-                  toast.success('Channel key copied!');
-                }}
-                title="Click to copy"
-              >
-                {channel.key.toLowerCase()}
-              </span>
+              {!channel.is_hashtag && !showKey ? (
+                <button
+                  className="text-xs font-mono text-muted-foreground hover:text-primary transition-colors"
+                  onClick={() => setShowKey(true)}
+                  title="Reveal channel key"
+                >
+                  Show Key
+                </button>
+              ) : (
+                <span
+                  className="text-xs font-mono text-muted-foreground cursor-pointer hover:text-primary transition-colors block truncate"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={handleKeyboardActivate}
+                  onClick={() => {
+                    navigator.clipboard.writeText(channel.key);
+                    toast.success('Channel key copied!');
+                  }}
+                  title="Click to copy"
+                >
+                  {channel.key.toLowerCase()}
+                </span>
+              )}
               <div className="flex items-center gap-2 mt-1.5">
                 <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-medium">
                   {channel.is_hashtag ? 'Hashtag' : 'Private Key'}

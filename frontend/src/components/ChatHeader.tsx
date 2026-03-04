@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { toast } from './ui/sonner';
 import { isFavorite } from '../utils/favorites';
 import { handleKeyboardActivate } from '../utils/a11y';
@@ -32,12 +33,21 @@ export function ChatHeader({
   onOpenContactInfo,
   onOpenChannelInfo,
 }: ChatHeaderProps) {
+  const [showKey, setShowKey] = useState(false);
+
+  useEffect(() => {
+    setShowKey(false);
+  }, [conversation.id]);
+
+  const isPrivateChannel =
+    conversation.type === 'channel' && !channels.find((c) => c.key === conversation.id)?.is_hashtag;
+
   const titleClickable =
     (conversation.type === 'contact' && onOpenContactInfo) ||
     (conversation.type === 'channel' && onOpenChannelInfo);
   return (
     <header className="flex justify-between items-center px-4 py-2.5 border-b border-border gap-2">
-      <span className="flex flex-wrap items-center gap-x-2 min-w-0 flex-1">
+      <span className="flex flex-wrap items-baseline gap-x-2 min-w-0 flex-1">
         {conversation.type === 'contact' && onOpenContactInfo && (
           <span
             className="flex-shrink-0 cursor-pointer"
@@ -82,22 +92,35 @@ export function ChatHeader({
             : ''}
           {conversation.name}
         </h2>
-        <span
-          className="font-normal text-[11px] text-muted-foreground font-mono truncate cursor-pointer hover:text-primary transition-colors"
-          role="button"
-          tabIndex={0}
-          onKeyDown={handleKeyboardActivate}
-          onClick={(e) => {
-            e.stopPropagation();
-            navigator.clipboard.writeText(conversation.id);
-            toast.success(
-              conversation.type === 'channel' ? 'Room key copied!' : 'Contact key copied!'
-            );
-          }}
-          title="Click to copy"
-        >
-          {conversation.type === 'channel' ? conversation.id.toLowerCase() : conversation.id}
-        </span>
+        {isPrivateChannel && !showKey ? (
+          <button
+            className="font-normal text-[11px] text-muted-foreground font-mono hover:text-primary transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowKey(true);
+            }}
+            title="Reveal channel key"
+          >
+            Show Key
+          </button>
+        ) : (
+          <span
+            className="font-normal text-[11px] text-muted-foreground font-mono truncate cursor-pointer hover:text-primary transition-colors"
+            role="button"
+            tabIndex={0}
+            onKeyDown={handleKeyboardActivate}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigator.clipboard.writeText(conversation.id);
+              toast.success(
+                conversation.type === 'channel' ? 'Room key copied!' : 'Contact key copied!'
+              );
+            }}
+            title="Click to copy"
+          >
+            {conversation.type === 'channel' ? conversation.id.toLowerCase() : conversation.id}
+          </span>
+        )}
         {conversation.type === 'contact' &&
           (() => {
             const contact = contacts.find((c) => c.public_key === conversation.id);
