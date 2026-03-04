@@ -261,6 +261,13 @@ async def run_migrations(conn: aiosqlite.Connection) -> int:
         await set_version(conn, 32)
         applied += 1
 
+    # Migration 33: Seed #remoteterm channel on initial install
+    if version < 33:
+        logger.info("Applying migration 33: seed #remoteterm channel")
+        await _migrate_033_seed_remoteterm_channel(conn)
+        await set_version(conn, 33)
+        applied += 1
+
     if applied > 0:
         logger.info(
             "Applied %d migration(s), schema now at version %d", applied, await get_version(conn)
@@ -1926,3 +1933,21 @@ async def _migrate_032_add_community_mqtt_columns(conn: aiosqlite.Connection) ->
             await conn.execute(f"ALTER TABLE app_settings ADD COLUMN {col_name} {col_def}")
 
     await conn.commit()
+
+
+async def _migrate_033_seed_remoteterm_channel(conn: aiosqlite.Connection) -> None:
+    """Seed the #remoteterm hashtag channel so new installs have it by default.
+
+    Uses INSERT OR IGNORE so it's a no-op if the channel already exists
+    (e.g. existing users who already added it manually). The channels table
+    is created by the base schema before migrations run, so it always exists
+    in production.
+    """
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO channels (key, name, is_hashtag, on_radio) VALUES (?, ?, ?, ?)",
+            ("8959AE053F2201801342A1DBDDA184F6", "#remoteterm", 1, 0),
+        )
+        await conn.commit()
+    except Exception:
+        logger.debug("Skipping #remoteterm seed (channels table not ready)")

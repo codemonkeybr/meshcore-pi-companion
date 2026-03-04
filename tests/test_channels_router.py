@@ -96,9 +96,9 @@ class TestSyncChannelsFromRadio:
         data = response.json()
         assert data["synced"] == 2
 
-        # Verify channels in DB
+        # Verify channels in DB (2 synced + #remoteterm seed)
         channels = await ChannelRepository.get_all()
-        assert len(channels) == 2
+        assert len(channels) == 3
 
         keys = {ch.key for ch in channels}
         assert secret_a.hex().upper() in keys

@@ -100,8 +100,8 @@ class TestMigration001:
             # Run migrations
             applied = await run_migrations(conn)
 
-            assert applied == 32  # All migrations run
-            assert await get_version(conn) == 32
+            assert applied == 33  # All migrations run
+            assert await get_version(conn) == 33
 
             # Verify columns exist by inserting and selecting
             await conn.execute(
@@ -183,9 +183,9 @@ class TestMigration001:
             applied1 = await run_migrations(conn)
             applied2 = await run_migrations(conn)
 
-            assert applied1 == 32  # All migrations run
+            assert applied1 == 33  # All migrations run
             assert applied2 == 0  # No migrations on second run
-            assert await get_version(conn) == 32
+            assert await get_version(conn) == 33
         finally:
             await conn.close()
 
@@ -246,8 +246,8 @@ class TestMigration001:
             applied = await run_migrations(conn)
 
             # All migrations applied (version incremented) but no error
-            assert applied == 32
-            assert await get_version(conn) == 32
+            assert applied == 33
+            assert await get_version(conn) == 33
         finally:
             await conn.close()
 
@@ -376,8 +376,8 @@ class TestMigration013:
 
             # Run migration 13 (plus 14-33 which also run)
             applied = await run_migrations(conn)
-            assert applied == 20
-            assert await get_version(conn) == 32
+            assert applied == 21
+            assert await get_version(conn) == 33
 
             # Verify bots array was created with migrated data
             cursor = await conn.execute("SELECT bots FROM app_settings WHERE id = 1")
@@ -497,7 +497,7 @@ class TestMigration018:
             assert await cursor.fetchone() is not None
 
             await run_migrations(conn)
-            assert await get_version(conn) == 32
+            assert await get_version(conn) == 33
 
             # Verify autoindex is gone
             cursor = await conn.execute(
@@ -575,8 +575,8 @@ class TestMigration018:
             await conn.commit()
 
             applied = await run_migrations(conn)
-            assert applied == 15  # Migrations 18-32 run (18+19 skip internally)
-            assert await get_version(conn) == 32
+            assert applied == 16  # Migrations 18-33 run (18+19 skip internally)
+            assert await get_version(conn) == 33
         finally:
             await conn.close()
 
@@ -648,7 +648,7 @@ class TestMigration019:
             assert await cursor.fetchone() is not None
 
             await run_migrations(conn)
-            assert await get_version(conn) == 32
+            assert await get_version(conn) == 33
 
             # Verify autoindex is gone
             cursor = await conn.execute(
@@ -714,8 +714,8 @@ class TestMigration020:
             assert (await cursor.fetchone())[0] == "delete"
 
             applied = await run_migrations(conn)
-            assert applied == 13  # Migrations 20-32
-            assert await get_version(conn) == 32
+            assert applied == 14  # Migrations 20-33
+            assert await get_version(conn) == 33
 
             # Verify WAL mode
             cursor = await conn.execute("PRAGMA journal_mode")
@@ -745,7 +745,7 @@ class TestMigration020:
             await set_version(conn, 20)
 
             applied = await run_migrations(conn)
-            assert applied == 12  # Migrations 21-32 still run
+            assert applied == 13  # Migrations 21-33 still run
 
             # Still WAL + INCREMENTAL
             cursor = await conn.execute("PRAGMA journal_mode")
@@ -803,8 +803,8 @@ class TestMigration028:
             await conn.commit()
 
             applied = await run_migrations(conn)
-            assert applied == 5
-            assert await get_version(conn) == 32
+            assert applied == 6
+            assert await get_version(conn) == 33
 
             # Verify payload_hash column is now BLOB
             cursor = await conn.execute("PRAGMA table_info(raw_packets)")
@@ -873,8 +873,8 @@ class TestMigration028:
             await conn.commit()
 
             applied = await run_migrations(conn)
-            assert applied == 5  # Version still bumped
-            assert await get_version(conn) == 32
+            assert applied == 6  # Version still bumped
+            assert await get_version(conn) == 33
 
             # Verify data unchanged
             cursor = await conn.execute("SELECT payload_hash FROM raw_packets")
@@ -923,8 +923,8 @@ class TestMigration032:
             await conn.commit()
 
             applied = await run_migrations(conn)
-            assert applied == 1
-            assert await get_version(conn) == 32
+            assert applied == 2
+            assert await get_version(conn) == 33
 
             # Verify all columns exist with correct defaults
             cursor = await conn.execute(
@@ -939,5 +939,96 @@ class TestMigration032:
             assert row["community_mqtt_broker_host"] == "mqtt-us-v1.letsmesh.net"
             assert row["community_mqtt_broker_port"] == 443
             assert row["community_mqtt_email"] == ""
+        finally:
+            await conn.close()
+
+
+class TestMigration033:
+    """Test migration 033: seed #remoteterm channel."""
+
+    @pytest.mark.asyncio
+    async def test_migration_seeds_remoteterm_channel(self):
+        """Migration inserts the #remoteterm channel for new installs."""
+        conn = await aiosqlite.connect(":memory:")
+        conn.row_factory = aiosqlite.Row
+        try:
+            await set_version(conn, 32)
+            await conn.execute("""
+                CREATE TABLE channels (
+                    key TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    is_hashtag INTEGER DEFAULT 0,
+                    on_radio INTEGER DEFAULT 0
+                )
+            """)
+            # Minimal app_settings so earlier migrations don't fail
+            await conn.execute("""
+                CREATE TABLE app_settings (
+                    id INTEGER PRIMARY KEY,
+                    community_mqtt_enabled INTEGER DEFAULT 0,
+                    community_mqtt_iata TEXT DEFAULT '',
+                    community_mqtt_broker_host TEXT DEFAULT '',
+                    community_mqtt_broker_port INTEGER DEFAULT 443,
+                    community_mqtt_email TEXT DEFAULT ''
+                )
+            """)
+            await conn.commit()
+
+            applied = await run_migrations(conn)
+            assert applied == 1
+            assert await get_version(conn) == 33
+
+            cursor = await conn.execute(
+                "SELECT key, name, is_hashtag, on_radio FROM channels WHERE key = ?",
+                ("8959AE053F2201801342A1DBDDA184F6",),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row["name"] == "#remoteterm"
+            assert row["is_hashtag"] == 1
+            assert row["on_radio"] == 0
+        finally:
+            await conn.close()
+
+    @pytest.mark.asyncio
+    async def test_migration_does_not_overwrite_existing_channel(self):
+        """Migration is a no-op if #remoteterm already exists."""
+        conn = await aiosqlite.connect(":memory:")
+        conn.row_factory = aiosqlite.Row
+        try:
+            await set_version(conn, 32)
+            await conn.execute("""
+                CREATE TABLE channels (
+                    key TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    is_hashtag INTEGER DEFAULT 0,
+                    on_radio INTEGER DEFAULT 0
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE app_settings (
+                    id INTEGER PRIMARY KEY,
+                    community_mqtt_enabled INTEGER DEFAULT 0,
+                    community_mqtt_iata TEXT DEFAULT '',
+                    community_mqtt_broker_host TEXT DEFAULT '',
+                    community_mqtt_broker_port INTEGER DEFAULT 443,
+                    community_mqtt_email TEXT DEFAULT ''
+                )
+            """)
+            # Pre-existing channel with on_radio=1 (user added it to radio)
+            await conn.execute(
+                "INSERT INTO channels (key, name, is_hashtag, on_radio) VALUES (?, ?, ?, ?)",
+                ("8959AE053F2201801342A1DBDDA184F6", "#remoteterm", 1, 1),
+            )
+            await conn.commit()
+
+            await run_migrations(conn)
+
+            cursor = await conn.execute(
+                "SELECT on_radio FROM channels WHERE key = ?",
+                ("8959AE053F2201801342A1DBDDA184F6",),
+            )
+            row = await cursor.fetchone()
+            assert row["on_radio"] == 1  # Not overwritten
         finally:
             await conn.close()
