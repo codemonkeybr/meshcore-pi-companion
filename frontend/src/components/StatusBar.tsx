@@ -117,7 +117,12 @@ export function StatusBar({
       )}
       <button
         onClick={onSettingsClick}
-        className="px-3 py-1.5 bg-secondary border border-border text-muted-foreground rounded-md text-xs cursor-pointer hover:bg-accent hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className={cn(
+          'px-3 py-1.5 rounded-md text-xs cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          settingsMode
+            ? 'bg-status-connected/15 border border-status-connected/30 text-status-connected hover:bg-status-connected/25'
+            : 'bg-secondary border border-border text-muted-foreground hover:bg-accent hover:text-foreground'
+        )}
       >
         {settingsMode ? 'Back to Chat' : 'Settings'}
       </button>

@@ -613,11 +613,11 @@ export function App() {
         <button
           type="button"
           onClick={handleCloseSettingsView}
-          className="h-6 w-6 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-status-connected/15 border border-status-connected/30 text-status-connected hover:bg-status-connected/25 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           title="Back to conversations"
           aria-label="Back to conversations"
         >
-          &larr;
+          &larr; Back to Chat
         </button>
       </div>
       <div className="flex-1 overflow-y-auto py-1">

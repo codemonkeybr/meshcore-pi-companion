@@ -213,13 +213,27 @@
 /* ── Solar Flare ("Plasma Burn") ─────────────────────────── */
 
 @keyframes sf-glow-pulse {
-  0%, 100% { filter: drop-shadow(0 0 4px hsl(338 100% 50% / 0.3)); }
-  50% { filter: drop-shadow(0 0 10px hsl(338 100% 50% / 0.5)) drop-shadow(0 0 20px hsl(24 100% 50% / 0.2)); }
+  0%,
+  100% {
+    filter: drop-shadow(0 0 4px hsl(338 100% 50% / 0.3));
+  }
+  50% {
+    filter: drop-shadow(0 0 10px hsl(338 100% 50% / 0.5))
+      drop-shadow(0 0 20px hsl(24 100% 50% / 0.2));
+  }
 }
 
 @keyframes sf-msg-highlight {
-  0% { box-shadow: 0 0 0 2px hsl(338 100% 50%), 0 0 20px hsl(338 100% 50% / 0.4); }
-  100% { box-shadow: 0 0 0 2px transparent, 0 0 0 transparent; }
+  0% {
+    box-shadow:
+      0 0 0 2px hsl(338 100% 50%),
+      0 0 20px hsl(338 100% 50% / 0.4);
+  }
+  100% {
+    box-shadow:
+      0 0 0 2px transparent,
+      0 0 0 transparent;
+  }
 }
 
 :root[data-theme='solar-flare'] {
@@ -314,7 +328,12 @@
 /* Solar Flare: Chamfered button corners + hover glow */
 [data-theme='solar-flare'] button {
   clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
-  transition: filter 0.2s ease, transform 0.12s ease, background-color 0.15s ease, background-position 0.4s ease, color 0.15s ease;
+  transition:
+    filter 0.2s ease,
+    transform 0.12s ease,
+    background-color 0.15s ease,
+    background-position 0.4s ease,
+    color 0.15s ease;
 }
 
 [data-theme='solar-flare'] button:hover {
@@ -330,7 +349,9 @@
 /* Solar Flare: Input focus glow */
 [data-theme='solar-flare'] input:focus,
 [data-theme='solar-flare'] textarea:focus {
-  box-shadow: 0 0 0 1px hsl(338 100% 50% / 0.5), 0 0 10px hsl(338 100% 50% / 0.2);
+  box-shadow:
+    0 0 0 1px hsl(338 100% 50% / 0.5),
+    0 0 10px hsl(338 100% 50% / 0.2);
   outline: none;
 }
 
