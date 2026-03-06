@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 
 import httpx
@@ -33,9 +34,6 @@ class WebhookModule(FanoutModule):
     async def on_message(self, data: dict) -> None:
         await self._send(data, event_type="message")
 
-    async def on_raw(self, data: dict) -> None:
-        await self._send(data, event_type="raw_packet")
-
     async def _send(self, data: dict, *, event_type: str) -> None:
         if not self._client:
             return
@@ -55,9 +53,7 @@ class WebhookModule(FanoutModule):
             **extra_headers,
         }
 
-        import json as _json
-
-        body_bytes = _json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
+        body_bytes = json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
 
         if hmac_secret:
             sig = hmac.new(hmac_secret.encode(), body_bytes, hashlib.sha256).hexdigest()
