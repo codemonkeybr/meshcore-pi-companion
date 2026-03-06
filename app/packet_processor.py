@@ -871,7 +871,7 @@ async def _process_direct_message(
                 their_public_key=contact.public_key,
                 our_public_key=our_public_key.hex(),
                 received_at=timestamp,
-                path=packet_info.path.hex() if packet_info.path else None,
+                path=packet_info.path.hex() if packet_info else None,
                 outgoing=is_outgoing,
             )
 

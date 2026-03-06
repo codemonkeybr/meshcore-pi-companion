@@ -630,6 +630,62 @@ class TestDirectMessageDirectionDetection:
         assert messages[0].outgoing is False
 
     @pytest.mark.asyncio
+    async def test_incoming_zero_hop_dm_preserves_empty_path(self, test_db, captured_broadcasts):
+        """A 0-hop DM should preserve path='' rather than dropping path data."""
+        from app.packet_processor import _process_direct_message
+
+        packet_info = MagicMock()
+        packet_info.payload = bytes([0xFA, 0xA1, 0x00, 0x00]) + b"\x00" * 20
+        packet_info.path = b""
+
+        await ContactRepository.upsert(
+            {
+                "public_key": self.DIFFERENT_CONTACT_PUB,
+                "name": "TestContact",
+                "type": 1,
+            }
+        )
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=SENDER_TIMESTAMP,
+            flags=0,
+            message="Zero hop DM",
+            dest_hash=self.OUR_FIRST_BYTE,
+            src_hash=self.DIFFERENT_FIRST_BYTE,
+        )
+
+        pkt_id, _ = await RawPacketRepository.create(b"dir_test_zero_hop", SENDER_TIMESTAMP)
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with (
+            patch("app.packet_processor.has_private_key", return_value=True),
+            patch("app.packet_processor.get_private_key", return_value=b"\x00" * 32),
+            patch("app.packet_processor.get_public_key", return_value=self.OUR_PUB_BYTES),
+            patch("app.packet_processor.try_decrypt_dm", return_value=decrypted),
+            patch("app.packet_processor.broadcast_event", mock_broadcast),
+        ):
+            result = await _process_direct_message(
+                b"\x00" * 40, pkt_id, SENDER_TIMESTAMP, packet_info
+            )
+
+        assert result is not None
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=self.DIFFERENT_CONTACT_PUB.lower(), limit=10
+        )
+        assert len(messages) == 1
+        assert messages[0].paths is not None
+        assert len(messages[0].paths) == 1
+        assert messages[0].paths[0].path == ""
+
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert len(message_broadcasts) == 1
+        assert message_broadcasts[0]["data"]["paths"] == [
+            {"path": "", "received_at": SENDER_TIMESTAMP}
+        ]
+
+    @pytest.mark.asyncio
     async def test_outgoing_message_detected(self, test_db, captured_broadcasts):
         """src_hash matches us, dest_hash doesn't → outgoing."""
         from app.packet_processor import _process_direct_message
