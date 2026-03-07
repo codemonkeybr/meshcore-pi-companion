@@ -461,4 +461,44 @@ describe('SettingsFanoutSection', () => {
       screen.getByText('meshcore/dm:<pubkey>, meshcore/gm:<channel>, meshcore/raw/...')
     ).toBeInTheDocument();
   });
+
+  it('webhook list shows destination URL', async () => {
+    const config: FanoutConfig = {
+      id: 'wh-1',
+      type: 'webhook',
+      name: 'Webhook',
+      enabled: true,
+      config: { url: 'https://example.com/hook', method: 'POST', headers: {} },
+      scope: { messages: 'all', raw_packets: 'none' },
+      sort_order: 0,
+      created_at: 1000,
+    };
+    mockedApi.getFanoutConfigs.mockResolvedValue([config]);
+    renderSection();
+
+    await waitFor(() => expect(screen.getByText('https://example.com/hook')).toBeInTheDocument());
+  });
+
+  it('apprise list shows compact target summary', async () => {
+    const config: FanoutConfig = {
+      id: 'ap-1',
+      type: 'apprise',
+      name: 'Apprise',
+      enabled: true,
+      config: {
+        urls: 'discord://abc\nmailto://one@example.com\nmailto://two@example.com',
+        preserve_identity: true,
+        include_path: true,
+      },
+      scope: { messages: 'all', raw_packets: 'none' },
+      sort_order: 0,
+      created_at: 1000,
+    };
+    mockedApi.getFanoutConfigs.mockResolvedValue([config]);
+    renderSection();
+
+    await waitFor(() =>
+      expect(screen.getByText(/discord:\/\/abc, mailto:\/\/one@example.com/)).toBeInTheDocument()
+    );
+  });
 });

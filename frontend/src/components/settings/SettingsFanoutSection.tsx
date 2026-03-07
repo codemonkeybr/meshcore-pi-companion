@@ -48,6 +48,18 @@ function formatPrivateTopicSummary(config: Record<string, unknown>) {
   return `${prefix}/dm:<pubkey>, ${prefix}/gm:<channel>, ${prefix}/raw/...`;
 }
 
+function formatAppriseTargets(urls: string | undefined, maxLength = 80) {
+  const targets = (urls || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (targets.length === 0) return 'No targets configured';
+
+  const joined = targets.join(', ');
+  if (joined.length <= maxLength) return joined;
+  return `${joined.slice(0, maxLength - 3)}...`;
+}
+
 const DEFAULT_BOT_CODE = `def bot(
     sender_name: str | None,
     sender_key: str | None,
@@ -1330,6 +1342,30 @@ export function SettingsFanoutSection({
                       Topics:{' '}
                       <code>
                         {formatPrivateTopicSummary(cfg.config as Record<string, unknown>)}
+                      </code>
+                    </div>
+                  </div>
+                )}
+
+                {cfg.type === 'webhook' && (
+                  <div className="space-y-1 border-t border-input px-3 py-2 text-xs text-muted-foreground">
+                    <div className="break-all">
+                      URL:{' '}
+                      <code>
+                        {((cfg.config as Record<string, unknown>).url as string) || 'Not set'}
+                      </code>
+                    </div>
+                  </div>
+                )}
+
+                {cfg.type === 'apprise' && (
+                  <div className="space-y-1 border-t border-input px-3 py-2 text-xs text-muted-foreground">
+                    <div className="break-all">
+                      Targets:{' '}
+                      <code>
+                        {formatAppriseTargets(
+                          (cfg.config as Record<string, unknown>).urls as string | undefined
+                        )}
                       </code>
                     </div>
                   </div>
