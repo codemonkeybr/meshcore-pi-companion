@@ -54,6 +54,18 @@ function renderSection(overrides?: { health?: HealthStatus }) {
   );
 }
 
+function renderSectionWithRefresh(
+  onHealthRefresh: () => Promise<void>,
+  overrides?: { health?: HealthStatus }
+) {
+  return render(
+    <SettingsFanoutSection
+      health={overrides?.health ?? baseHealth}
+      onHealthRefresh={onHealthRefresh}
+    />
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockedApi.getFanoutConfigs.mockResolvedValue([]);
@@ -115,6 +127,25 @@ describe('SettingsFanoutSection', () => {
     await waitFor(() => {
       expect(screen.getByText('← Back to list')).toBeInTheDocument();
     });
+  });
+
+  it('save as enabled returns to list even if health refresh fails', async () => {
+    mockedApi.getFanoutConfigs.mockResolvedValue([webhookConfig]);
+    mockedApi.updateFanoutConfig.mockResolvedValue({ ...webhookConfig, enabled: true });
+    const failingRefresh = vi.fn(async () => {
+      throw new Error('refresh failed');
+    });
+
+    renderSectionWithRefresh(failingRefresh);
+    await waitFor(() => expect(screen.getByText('Test Hook')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await waitFor(() => expect(screen.getByText('← Back to list')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save as Enabled' }));
+
+    await waitFor(() => expect(screen.queryByText('← Back to list')).not.toBeInTheDocument());
+    expect(screen.getByText('Test Hook')).toBeInTheDocument();
   });
 
   it('calls toggle enabled on checkbox click', async () => {

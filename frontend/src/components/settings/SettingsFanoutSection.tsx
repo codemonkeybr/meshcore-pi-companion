@@ -1050,9 +1050,15 @@ export function SettingsFanoutSection({
       };
       if (enabled !== undefined) update.enabled = enabled;
       await api.updateFanoutConfig(editingId, update);
-      await loadConfigs();
-      if (onHealthRefresh) await onHealthRefresh();
       setEditingId(null);
+      await loadConfigs();
+      if (onHealthRefresh) {
+        try {
+          await onHealthRefresh();
+        } catch (err) {
+          console.error('Failed to refresh health after saving fanout config:', err);
+        }
+      }
       toast.success(enabled ? 'Integration saved and enabled' : 'Integration saved');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to save');
