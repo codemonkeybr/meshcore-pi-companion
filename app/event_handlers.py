@@ -132,7 +132,11 @@ async def on_contact_message(event: "Event") -> None:
     logger.debug("DM from %s handled by event handler (fallback path)", sender_pubkey[:12])
 
     # Build paths array for broadcast
-    paths = [MessagePath(path=path or "", received_at=received_at, path_len=path_len)] if path is not None else None
+    paths = (
+        [MessagePath(path=path or "", received_at=received_at, path_len=path_len)]
+        if path is not None
+        else None
+    )
 
     # Broadcast the new message
     broadcast_event(
@@ -221,9 +225,7 @@ async def on_path_update(event: "Event") -> None:
         )
         return
 
-    await ContactRepository.update_path(
-        contact.public_key, str(path), normalized_path_len
-    )
+    await ContactRepository.update_path(contact.public_key, str(path), normalized_path_len)
 
 
 async def on_new_contact(event: "Event") -> None:

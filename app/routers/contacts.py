@@ -204,8 +204,8 @@ async def get_contact_detail(public_key: str) -> ContactDetail:
     # Compute nearest repeaters from first-hop prefixes in advert paths
     first_hop_stats: dict[str, dict] = {}  # prefix -> {heard_count, path_len, last_seen}
     for p in advert_paths:
-        if p.path and len(p.path) >= 2:
-            prefix = p.path[:2].lower()
+        prefix = p.next_hop
+        if prefix:
             if prefix not in first_hop_stats:
                 first_hop_stats[prefix] = {
                     "heard_count": 0,

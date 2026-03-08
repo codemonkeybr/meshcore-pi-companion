@@ -196,7 +196,11 @@ async def create_message_from_decrypted(
 
     # Build paths array for broadcast
     # Use "is not None" to include empty string (direct/0-hop messages)
-    paths = [MessagePath(path=path or "", received_at=received, path_len=path_len)] if path is not None else None
+    paths = (
+        [MessagePath(path=path or "", received_at=received, path_len=path_len)]
+        if path is not None
+        else None
+    )
 
     # Broadcast new message to connected clients (and fanout modules when realtime)
     broadcast_event(
@@ -305,7 +309,11 @@ async def create_dm_message_from_decrypted(
     await RawPacketRepository.mark_decrypted(packet_id, msg_id)
 
     # Build paths array for broadcast
-    paths = [MessagePath(path=path or "", received_at=received, path_len=path_len)] if path is not None else None
+    paths = (
+        [MessagePath(path=path or "", received_at=received, path_len=path_len)]
+        if path is not None
+        else None
+    )
 
     # Broadcast new message to connected clients (and fanout modules when realtime)
     sender_name = contact.name if contact and not outgoing else None
@@ -709,6 +717,7 @@ async def _process_advertisement(
         path_hex=new_path_hex,
         timestamp=timestamp,
         max_paths=10,
+        hop_count=new_path_len,
     )
 
     # Record name history
