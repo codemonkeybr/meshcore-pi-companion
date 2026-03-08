@@ -324,6 +324,33 @@ describe('resolvePath', () => {
     expect(result.receiver.name).toBe('MyRadio');
   });
 
+  it('uses explicit sender and receiver multibyte modes for endpoint prefixes', () => {
+    const result = resolvePath(
+      '',
+      { ...sender, pathHashMode: 1 },
+      contacts,
+      createConfig({
+        public_key: 'ABCDEF' + 'F'.repeat(58),
+        path_hash_mode: 2,
+      })
+    );
+
+    expect(result.sender.prefix).toBe('5EEE');
+    expect(result.receiver.prefix).toBe('ABCDEF');
+  });
+
+  it('derives sender multibyte width from path metadata when sender mode is unknown', () => {
+    const result = resolvePath(
+      '1A2B3C4D',
+      { ...sender, publicKeyOrPrefix: 'AABBCCDDEEFF' + '0'.repeat(52), pathHashMode: null },
+      contacts,
+      config,
+      2
+    );
+
+    expect(result.sender.prefix).toBe('AABB');
+  });
+
   it('handles null config gracefully', () => {
     const result = resolvePath('1A', sender, contacts, null);
 

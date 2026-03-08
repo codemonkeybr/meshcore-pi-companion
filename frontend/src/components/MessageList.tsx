@@ -380,8 +380,9 @@ export function MessageList({
       publicKeyOrPrefix: config?.public_key || '',
       lat: config?.lat ?? null,
       lon: config?.lon ?? null,
+      pathHashMode: config?.path_hash_mode ?? null,
     }),
-    [config?.name, config?.public_key, config?.lat, config?.lon]
+    [config?.name, config?.public_key, config?.lat, config?.lon, config?.path_hash_mode]
   );
 
   // Derive live so the byte-perfect button disables if the 30s window expires while modal is open
@@ -411,6 +412,7 @@ export function MessageList({
         publicKeyOrPrefix: contact.public_key,
         lat: contact.lat,
         lon: contact.lon,
+        pathHashMode: contact.out_path_hash_mode,
       };
     }
     // For channel messages, try to find contact by parsed sender name
@@ -422,6 +424,7 @@ export function MessageList({
           publicKeyOrPrefix: senderContact.public_key,
           lat: senderContact.lat,
           lon: senderContact.lon,
+          pathHashMode: senderContact.out_path_hash_mode,
         };
       }
     }
@@ -431,6 +434,7 @@ export function MessageList({
       publicKeyOrPrefix: msg.conversation_key || '',
       lat: null,
       lon: null,
+      pathHashMode: null,
     };
   };
 

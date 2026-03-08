@@ -29,6 +29,46 @@ export interface SenderInfo {
   publicKeyOrPrefix: string;
   lat: number | null;
   lon: number | null;
+  pathHashMode?: number | null;
+}
+
+function normalizePathHashMode(mode: number | null | undefined): number | null {
+  if (mode == null || !Number.isInteger(mode) || mode < 0 || mode > 2) {
+    return null;
+  }
+  return mode;
+}
+
+function inferPathHashMode(
+  path: string | null | undefined,
+  hopCount?: number | null
+): number | null {
+  if (!path || path.length === 0 || hopCount == null || hopCount <= 0) {
+    return null;
+  }
+
+  const charsPerHop = path.length / hopCount;
+  if (
+    charsPerHop < 2 ||
+    charsPerHop > 6 ||
+    charsPerHop % 2 !== 0 ||
+    charsPerHop * hopCount !== path.length
+  ) {
+    return null;
+  }
+
+  return charsPerHop / 2 - 1;
+}
+
+function formatEndpointPrefix(key: string | null | undefined, pathHashMode: number | null): string {
+  if (!key) {
+    return '??';
+  }
+
+  const normalized = key.toUpperCase();
+  const hashMode = normalizePathHashMode(pathHashMode) ?? 0;
+  const chars = (hashMode + 1) * 2;
+  return normalized.slice(0, Math.min(chars, normalized.length));
 }
 
 /**
@@ -269,9 +309,13 @@ export function resolvePath(
   hopCount?: number | null
 ): ResolvedPath {
   const hopPrefixes = parsePathHops(path, hopCount);
+  const inferredPathHashMode = inferPathHashMode(path, hopCount);
 
   // Build sender info
-  const senderPrefix = sender.publicKeyOrPrefix.toUpperCase().slice(0, 2);
+  const senderPrefix = formatEndpointPrefix(
+    sender.publicKeyOrPrefix,
+    normalizePathHashMode(sender.pathHashMode) ?? inferredPathHashMode
+  );
   const resolvedSender = {
     name: sender.name,
     prefix: senderPrefix,
@@ -280,7 +324,10 @@ export function resolvePath(
   };
 
   // Build receiver info from radio config
-  const receiverPrefix = config?.public_key?.toUpperCase().slice(0, 2) || '??';
+  const receiverPrefix = formatEndpointPrefix(
+    config?.public_key,
+    normalizePathHashMode(config?.path_hash_mode) ?? inferredPathHashMode
+  );
   const resolvedReceiver = {
     name: config?.name || 'Unknown',
     prefix: receiverPrefix,
