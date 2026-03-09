@@ -20,7 +20,7 @@ app/
 ├── database.py          # SQLite connection + base schema + migration runner
 ├── migrations.py        # Schema migrations (SQLite user_version)
 ├── models.py            # Pydantic request/response models
-├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings)
+├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout)
 ├── radio.py             # RadioManager + auto-reconnect monitor
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
 ├── decoder.py           # Packet parsing/decryption
@@ -29,6 +29,7 @@ app/
 ├── websocket.py         # WS manager + broadcast helpers
 ├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise (see fanout/AGENTS_fanout.md)
 ├── dependencies.py      # Shared FastAPI dependency providers
+├── path_utils.py        # Path hex rendering and hop-width helpers
 ├── keystore.py          # Ephemeral private/public key storage for DM decryption
 ├── frontend_static.py   # Mount/serve built frontend (production)
 └── routers/
@@ -296,6 +297,10 @@ tests/
 ├── test_send_messages.py       # Outgoing messages, bot triggers, concurrent sends
 ├── test_settings_router.py     # Settings endpoints, advert validation
 ├── test_statistics.py          # Statistics aggregation
+├── test_channel_sender_backfill.py # Sender key backfill for channel messages
+├── test_fanout_hitlist.py      # Fanout-related hitlist regression tests
+├── test_main_startup.py        # App startup and lifespan
+├── test_path_utils.py          # Path hex rendering helpers
 ├── test_websocket.py           # WS manager broadcast/cleanup
 └── test_websocket_route.py     # WS endpoint lifecycle
 ```

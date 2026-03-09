@@ -71,6 +71,7 @@ async def _run_historical_channel_decryption(
                 timestamp=result.timestamp,
                 received_at=packet_timestamp,
                 path=path_hex,
+                path_len=packet_info.path_length if packet_info else None,
                 realtime=False,  # Historical decryption should not trigger fanout
             )
 
