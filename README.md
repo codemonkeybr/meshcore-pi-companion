@@ -25,7 +25,7 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 ## Requirements
 
 - Python 3.10+
-- Node.js 18+
+- Node.js LTS or current (20, 22, 24, 25)
 - [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - MeshCore radio connected via USB serial, TCP, or BLE
 
