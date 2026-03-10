@@ -105,6 +105,34 @@ Access at http://localhost:8000
 
 > **Note:** WebGPU cracking requires HTTPS when not on localhost. See the HTTPS section under Additional Setup.
 
+### Running on Raspberry Pi (SPI mode)
+
+When using a LoRa HAT (e.g. Waveshare) with the SPI backend, use a virtual environment and ensure the project root is on `PYTHONPATH`:
+
+```bash
+cd ~/remoteterm
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[spi]"
+
+# Copy and edit config (see config.yaml.example)
+cp config.yaml.example data/config.yaml
+# edit data/config.yaml: node name, hardware profile, radio (e.g. USA/Canada)
+
+# Run (project root must be on path)
+export PYTHONPATH="$PWD"
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Or use the helper script from the project root:
+
+```bash
+chmod +x scripts/run_remoteterm.sh
+./scripts/run_remoteterm.sh --host 0.0.0.0 --port 8000
+```
+
+Enable SPI first: `sudo raspi-config` → Interface Options → SPI → Enable, then reboot.
+
 ## Docker Compose
 
 > **Warning:** Docker has intermittent issues with serial event subscriptions. The native method above is more reliable.
