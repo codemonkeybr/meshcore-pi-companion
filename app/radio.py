@@ -352,7 +352,10 @@ class RadioManager:
             logger.info("No serial port specified, auto-detecting...")
             port = await find_radio_port(settings.serial_baudrate)
             if not port:
-                raise RuntimeError("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
+                logger.warning(
+                    "No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT."
+                )
+                return
 
         logger.debug(
             "Connecting to radio at %s (baud %d)",
@@ -519,12 +522,17 @@ class RadioManager:
             from app.websocket import broadcast_health
 
             CHECK_INTERVAL_SECONDS = 5
+            BACKOFF_INTERVAL_SECONDS = 60
+            BACKOFF_AFTER_FAILURES = 6
             UNRESPONSIVE_THRESHOLD = 3
             consecutive_setup_failures = 0
+            consecutive_reconnect_failures = 0
+            backoff_logged = False
+            check_interval = CHECK_INTERVAL_SECONDS
 
             while True:
                 try:
-                    await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+                    await asyncio.sleep(check_interval)
 
                     current_connected = self.is_connected
 
@@ -545,6 +553,20 @@ class RadioManager:
                             broadcast_health(True, self._connection_info)
                             self._last_connected = True
                             consecutive_setup_failures = 0
+                            consecutive_reconnect_failures = 0
+                            backoff_logged = False
+                            check_interval = CHECK_INTERVAL_SECONDS
+                        else:
+                            consecutive_reconnect_failures += 1
+                            if consecutive_reconnect_failures >= BACKOFF_AFTER_FAILURES:
+                                check_interval = BACKOFF_INTERVAL_SECONDS
+                                if not backoff_logged:
+                                    logger.info(
+                                        "No radio found; retrying every %ds. "
+                                        "Set MESHCORE_SERIAL_PORT or plug in a radio.",
+                                        BACKOFF_INTERVAL_SECONDS,
+                                    )
+                                    backoff_logged = True
 
                     elif not self._last_connected and current_connected:
                         # Connection restored (might have reconnected automatically).
@@ -554,6 +576,9 @@ class RadioManager:
                         broadcast_health(True, self._connection_info)
                         self._last_connected = True
                         consecutive_setup_failures = 0
+                        consecutive_reconnect_failures = 0
+                        backoff_logged = False
+                        check_interval = CHECK_INTERVAL_SECONDS
 
                     elif current_connected and not self._setup_complete:
                         # Transport connected but setup incomplete — retry

@@ -6,11 +6,11 @@ from fastapi.testclient import TestClient
 from app.frontend_static import register_frontend_missing_fallback, register_frontend_static_routes
 
 
-def test_missing_dist_logs_error_and_keeps_app_running(tmp_path, caplog):
+def test_missing_dist_logs_warning_and_keeps_app_running(tmp_path, caplog):
     app = FastAPI()
     missing_dist = tmp_path / "frontend" / "dist"
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         registered = register_frontend_static_routes(app, missing_dist)
 
     assert registered is False

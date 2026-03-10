@@ -68,7 +68,7 @@ class TestRadioManagerConnect:
 
     @pytest.mark.asyncio
     async def test_connect_serial_autodetect_fails(self):
-        """Serial auto-detect raises when no radio found."""
+        """Serial auto-detect returns without raising when no radio found."""
         from app.radio import RadioManager
 
         with (
@@ -81,8 +81,10 @@ class TestRadioManagerConnect:
             mock_find.return_value = None
 
             rm = RadioManager()
-            with pytest.raises(RuntimeError, match="No MeshCore radio found"):
-                await rm.connect()
+            await rm.connect()
+            assert rm.backend is None
+            assert not rm.is_connected
+            mock_find.assert_awaited_once_with(115200)
 
     @pytest.mark.asyncio
     async def test_connect_tcp(self):
