@@ -17,6 +17,10 @@ dependencies = [
     "apprise>=1.9.7",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
 [project.optional-dependencies]
 spi = ["pymc_core[hardware]>=1.0.7"]
 test = [
