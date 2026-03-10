@@ -276,6 +276,22 @@ class TestSpiConfigFile:
         s = Settings()
         assert s.connection_type == "serial"
 
+    def test_config_yaml_in_cwd_used_when_data_config_missing(self, tmp_path, monkeypatch):
+        """config.yaml in current working directory is used when data/config.yaml does not exist."""
+        (tmp_path / "config.yaml").write_text(_MINIMAL_CONFIG_YAML)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MESHCORE_CONFIG_FILE", raising=False)
+        monkeypatch.setenv("MESHCORE_SERIAL_PORT", "")
+        monkeypatch.setenv("MESHCORE_TCP_HOST", "")
+        monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
+
+        from app.config import Settings
+
+        s = Settings()
+        assert s.connection_type == "spi"
+        assert s.spi_config_path is not None
+        assert s.spi_config_path.resolve() == (tmp_path / "config.yaml").resolve()
+
 
 # ---------------------------------------------------------------------------
 # SpiBackend event bus

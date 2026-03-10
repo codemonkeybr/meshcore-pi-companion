@@ -4,9 +4,9 @@
 # turning a Raspberry Pi + LoRa HAT into a self-contained MeshCore node.
 #
 # Usage:
-#   1. Copy this file to data/config.yaml
+#   1. Copy this file to data/config.yaml (or to config.yaml in the project root)
 #   2. Adjust the settings below for your hardware and region
-#   3. Start RemoteTerm — it will detect the config file automatically
+#   3. Start RemoteTerm — it will detect the config file and use SPI (Waveshare HAT, etc.)
 #
 # Prerequisites:
 #   - Enable SPI on your Pi:  sudo raspi-config → Interface Options → SPI

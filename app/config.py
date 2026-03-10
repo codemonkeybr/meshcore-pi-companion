@@ -1,8 +1,22 @@
 import logging
+from pathlib import Path
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _resolve_spi_config_path(config_file: str) -> Path | None:
+    """Return path to SPI config file if it exists.
+
+    Checks config_file first (default data/config.yaml), then config.yaml in
+    the current working directory, so a config at project root is found.
+    """
+    if Path(config_file).is_file():
+        return Path(config_file)
+    if Path("config.yaml").is_file():
+        return Path("config.yaml")
+    return None
 
 
 class Settings(BaseSettings):
@@ -21,11 +35,14 @@ class Settings(BaseSettings):
     # SPI backend: path to config.yaml (auto-detected at data/config.yaml)
     config_file: str = "data/config.yaml"
 
+    @property
+    def spi_config_path(self) -> Path | None:
+        """Resolved path to SPI config file, or None if not present."""
+        return _resolve_spi_config_path(self.config_file)
+
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
-        from pathlib import Path
-
-        spi_active = Path(self.config_file).is_file()
+        spi_active = self.spi_config_path is not None
         transports_set = sum(
             [
                 bool(self.serial_port),
@@ -39,7 +56,7 @@ class Settings(BaseSettings):
                 "Only one transport may be configured at a time. "
                 "Set exactly one of MESHCORE_SERIAL_PORT, MESHCORE_TCP_HOST, "
                 "MESHCORE_BLE_ADDRESS, or provide a config file at "
-                f"{self.config_file} for SPI mode."
+                f"{self.config_file} or config.yaml for SPI mode."
             )
         if self.ble_address and not self.ble_pin:
             raise ValueError("MESHCORE_BLE_PIN is required when MESHCORE_BLE_ADDRESS is set.")
@@ -47,9 +64,7 @@ class Settings(BaseSettings):
 
     @property
     def connection_type(self) -> Literal["serial", "tcp", "ble", "spi"]:
-        from pathlib import Path
-
-        if Path(self.config_file).is_file():
+        if self.spi_config_path is not None:
             return "spi"
         if self.tcp_host:
             return "tcp"

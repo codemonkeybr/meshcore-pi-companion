@@ -395,15 +395,17 @@ class RadioManager:
     async def _connect_spi(self) -> None:
         """Connect to the radio via SPI (Raspberry Pi + LoRa HAT).
 
-        All parameters come from the config file (``data/config.yaml``).
+        All parameters come from the config file (data/config.yaml or config.yaml).
         """
-        from pathlib import Path
-
         from app.backends.spi_backend import SpiBackend
         from app.spi_config_file import load_config
         from app.spi_identity import load_or_create_identity
 
-        cfg = load_config(Path(settings.config_file))
+        config_path = settings.spi_config_path
+        if config_path is None:
+            logger.warning("SPI config file not found; cannot connect via SPI.")
+            return
+        cfg = load_config(config_path)
         node_cfg = cfg["node"]
         radio_cfg = cfg["radio"]
         hw_cfg = cfg["hardware"]
