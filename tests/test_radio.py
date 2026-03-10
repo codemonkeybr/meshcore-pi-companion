@@ -38,7 +38,8 @@ class TestRadioManagerConnect:
                 max_reconnect_attempts=10,
             )
             assert rm.connection_info == "Serial: /dev/ttyUSB0"
-            assert rm.meshcore is mock_mc
+            assert rm.backend is not None
+            assert rm.backend._mc is mock_mc
 
     @pytest.mark.asyncio
     async def test_connect_serial_autodetect(self):
@@ -110,7 +111,8 @@ class TestRadioManagerConnect:
                 max_reconnect_attempts=10,
             )
             assert rm.connection_info == "TCP: 192.168.1.100:4000"
-            assert rm.meshcore is mock_mc
+            assert rm.backend is not None
+            assert rm.backend._mc is mock_mc
 
     @pytest.mark.asyncio
     async def test_connect_ble(self):
@@ -139,7 +141,8 @@ class TestRadioManagerConnect:
                 max_reconnect_attempts=15,
             )
             assert rm.connection_info == "BLE: AA:BB:CC:DD:EE:FF"
-            assert rm.meshcore is mock_mc
+            assert rm.backend is not None
+            assert rm.backend._mc is mock_mc
 
     @pytest.mark.asyncio
     async def test_connect_disconnects_existing_first(self):
@@ -161,12 +164,13 @@ class TestRadioManagerConnect:
             mock_meshcore.create_tcp = AsyncMock(return_value=new_mc)
 
             rm = RadioManager()
-            rm._meshcore = old_mc
+            rm._backend = old_mc
 
             await rm.connect()
 
             old_mc.disconnect.assert_awaited_once()
-            assert rm.meshcore is new_mc
+            assert rm.backend is not None
+            assert rm.backend._mc is new_mc
 
 
 class TestConnectionMonitor:
@@ -180,8 +184,8 @@ class TestConnectionMonitor:
         rm = RadioManager()
         rm._connection_info = "Serial: /dev/ttyUSB0"
         rm._last_connected = True
-        rm._meshcore = MagicMock()
-        rm._meshcore.is_connected = False
+        rm._backend = MagicMock()
+        rm._backend.is_connected = False
 
         reconnect_calls = 0
 
@@ -189,8 +193,8 @@ class TestConnectionMonitor:
             nonlocal reconnect_calls
             reconnect_calls += 1
             if reconnect_calls == 1:
-                rm._meshcore = MagicMock()
-                rm._meshcore.is_connected = True
+                rm._backend = MagicMock()
+                rm._backend.is_connected = True
                 return True
             return False
 
@@ -233,7 +237,7 @@ class TestConnectionMonitor:
         # but setup failed so _setup_complete=False.
         mock_mc = MagicMock()
         mock_mc.is_connected = True
-        rm._meshcore = mock_mc
+        rm._backend = mock_mc
         rm._last_connected = True
         rm._setup_complete = False
 
@@ -283,7 +287,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         connect_count = 0
 
@@ -294,7 +298,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -319,7 +323,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         call_order: list[str] = []
 
@@ -328,7 +332,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -351,7 +355,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         attempt = 0
 
@@ -364,7 +368,7 @@ class TestReconnectLock:
             # Second attempt succeeds
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -501,8 +505,9 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.query_path_hash_mode = AsyncMock(return_value=(0, False))
+        rm._backend = mock_mc
 
         call_order = []
 
@@ -550,8 +555,9 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.query_path_hash_mode = AsyncMock(return_value=(0, False))
+        rm._backend = mock_mc
 
         observed_during = None
 
@@ -593,7 +599,7 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = mock_mc
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -615,7 +621,7 @@ class TestPostConnectSetupOrdering:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         # Should not raise or call any functions
         await rm.post_connect_setup()
@@ -630,8 +636,9 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.query_path_hash_mode = AsyncMock(return_value=(0, False))
+        rm._backend = mock_mc
 
         mock_settings = AppSettings(flood_scope="#TestRegion")
 
@@ -653,7 +660,7 @@ class TestPostConnectSetupOrdering:
         ):
             await rm.post_connect_setup()
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("#TestRegion")
+        mock_mc.set_flood_scope.assert_awaited_once_with("#TestRegion")
 
     @pytest.mark.asyncio
     async def test_plain_flood_scope_is_normalized_during_setup(self):
@@ -664,8 +671,9 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.query_path_hash_mode = AsyncMock(return_value=(0, False))
+        rm._backend = mock_mc
 
         mock_settings = AppSettings(flood_scope="TestRegion")
 
@@ -687,7 +695,7 @@ class TestPostConnectSetupOrdering:
         ):
             await rm.post_connect_setup()
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("#TestRegion")
+        mock_mc.set_flood_scope.assert_awaited_once_with("#TestRegion")
 
     @pytest.mark.asyncio
     async def test_flood_scope_empty_resets_during_setup(self):
@@ -698,8 +706,9 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.query_path_hash_mode = AsyncMock(return_value=(0, False))
+        rm._backend = mock_mc
 
         mock_settings = AppSettings(flood_scope="")
 
@@ -721,4 +730,4 @@ class TestPostConnectSetupOrdering:
         ):
             await rm.post_connect_setup()
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("")
+        mock_mc.set_flood_scope.assert_awaited_once_with("")

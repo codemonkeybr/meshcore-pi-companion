@@ -54,7 +54,7 @@ async def _resolve_contact_or_404(
 
 async def _ensure_on_radio(mc, contact: Contact) -> None:
     """Add a contact to the radio for routing, raising 500 on failure."""
-    add_result = await mc.commands.add_contact(contact.to_radio_dict())
+    add_result = await mc.add_contact(contact.to_radio_dict())
     if add_result is not None and add_result.type == EventType.ERROR:
         raise HTTPException(
             status_code=500, detail=f"Failed to add contact to radio: {add_result.payload}"
@@ -68,7 +68,7 @@ async def _best_effort_push_contact_to_radio(contact: Contact, operation_name: s
 
     try:
         async with radio_manager.radio_operation(operation_name) as mc:
-            result = await mc.commands.add_contact(contact.to_radio_dict())
+            result = await mc.add_contact(contact.to_radio_dict())
         if result is not None and result.type == EventType.ERROR:
             logger.warning(
                 "Failed to push updated routing to radio for %s: %s",
@@ -303,7 +303,7 @@ async def sync_contacts_from_radio() -> dict:
     logger.info("Syncing contacts from radio")
 
     async with radio_manager.radio_operation("sync_contacts_from_radio") as mc:
-        result = await mc.commands.get_contacts()
+        result = await mc.get_contacts()
 
     if result.type == EventType.ERROR:
         raise HTTPException(status_code=500, detail=f"Failed to get contacts: {result.payload}")
@@ -356,7 +356,7 @@ async def remove_contact_from_radio(public_key: str) -> dict:
 
         logger.info("Removing contact %s from radio", contact.public_key[:12])
 
-        result = await mc.commands.remove_contact(radio_contact)
+        result = await mc.remove_contact(radio_contact)
 
         if result.type == EventType.ERROR:
             raise HTTPException(
@@ -382,7 +382,7 @@ async def add_contact_to_radio(public_key: str) -> dict:
 
         logger.info("Adding contact %s to radio", contact.public_key[:12])
 
-        result = await mc.commands.add_contact(contact.to_radio_dict())
+        result = await mc.add_contact(contact.to_radio_dict())
 
         if result.type == EventType.ERROR:
             raise HTTPException(status_code=500, detail=f"Failed to add contact: {result.payload}")
@@ -416,7 +416,7 @@ async def delete_contact(public_key: str) -> dict:
                 logger.info(
                     "Removing contact %s from radio before deletion", contact.public_key[:12]
                 )
-                await mc.commands.remove_contact(radio_contact)
+                await mc.remove_contact(radio_contact)
 
     # Delete from database
     await ContactRepository.delete(contact.public_key)
@@ -454,7 +454,7 @@ async def request_trace(public_key: str) -> TraceResponse:
         logger.info(
             "Sending trace to %s (tag=%d, hash=%s)", contact.public_key[:12], tag, contact_hash
         )
-        result = await mc.commands.send_trace(path=contact_hash, tag=tag)
+        result = await mc.send_trace(path=contact_hash, tag=tag)
 
         if result.type == EventType.ERROR:
             raise HTTPException(status_code=500, detail=f"Failed to send trace: {result.payload}")

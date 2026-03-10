@@ -247,8 +247,8 @@ def _build_radio_info() -> str:
     from app.radio import radio_manager
 
     try:
-        if radio_manager.meshcore and radio_manager.meshcore.self_info:
-            info = radio_manager.meshcore.self_info
+        if radio_manager.backend and radio_manager.backend.self_info:
+            info = radio_manager.backend.self_info
             freq = info.get("radio_freq", 0)
             bw = info.get("radio_bw", 0)
             sf = info.get("radio_sf", 0)
@@ -352,8 +352,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
                 tls_context.verify_mode = ssl.CERT_NONE
 
         device_name = ""
-        if radio_manager.meshcore and radio_manager.meshcore.self_info:
-            device_name = radio_manager.meshcore.self_info.get("name", "")
+        if radio_manager.backend and radio_manager.backend.self_info:
+            device_name = radio_manager.backend.self_info.get("name", "")
 
         status_topic = _build_status_topic(s, pubkey_hex)
         offline_payload = json.dumps(
@@ -408,7 +408,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             async with radio_manager.radio_operation(
                 "community_stats_device_info", blocking=False
             ) as mc:
-                event = await mc.commands.send_device_query()
+                event = await mc.send_device_query()
                 from meshcore.events import EventType
 
                 if event.type == EventType.DEVICE_INFO:
@@ -456,7 +456,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
 
                 result: dict[str, Any] = {}
 
-                core_event = await mc.commands.get_stats_core()
+                core_event = await mc.get_stats_core()
                 if core_event.type == EventType.ERROR:
                     logger.info("Community MQTT: firmware does not support stats commands")
                     self._stats_supported = False
@@ -464,7 +464,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
                 if core_event.type == EventType.STATS_CORE:
                     result.update(core_event.payload)
 
-                radio_event = await mc.commands.get_stats_radio()
+                radio_event = await mc.get_stats_radio()
                 if radio_event.type == EventType.ERROR:
                     logger.info("Community MQTT: firmware does not support stats commands")
                     self._stats_supported = False
@@ -498,8 +498,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         pubkey_hex = public_key.hex().upper()
 
         device_name = ""
-        if radio_manager.meshcore and radio_manager.meshcore.self_info:
-            device_name = radio_manager.meshcore.self_info.get("name", "")
+        if radio_manager.backend and radio_manager.backend.self_info:
+            device_name = radio_manager.backend.self_info.get("name", "")
 
         device_info = await self._fetch_device_info()
         stats = await self._fetch_stats() if refresh_stats else self._cached_stats

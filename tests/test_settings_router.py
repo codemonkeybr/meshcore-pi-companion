@@ -83,11 +83,11 @@ class TestUpdateSettings:
     async def test_flood_scope_applies_to_radio(self, test_db):
         """When radio is connected, setting flood_scope calls set_flood_scope on radio."""
         mock_mc = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
+        mock_mc.set_flood_scope = AsyncMock()
 
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
-        mock_rm.meshcore = mock_mc
+        mock_rm.backend = mock_mc
 
         from contextlib import asynccontextmanager
 
@@ -100,7 +100,7 @@ class TestUpdateSettings:
         with patch("app.radio.radio_manager", mock_rm):
             await update_settings(AppSettingsUpdate(flood_scope="TestRegion"))
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("#TestRegion")
+        mock_mc.set_flood_scope.assert_awaited_once_with("#TestRegion")
 
     @pytest.mark.asyncio
     async def test_flood_scope_empty_resets_radio(self, test_db):
@@ -109,11 +109,11 @@ class TestUpdateSettings:
         await update_settings(AppSettingsUpdate(flood_scope="#TestRegion"))
 
         mock_mc = AsyncMock()
-        mock_mc.commands.set_flood_scope = AsyncMock()
+        mock_mc.set_flood_scope = AsyncMock()
 
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
-        mock_rm.meshcore = mock_mc
+        mock_rm.backend = mock_mc
 
         from contextlib import asynccontextmanager
 
@@ -126,7 +126,7 @@ class TestUpdateSettings:
         with patch("app.radio.radio_manager", mock_rm):
             await update_settings(AppSettingsUpdate(flood_scope=""))
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("")
+        mock_mc.set_flood_scope.assert_awaited_once_with("")
 
 
 class TestToggleFavorite:

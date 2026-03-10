@@ -18,6 +18,22 @@ class Settings(BaseSettings):
     database_path: str = "data/meshcore.db"
     disable_bots: bool = False
 
+    # SPI backend settings (Raspberry Pi + LoRa HAT)
+    spi_profile: str = ""  # Hardware profile name (e.g. "waveshare")
+    spi_frequency: int = 869525000  # LoRa frequency in Hz
+    spi_tx_power: int = 22  # TX power in dBm
+    spi_bandwidth: int = 62500  # Bandwidth in Hz
+    spi_spreading_factor: int = 8
+    spi_coding_rate: int = 8
+    spi_preamble_length: int = 17
+    spi_sync_word: int = 0x3444
+    spi_bus: int | None = None  # Override SPI bus ID from profile
+    spi_cs: int | None = None  # Override CS pin from profile
+    spi_reset: int | None = None  # Override reset pin
+    spi_busy: int | None = None  # Override busy pin
+    spi_irq: int | None = None  # Override IRQ pin
+    node_name: str = ""  # Node name for SPI mode (auto-generated if empty)
+
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
         transports_set = sum(
@@ -25,19 +41,23 @@ class Settings(BaseSettings):
                 bool(self.serial_port),
                 bool(self.tcp_host),
                 bool(self.ble_address),
+                bool(self.spi_profile),
             ]
         )
         if transports_set > 1:
             raise ValueError(
                 "Only one transport may be configured at a time. "
-                "Set exactly one of MESHCORE_SERIAL_PORT, MESHCORE_TCP_HOST, or MESHCORE_BLE_ADDRESS."
+                "Set exactly one of MESHCORE_SERIAL_PORT, MESHCORE_TCP_HOST, "
+                "MESHCORE_BLE_ADDRESS, or MESHCORE_SPI_PROFILE."
             )
         if self.ble_address and not self.ble_pin:
             raise ValueError("MESHCORE_BLE_PIN is required when MESHCORE_BLE_ADDRESS is set.")
         return self
 
     @property
-    def connection_type(self) -> Literal["serial", "tcp", "ble"]:
+    def connection_type(self) -> Literal["serial", "tcp", "ble", "spi"]:
+        if self.spi_profile:
+            return "spi"
         if self.tcp_host:
             return "tcp"
         if self.ble_address:

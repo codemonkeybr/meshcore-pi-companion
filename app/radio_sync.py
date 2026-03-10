@@ -14,11 +14,12 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from meshcore import EventType, MeshCore
+from meshcore import EventType
 
 from app.event_handlers import cleanup_expired_acks
 from app.models import Contact
 from app.radio import RadioOperationBusyError, radio_manager
+from app.radio_backend import RadioBackend
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     AppSettingsRepository,
@@ -122,7 +123,7 @@ _sync_task: asyncio.Task | None = None
 SYNC_INTERVAL = 300
 
 
-async def sync_and_offload_contacts(mc: MeshCore) -> dict:
+async def sync_and_offload_contacts(be: RadioBackend) -> dict:
     """
     Sync contacts from radio to database, then remove them from radio.
     Returns counts of synced and removed contacts.
@@ -132,7 +133,7 @@ async def sync_and_offload_contacts(mc: MeshCore) -> dict:
 
     try:
         # Get all contacts from radio
-        result = await mc.commands.get_contacts()
+        result = await be.get_contacts()
 
         if result is None or result.type == EventType.ERROR:
             logger.error(
@@ -178,7 +179,7 @@ async def sync_and_offload_contacts(mc: MeshCore) -> dict:
 
             # Remove from radio
             try:
-                remove_result = await mc.commands.remove_contact(contact_data)
+                remove_result = await be.remove_contact(contact_data)
                 if remove_result.type == EventType.OK:
                     removed += 1
 
@@ -191,20 +192,16 @@ async def sync_and_offload_contacts(mc: MeshCore) -> dict:
                     # it on a full get_contacts() call.
                     #
                     # Why this matters: sync_recent_contacts_to_radio() uses
-                    # mc.get_contact_by_key_prefix() to check whether a
+                    # get_contact_by_key_prefix() to check whether a
                     # contact is already loaded on the radio. That method
-                    # searches mc._contacts. If we don't evict the removed
+                    # searches the cache. If we don't evict the removed
                     # contact from the cache here, get_contact_by_key_prefix()
                     # will still find it and skip the add_contact() call —
                     # meaning contacts never get loaded back onto the radio
                     # after offload. The result: no DM ACKs, degraded routing
                     # for potentially minutes until the next periodic sync
                     # refreshes the cache from the (now-empty) radio.
-                    #
-                    # We access mc._contacts directly because the library
-                    # exposes it as a read-only property (mc.contacts) with
-                    # no removal API. The dict is keyed by public_key string.
-                    mc._contacts.pop(public_key, None)
+                    be.evict_contact_from_cache(public_key)
                 else:
                     logger.warning(
                         "Failed to remove contact %s: %s", public_key[:12], remove_result.payload
@@ -221,7 +218,7 @@ async def sync_and_offload_contacts(mc: MeshCore) -> dict:
     return {"synced": synced, "removed": removed}
 
 
-async def sync_and_offload_channels(mc: MeshCore) -> dict:
+async def sync_and_offload_channels(be: RadioBackend) -> dict:
     """
     Sync channels from radio to database, then clear them from radio.
     Returns counts of synced and cleared channels.
@@ -232,7 +229,7 @@ async def sync_and_offload_channels(mc: MeshCore) -> dict:
     try:
         # Check all 40 channel slots
         for idx in range(40):
-            result = await mc.commands.get_channel(idx)
+            result = await be.get_channel(idx)
 
             if result.type != EventType.CHANNEL_INFO:
                 continue
@@ -249,7 +246,7 @@ async def sync_and_offload_channels(mc: MeshCore) -> dict:
 
             # Clear from radio (set empty name and zero key)
             try:
-                clear_result = await mc.commands.set_channel(
+                clear_result = await be.set_channel(
                     channel_idx=idx,
                     channel_name="",
                     channel_secret=bytes(16),
@@ -292,21 +289,21 @@ async def ensure_default_channels() -> None:
         )
 
 
-async def sync_and_offload_all(mc: MeshCore) -> dict:
+async def sync_and_offload_all(be: RadioBackend) -> dict:
     """Sync and offload both contacts and channels, then ensure defaults exist."""
     logger.info("Starting full radio sync and offload")
 
-    contacts_result = await sync_and_offload_contacts(mc)
-    channels_result = await sync_and_offload_channels(mc)
+    contacts_result = await sync_and_offload_contacts(be)
+    channels_result = await sync_and_offload_channels(be)
 
     # Ensure default channels exist
     await ensure_default_channels()
 
     # Reload favorites and recent contacts back onto the radio immediately
     # so favorited contacts don't stay in the on_radio=False limbo until the
-    # next advertisement arrives.  Pass mc directly since the caller already
+    # next advertisement arrives.  Pass be directly since the caller already
     # holds the radio operation lock (asyncio.Lock is not reentrant).
-    reload_result = await sync_recent_contacts_to_radio(force=True, mc=mc)
+    reload_result = await sync_recent_contacts_to_radio(force=True, be=be)
 
     return {
         "contacts": contacts_result,
@@ -315,7 +312,7 @@ async def sync_and_offload_all(mc: MeshCore) -> dict:
     }
 
 
-async def drain_pending_messages(mc: MeshCore) -> int:
+async def drain_pending_messages(be: RadioBackend) -> int:
     """
     Drain all pending messages from the radio.
 
@@ -327,7 +324,7 @@ async def drain_pending_messages(mc: MeshCore) -> int:
 
     for _ in range(max_iterations):
         try:
-            result = await mc.commands.get_msg(timeout=2.0)
+            result = await be.get_msg(timeout=2.0)
 
             if result.type == EventType.NO_MORE_MSGS:
                 break
@@ -349,7 +346,7 @@ async def drain_pending_messages(mc: MeshCore) -> int:
     return count
 
 
-async def poll_for_messages(mc: MeshCore) -> int:
+async def poll_for_messages(be: RadioBackend) -> int:
     """
     Poll the radio for any pending messages (single pass).
 
@@ -362,7 +359,7 @@ async def poll_for_messages(mc: MeshCore) -> int:
 
     try:
         # Try to get one message
-        result = await mc.commands.get_msg(timeout=2.0)
+        result = await be.get_msg(timeout=2.0)
 
         if result.type == EventType.NO_MORE_MSGS:
             # No messages waiting
@@ -372,7 +369,7 @@ async def poll_for_messages(mc: MeshCore) -> int:
         elif result.type in (EventType.CONTACT_MSG_RECV, EventType.CHANNEL_MSG_RECV):
             count += 1
             # If we got a message, there might be more - drain them
-            count += await drain_pending_messages(mc)
+            count += await drain_pending_messages(be)
 
     except asyncio.TimeoutError:
         pass
@@ -398,8 +395,8 @@ async def _message_poll_loop():
                         "message_poll_loop",
                         blocking=False,
                         suspend_auto_fetch=True,
-                    ) as mc:
-                        count = await poll_for_messages(mc)
+                    ) as be:
+                        count = await poll_for_messages(be)
                         if count > 0:
                             logger.warning(
                                 "Poll loop caught %d message(s) missed by auto-fetch",
@@ -435,14 +432,14 @@ async def stop_message_polling():
         logger.info("Stopped periodic message polling")
 
 
-async def send_advertisement(mc: MeshCore, *, force: bool = False) -> bool:
+async def send_advertisement(be: RadioBackend, *, force: bool = False) -> bool:
     """Send an advertisement to announce presence on the mesh.
 
     Respects the configured advert_interval - won't send if not enough time
     has elapsed since the last advertisement, unless force=True.
 
     Args:
-        mc: The MeshCore instance to use for the advertisement.
+        be: The RadioBackend instance to use for the advertisement.
         force: If True, send immediately regardless of interval.
 
     Returns True if successful, False otherwise (including if throttled).
@@ -475,7 +472,7 @@ async def send_advertisement(mc: MeshCore, *, force: bool = False) -> bool:
             return False
 
     try:
-        result = await mc.commands.send_advert(flood=True)
+        result = await be.send_advert(flood=True)
         if result.type == EventType.OK:
             # Update last_advert_time in database
             now = int(time.time())
@@ -508,8 +505,8 @@ async def _periodic_advert_loop():
                     async with radio_manager.radio_operation(
                         "periodic_advertisement",
                         blocking=False,
-                    ) as mc:
-                        await send_advertisement(mc)
+                    ) as be:
+                        await send_advertisement(be)
                 except RadioOperationBusyError:
                     logger.debug("Skipping periodic advertisement: radio busy")
 
@@ -546,14 +543,14 @@ async def stop_periodic_advert():
         logger.info("Stopped periodic advertisement")
 
 
-async def sync_radio_time(mc: MeshCore) -> bool:
+async def sync_radio_time(be: RadioBackend) -> bool:
     """Sync the radio's clock with the system time.
 
     Returns True if successful, False otherwise.
     """
     try:
         now = int(time.time())
-        await mc.commands.set_time(now)
+        await be.set_time(now)
         logger.debug("Synced radio time to %d", now)
         return True
     except Exception as e:
@@ -573,10 +570,10 @@ async def _periodic_sync_loop():
                 async with radio_manager.radio_operation(
                     "periodic_sync",
                     blocking=False,
-                ) as mc:
+                ) as be:
                     logger.debug("Running periodic radio sync")
-                    await sync_and_offload_all(mc)
-                    await sync_radio_time(mc)
+                    await sync_and_offload_all(be)
+                    await sync_radio_time(be)
             except RadioOperationBusyError:
                 logger.debug("Skipping periodic sync: radio busy")
         except asyncio.CancelledError:
@@ -612,14 +609,14 @@ _last_contact_sync: float = 0.0
 CONTACT_SYNC_THROTTLE_SECONDS = 30  # Don't sync more than once per 30 seconds
 
 
-async def _sync_contacts_to_radio_inner(mc: MeshCore) -> dict:
+async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
     """
     Core logic for loading contacts onto the radio.
 
     Favorite contacts are prioritized first, then recent non-repeater contacts
     fill remaining slots up to max_radio_contacts.
 
-    Caller must hold the radio operation lock and pass a valid MeshCore instance.
+    Caller must hold the radio operation lock and pass a valid backend instance.
     """
     app_settings = await AppSettingsRepository.get()
     max_contacts = app_settings.max_radio_contacts
@@ -673,7 +670,7 @@ async def _sync_contacts_to_radio_inner(mc: MeshCore) -> dict:
 
     for contact in selected_contacts:
         # Check if already on radio
-        radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
+        radio_contact = be.get_contact_by_key_prefix(contact.public_key[:12])
         if radio_contact:
             already_on_radio += 1
             # Update DB if not marked as on_radio
@@ -683,7 +680,7 @@ async def _sync_contacts_to_radio_inner(mc: MeshCore) -> dict:
 
         try:
             radio_contact_payload = contact.to_radio_dict()
-            result = await mc.commands.add_contact(radio_contact_payload)
+            result = await be.add_contact(radio_contact_payload)
             if result.type == EventType.OK:
                 loaded += 1
                 await ContactRepository.set_on_radio(contact.public_key, True)
@@ -730,7 +727,9 @@ async def _sync_contacts_to_radio_inner(mc: MeshCore) -> dict:
     }
 
 
-async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None = None) -> dict:
+async def sync_recent_contacts_to_radio(
+    force: bool = False, be: RadioBackend | None = None
+) -> dict:
     """
     Load contacts to the radio for DM ACK support.
 
@@ -740,8 +739,8 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
 
     Args:
         force: Skip the throttle check.
-        mc: Optional MeshCore instance. When provided, the caller already holds
-            the radio operation lock and the inner logic runs directly.
+        be: Optional RadioBackend instance. When provided, the caller already
+            holds the radio operation lock and the inner logic runs directly.
             When None, this function acquires its own lock.
 
     Returns counts of contacts loaded.
@@ -754,12 +753,12 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
         logger.debug("Contact sync throttled (last sync %ds ago)", int(now - _last_contact_sync))
         return {"loaded": 0, "throttled": True}
 
-    # If caller provided a MeshCore instance, use it directly (caller holds the lock)
-    if mc is not None:
+    # If caller provided a backend instance, use it directly (caller holds the lock)
+    if be is not None:
         _last_contact_sync = now
-        return await _sync_contacts_to_radio_inner(mc)
+        return await _sync_contacts_to_radio_inner(be)
 
-    if not radio_manager.is_connected or radio_manager.meshcore is None:
+    if not radio_manager.is_connected or radio_manager.backend is None:
         logger.debug("Cannot sync contacts to radio: not connected")
         return {"loaded": 0, "error": "Radio not connected"}
 
@@ -767,9 +766,9 @@ async def sync_recent_contacts_to_radio(force: bool = False, mc: MeshCore | None
         async with radio_manager.radio_operation(
             "sync_recent_contacts_to_radio",
             blocking=False,
-        ) as mc:
+        ) as be_inner:
             _last_contact_sync = now
-            return await _sync_contacts_to_radio_inner(mc)
+            return await _sync_contacts_to_radio_inner(be_inner)
     except RadioOperationBusyError:
         logger.debug("Skipping contact sync to radio: radio busy")
         return {"loaded": 0, "busy": True}

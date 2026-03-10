@@ -12,18 +12,18 @@ from app.radio_sync import is_polling_paused
 @pytest.fixture(autouse=True)
 def reset_radio_operation_state():
     """Reset shared radio operation lock state before/after each test."""
-    prev_meshcore = radio_manager._meshcore
+    prev_backend = radio_manager._backend
     radio_manager._operation_lock = None
     # Default to a non-None MagicMock so radio_operation() doesn't raise
     # RadioDisconnectedError for tests that only exercise locking.
-    radio_manager._meshcore = MagicMock()
+    radio_manager._backend = MagicMock()
 
     import app.radio_sync as radio_sync
 
     radio_sync._polling_pause_count = 0
     yield
     radio_manager._operation_lock = None
-    radio_manager._meshcore = prev_meshcore
+    radio_manager._backend = prev_backend
     radio_sync._polling_pause_count = 0
 
 
@@ -89,7 +89,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock()
-        radio_manager._meshcore = mc
+        radio_manager._backend = mc
 
         async with radio_manager.radio_operation(
             "auto_fetch_toggle",
@@ -105,7 +105,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock(side_effect=asyncio.CancelledError())
-        radio_manager._meshcore = mc
+        radio_manager._backend = mc
 
         with pytest.raises(asyncio.CancelledError):
             async with radio_manager.radio_operation(
@@ -134,7 +134,7 @@ class TestRadioOperationYield:
     async def test_radio_operation_yields_current_meshcore(self):
         """The yielded value is the current _meshcore at lock-acquisition time."""
         mc = MagicMock()
-        radio_manager._meshcore = mc
+        radio_manager._backend = mc
 
         async with radio_manager.radio_operation("test_yield") as yielded:
             assert yielded is mc
@@ -142,14 +142,14 @@ class TestRadioOperationYield:
     @pytest.mark.asyncio
     async def test_radio_operation_raises_when_disconnected_after_lock(self):
         """RadioDisconnectedError is raised when _meshcore is None after acquiring the lock."""
-        radio_manager._meshcore = None
+        radio_manager._backend = None
 
         with pytest.raises(RadioDisconnectedError):
             async with radio_manager.radio_operation("test_disconnected"):
                 pass  # pragma: no cover
 
         # Lock must be released even after the error
-        radio_manager._meshcore = MagicMock()
+        radio_manager._backend = MagicMock()
         async with radio_manager.radio_operation("after_error", blocking=False):
             pass
 
@@ -161,10 +161,10 @@ class TestRadioOperationYield:
         new_mc = MagicMock(name="new")
 
         # Start with old_mc
-        radio_manager._meshcore = old_mc
+        radio_manager._backend = old_mc
 
         # Simulate a reconnect swapping _meshcore before the caller enters the block
-        radio_manager._meshcore = new_mc
+        radio_manager._backend = new_mc
 
         async with radio_manager.radio_operation("test_swap") as yielded:
             assert yielded is new_mc
@@ -182,7 +182,7 @@ class TestRequireConnected:
 
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = True
-            mock_rm.meshcore = MagicMock()
+            mock_rm.backend = MagicMock()
             mock_rm.is_setup_in_progress = True
 
             with pytest.raises(HTTPException) as exc_info:
@@ -200,7 +200,7 @@ class TestRequireConnected:
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_setup_in_progress = False
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
 
             with pytest.raises(HTTPException) as exc_info:
                 require_connected()
@@ -215,7 +215,7 @@ class TestRequireConnected:
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_setup_in_progress = False
             mock_rm.is_connected = True
-            mock_rm.meshcore = mock_mc
+            mock_rm.backend = mock_mc
 
             result = require_connected()
 

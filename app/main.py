@@ -92,8 +92,8 @@ async def lifespan(app: FastAPI):
     await stop_message_polling()
     await stop_periodic_advert()
     await stop_periodic_sync()
-    if radio_manager.meshcore:
-        await radio_manager.meshcore.stop_auto_message_fetching()
+    if radio_manager.backend:
+        await radio_manager.backend.stop_auto_message_fetching()
     await radio_manager.disconnect()
     await db.disconnect()
 

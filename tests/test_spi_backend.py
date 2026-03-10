@@ -1,0 +1,391 @@
+"""Tests for the SPI backend and its supporting modules.
+
+These tests run without real SPI hardware by mocking pymc_core's radio layer.
+They verify:
+  - Hardware profile lookup
+  - Identity generation/persistence
+  - Contact store adapter
+  - Channel DB adapter
+  - SpiBackend event bridge and RadioBackend method contracts
+  - Config transport exclusivity with SPI
+"""
+
+import asyncio
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Hardware profiles
+# ---------------------------------------------------------------------------
+
+
+class TestHardwareProfiles:
+    def test_get_known_profile(self):
+        from app.backends.spi_config import get_profile
+
+        p = get_profile("waveshare")
+        assert p.name == "Waveshare LoRa HAT (SPI)"
+        assert p.is_waveshare is True
+        assert p.bus_id == 0
+        assert p.cs_pin == 21
+
+    def test_get_unknown_profile_raises(self):
+        from app.backends.spi_config import get_profile
+
+        with pytest.raises(ValueError, match="Unknown hardware profile"):
+            get_profile("does-not-exist")
+
+    def test_all_profiles_have_required_fields(self):
+        from app.backends.spi_config import HARDWARE_PROFILES
+
+        for name, profile in HARDWARE_PROFILES.items():
+            assert profile.name, f"Profile {name} has no name"
+            assert isinstance(profile.bus_id, int)
+            assert isinstance(profile.reset_pin, int)
+            assert isinstance(profile.busy_pin, int)
+            assert isinstance(profile.irq_pin, int)
+
+    def test_uconsole_uses_spi1(self):
+        from app.backends.spi_config import get_profile
+
+        p = get_profile("uconsole")
+        assert p.bus_id == 1
+
+
+# ---------------------------------------------------------------------------
+# Identity management
+# ---------------------------------------------------------------------------
+
+
+class TestSpiIdentity:
+    def test_generate_identity_seed_length(self):
+        from app.spi_identity import generate_identity_seed
+
+        seed = generate_identity_seed()
+        assert len(seed) == 32
+        # Each call should produce different output
+        assert generate_identity_seed() != seed
+
+    def test_load_or_create_identity_creates_new(self, tmp_path):
+        from app.spi_identity import load_or_create_identity, load_spi_config
+
+        cfg_path = tmp_path / "spi_config.json"
+        seed = load_or_create_identity(cfg_path)
+        assert len(seed) == 32
+
+        # Should be persisted
+        config = load_spi_config(cfg_path)
+        assert "identity_key" in config
+        assert base64.b64decode(config["identity_key"]) == seed
+
+    def test_load_or_create_identity_loads_existing(self, tmp_path):
+        from app.spi_identity import load_or_create_identity, save_spi_config
+
+        cfg_path = tmp_path / "spi_config.json"
+        original_seed = os.urandom(32)
+        save_spi_config(
+            {"identity_key": base64.b64encode(original_seed).decode()},
+            cfg_path,
+        )
+
+        loaded = load_or_create_identity(cfg_path)
+        assert loaded == original_seed
+
+    def test_import_identity_validates_length(self, tmp_path):
+        from app.spi_identity import import_identity
+
+        cfg_path = tmp_path / "spi_config.json"
+        with pytest.raises(ValueError, match="32 bytes"):
+            import_identity(b"too-short", cfg_path)
+
+    def test_export_identity_round_trip(self, tmp_path):
+        from app.spi_identity import export_identity, import_identity
+
+        cfg_path = tmp_path / "spi_config.json"
+        seed = os.urandom(32)
+        import_identity(seed, cfg_path)
+        assert export_identity(cfg_path) == seed
+
+
+# ---------------------------------------------------------------------------
+# Contact store adapter
+# ---------------------------------------------------------------------------
+
+
+class TestSpiContactStore:
+    def test_get_by_name(self):
+        from app.backends.spi_contact_store import SpiContact, SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("aabb" * 8, "Alice")
+        assert store.get_by_name("Alice") is not None
+        assert store.get_by_name("Alice").public_key == "aabb" * 8
+        assert store.get_by_name("Bob") is None
+
+    def test_contacts_iterable(self):
+        from app.backends.spi_contact_store import SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("aa" * 32, "A")
+        store.add_or_update("bb" * 32, "B")
+        names = [c.name for c in store.contacts]
+        assert "A" in names
+        assert "B" in names
+
+    def test_remove(self):
+        from app.backends.spi_contact_store import SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("cc" * 32, "Charlie")
+        assert len(store.contacts) == 1
+        store.remove("cc" * 32)
+        assert len(store.contacts) == 0
+        assert store.get_by_name("Charlie") is None
+
+    def test_get_by_public_key(self):
+        from app.backends.spi_contact_store import SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("dd" * 32, "Dave")
+        assert store.get_by_public_key("dd" * 32).name == "Dave"
+        assert store.get_by_public_key("ee" * 32) is None
+
+
+# ---------------------------------------------------------------------------
+# Channel DB adapter
+# ---------------------------------------------------------------------------
+
+
+class TestSpiChannelDB:
+    def test_get_channels_empty(self):
+        from app.backends.spi_channel_db import SpiChannelDB
+
+        db = SpiChannelDB()
+        assert db.get_channels() == []
+
+    def test_get_channels_after_manual_set(self):
+        from app.backends.spi_channel_db import SpiChannelDB
+
+        db = SpiChannelDB()
+        db._cache = [{"name": "General", "secret": "AA" * 16}]
+        channels = db.get_channels()
+        assert len(channels) == 1
+        assert channels[0]["name"] == "General"
+
+
+# ---------------------------------------------------------------------------
+# Config integration
+# ---------------------------------------------------------------------------
+
+
+class TestSpiConfig:
+    def test_spi_connection_type(self, monkeypatch):
+        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+        monkeypatch.setenv("MESHCORE_SERIAL_PORT", "")
+        monkeypatch.setenv("MESHCORE_TCP_HOST", "")
+        monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
+
+        from app.config import Settings
+
+        s = Settings()
+        assert s.connection_type == "spi"
+        assert s.spi_profile == "waveshare"
+
+    def test_spi_plus_serial_rejected(self, monkeypatch):
+        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+        monkeypatch.setenv("MESHCORE_SERIAL_PORT", "/dev/ttyUSB0")
+        monkeypatch.setenv("MESHCORE_TCP_HOST", "")
+        monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
+
+        from app.config import Settings
+
+        with pytest.raises(ValueError, match="Only one transport"):
+            Settings()
+
+    def test_spi_default_radio_params(self, monkeypatch):
+        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+        monkeypatch.setenv("MESHCORE_SERIAL_PORT", "")
+        monkeypatch.setenv("MESHCORE_TCP_HOST", "")
+        monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
+
+        from app.config import Settings
+
+        s = Settings()
+        assert s.spi_frequency == 869525000
+        assert s.spi_tx_power == 22
+        assert s.spi_spreading_factor == 8
+
+
+# ---------------------------------------------------------------------------
+# SpiBackend event bus
+# ---------------------------------------------------------------------------
+
+
+class TestEventBus:
+    @pytest.fixture
+    def bus(self):
+        # Import from spi_backend to test the internal event bus
+        from app.backends.spi_backend import _EventBus
+
+        return _EventBus()
+
+    async def test_subscribe_and_emit(self, bus):
+        from meshcore import EventType
+
+        received = []
+
+        async def handler(event):
+            received.append(event.payload)
+
+        bus.subscribe(EventType.RX_LOG_DATA, handler)
+        await bus.emit(EventType.RX_LOG_DATA, {"test": True})
+        assert len(received) == 1
+        assert received[0]["test"] is True
+
+    async def test_unsubscribe(self, bus):
+        from meshcore import EventType
+
+        received = []
+
+        async def handler(event):
+            received.append(event)
+
+        sub = bus.subscribe(EventType.RX_LOG_DATA, handler)
+        sub.unsubscribe()
+        await bus.emit(EventType.RX_LOG_DATA, {"test": True})
+        assert len(received) == 0
+
+    async def test_multiple_handlers(self, bus):
+        from meshcore import EventType
+
+        counts = {"a": 0, "b": 0}
+
+        async def handler_a(event):
+            counts["a"] += 1
+
+        async def handler_b(event):
+            counts["b"] += 1
+
+        bus.subscribe(EventType.ACK, handler_a)
+        bus.subscribe(EventType.ACK, handler_b)
+        await bus.emit(EventType.ACK, {})
+        assert counts["a"] == 1
+        assert counts["b"] == 1
+
+
+# ---------------------------------------------------------------------------
+# SpiBackend method contracts (mocked — no real hardware)
+# ---------------------------------------------------------------------------
+
+
+class TestSpiBackendMethods:
+    """Verify SpiBackend methods return meshcore-compatible Event objects."""
+
+    @pytest.fixture
+    def backend(self):
+        from app.backends.spi_backend import SpiBackend
+
+        be = SpiBackend()
+        be._connected = True
+        be._self_info = {
+            "public_key": "ab" * 32,
+            "adv_name": "TestNode",
+            "name": "TestNode",
+            "lat": 0.0,
+            "lon": 0.0,
+            "tx_power": 22,
+        }
+        be._radio = MagicMock()
+        be._radio.get_last_rssi.return_value = -90
+        be._radio.get_last_snr.return_value = 5.0
+        be._node = MagicMock()
+        be._identity = MagicMock()
+        be._identity.get_public_key.return_value = bytes.fromhex("ab" * 32)
+        return be
+
+    async def test_disconnect(self, backend):
+        backend._dispatcher_task = None
+        backend._refresh_task = None
+        await backend.disconnect()
+        assert backend.is_connected is False
+
+    async def test_self_info(self, backend):
+        info = backend.self_info
+        assert info is not None
+        assert info["adv_name"] == "TestNode"
+
+    async def test_get_msg_returns_no_more(self, backend):
+        from meshcore import EventType
+
+        result = await backend.get_msg()
+        assert result.type == EventType.NO_MORE_MSGS
+
+    async def test_set_time_is_noop(self, backend):
+        from meshcore import EventType
+
+        result = await backend.set_time(1234567890)
+        assert result.type == EventType.OK
+
+    async def test_set_name(self, backend):
+        await backend.set_name("NewName")
+        assert backend.self_info["adv_name"] == "NewName"
+
+    async def test_set_coords(self, backend):
+        await backend.set_coords(lat=51.5, lon=-0.1)
+        assert backend.self_info["lat"] == 51.5
+        assert backend.self_info["lon"] == -0.1
+
+    async def test_set_tx_power(self, backend):
+        await backend.set_tx_power(val=10)
+        backend._radio.set_tx_power.assert_called_once_with(10)
+        assert backend.self_info["tx_power"] == 10
+
+    async def test_send_device_query(self, backend):
+        from meshcore import EventType
+
+        result = await backend.send_device_query()
+        assert result.type == EventType.DEVICE_INFO
+        assert result.payload["name"] == "TestNode"
+
+    async def test_export_private_key(self, backend, tmp_path):
+        seed = os.urandom(32)
+
+        with patch("app.spi_identity.export_identity", return_value=seed):
+            from meshcore import EventType
+
+            result = await backend.export_private_key()
+            assert result.type == EventType.PRIVATE_KEY
+            assert result.payload["key"] == seed.hex()
+
+    async def test_query_path_hash_mode(self, backend):
+        mode, supported = await backend.query_path_hash_mode()
+        assert mode == 0
+        assert supported is False
+
+    async def test_subscribe_returns_subscription(self, backend):
+        from meshcore import EventType
+
+        sub = backend.subscribe(EventType.RX_LOG_DATA, lambda e: None)
+        assert hasattr(sub, "unsubscribe")
+        sub.unsubscribe()  # Should not raise
+
+    async def test_get_contact_by_key_prefix(self, backend):
+        from app.backends.spi_contact_store import SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("aabb" * 8, "Alice")
+        backend._contact_store = store
+
+        result = backend.get_contact_by_key_prefix("aabb")
+        assert result is not None
+        assert result.name == "Alice"
+
+        assert backend.get_contact_by_key_prefix("zzzz") is None

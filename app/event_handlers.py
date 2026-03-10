@@ -6,6 +6,7 @@ from meshcore import EventType
 
 from app.models import CONTACT_TYPE_REPEATER, Contact, Message, MessagePath
 from app.packet_processor import process_raw_packet
+from app.radio_backend import RadioBackend
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     ContactNameHistoryRepository,
@@ -317,8 +318,8 @@ async def on_ack(event: "Event") -> None:
         logger.debug("ACK code %s does not match any pending messages", ack_code)
 
 
-def register_event_handlers(meshcore) -> None:
-    """Register event handlers with the MeshCore instance.
+def register_event_handlers(backend: RadioBackend) -> None:
+    """Register event handlers with the radio backend.
 
     Note: CHANNEL_MSG_RECV and ADVERTISEMENT events are NOT subscribed.
     These are handled by the packet processor via RX_LOG_DATA to avoid
@@ -340,9 +341,9 @@ def register_event_handlers(meshcore) -> None:
     _active_subscriptions.clear()
 
     # Register handlers and track subscriptions
-    _active_subscriptions.append(meshcore.subscribe(EventType.CONTACT_MSG_RECV, on_contact_message))
-    _active_subscriptions.append(meshcore.subscribe(EventType.RX_LOG_DATA, on_rx_log_data))
-    _active_subscriptions.append(meshcore.subscribe(EventType.PATH_UPDATE, on_path_update))
-    _active_subscriptions.append(meshcore.subscribe(EventType.NEW_CONTACT, on_new_contact))
-    _active_subscriptions.append(meshcore.subscribe(EventType.ACK, on_ack))
+    _active_subscriptions.append(backend.subscribe(EventType.CONTACT_MSG_RECV, on_contact_message))
+    _active_subscriptions.append(backend.subscribe(EventType.RX_LOG_DATA, on_rx_log_data))
+    _active_subscriptions.append(backend.subscribe(EventType.PATH_UPDATE, on_path_update))
+    _active_subscriptions.append(backend.subscribe(EventType.NEW_CONTACT, on_new_contact))
+    _active_subscriptions.append(backend.subscribe(EventType.ACK, on_ack))
     logger.info("Event handlers registered")

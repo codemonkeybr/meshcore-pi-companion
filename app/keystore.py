@@ -14,7 +14,7 @@ from meshcore import EventType
 from app.decoder import derive_public_key
 
 if TYPE_CHECKING:
-    from meshcore import MeshCore
+    from app.radio_backend import RadioBackend
 
 logger = logging.getLogger(__name__)
 
@@ -71,20 +71,20 @@ def has_private_key() -> bool:
     return _private_key is not None
 
 
-async def export_and_store_private_key(mc: "MeshCore") -> bool:
+async def export_and_store_private_key(backend: "RadioBackend") -> bool:
     """Export private key from the radio and store it in the keystore.
 
     This should be called on startup and after each reconnect.
 
     Args:
-        mc: Connected MeshCore instance
+        backend: Connected RadioBackend instance
 
     Returns:
         True if the private key was successfully exported and stored
     """
     logger.info("Exporting private key from radio...")
     try:
-        result = await mc.commands.export_private_key()
+        result = await backend.export_private_key()
 
         if result.type == EventType.PRIVATE_KEY:
             private_key_bytes = result.payload["private_key"]

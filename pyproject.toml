@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+spi = ["pymc_core[hardware]>=1.0.7"]
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",

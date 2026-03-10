@@ -111,7 +111,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.PRIVATE_KEY
         mock_result.payload = {"private_key": VALID_KEY}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -126,7 +126,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.DISABLED
         mock_result.payload = {}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -140,7 +140,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.ERROR
         mock_result.payload = {"error": "something went wrong"}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -154,7 +154,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.ERROR
         mock_result.payload = {"reason": "no_event_received"}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         with pytest.raises(RuntimeError, match="cannot proceed"):
             await export_and_store_private_key(mock_mc)
@@ -165,7 +165,7 @@ class TestExportAndStorePrivateKey:
     async def test_exception_returns_false(self):
         """Exception during export returns False without storing."""
         mock_mc = MagicMock()
-        mock_mc.commands.export_private_key = AsyncMock(side_effect=Exception("Connection lost"))
+        mock_mc.export_private_key = AsyncMock(side_effect=Exception("Connection lost"))
 
         result = await export_and_store_private_key(mock_mc)
 

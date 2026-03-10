@@ -45,7 +45,7 @@ async def _send_channel_message_with_effective_scope(
             channel.name,
             override_scope,
         )
-        override_result = await mc.commands.set_flood_scope(override_scope)
+        override_result = await mc.set_flood_scope(override_scope)
         if override_result is not None and override_result.type == EventType.ERROR:
             logger.warning(
                 "Failed to apply channel flood_scope override for %s: %s",
@@ -61,7 +61,7 @@ async def _send_channel_message_with_effective_scope(
             )
 
     try:
-        set_result = await mc.commands.set_channel(
+        set_result = await mc.set_channel(
             channel_idx=TEMP_RADIO_SLOT,
             channel_name=channel.name,
             channel_secret=key_bytes,
@@ -78,7 +78,7 @@ async def _send_channel_message_with_effective_scope(
                 detail=f"Failed to configure channel on radio before {action_label}",
             )
 
-        return await mc.commands.send_chan_msg(
+        return await mc.send_chan_msg(
             chan=TEMP_RADIO_SLOT,
             msg=text,
             timestamp=timestamp_bytes,
@@ -86,9 +86,7 @@ async def _send_channel_message_with_effective_scope(
     finally:
         if override_scope and override_scope != baseline_scope:
             try:
-                restore_result = await mc.commands.set_flood_scope(
-                    baseline_scope if baseline_scope else ""
-                )
+                restore_result = await mc.set_flood_scope(baseline_scope if baseline_scope else "")
                 if restore_result is not None and restore_result.type == EventType.ERROR:
                     logger.error(
                         "Failed to restore baseline flood_scope after sending to %s: %s",
@@ -213,7 +211,7 @@ async def send_direct_message(request: SendDirectMessageRequest) -> Message:
     contact_data = db_contact.to_radio_dict()
     async with radio_manager.radio_operation("send_direct_message") as mc:
         logger.debug("Ensuring contact %s is on radio before sending", db_contact.public_key[:12])
-        add_result = await mc.commands.add_contact(contact_data)
+        add_result = await mc.add_contact(contact_data)
         if add_result.type == EventType.ERROR:
             logger.warning("Failed to add contact to radio: %s", add_result.payload)
             # Continue anyway - might still work if contact exists
@@ -229,7 +227,7 @@ async def send_direct_message(request: SendDirectMessageRequest) -> Message:
         # and the database. This ensures consistency for deduplication.
         now = int(time.time())
 
-        result = await mc.commands.send_msg(
+        result = await mc.send_msg(
             dst=contact,
             msg=request.text,
             timestamp=now,

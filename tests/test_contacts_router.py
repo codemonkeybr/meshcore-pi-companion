@@ -34,10 +34,10 @@ def _noop_radio_operation(mc=None):
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
 
 
@@ -407,7 +407,7 @@ class TestDeleteContactCascade:
 
         with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
             mock_rm.radio_operation = _noop_radio_operation()
 
             response = await client.delete(f"/api/contacts/{KEY_A}")
@@ -451,7 +451,7 @@ class TestDeleteContact:
 
         with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
             mock_rm.radio_operation = _noop_radio_operation()
 
             response = await client.delete(f"/api/contacts/{KEY_A}")
@@ -477,17 +477,17 @@ class TestDeleteContact:
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=mock_radio_contact)
-        mock_mc.commands.remove_contact = AsyncMock()
+        mock_mc.remove_contact = AsyncMock()
 
         with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = True
-            mock_rm.meshcore = mock_mc
+            mock_rm.backend = mock_mc
             mock_rm.radio_operation = _noop_radio_operation(mock_mc)
 
             response = await client.delete(f"/api/contacts/{KEY_A}")
 
         assert response.status_code == 200
-        mock_mc.commands.remove_contact.assert_called_once_with(mock_radio_contact)
+        mock_mc.remove_contact.assert_called_once_with(mock_radio_contact)
 
 
 class TestSyncContacts:
@@ -502,12 +502,12 @@ class TestSyncContacts:
             KEY_A: {"adv_name": "Alice", "type": 1, "flags": 0},
             KEY_B: {"adv_name": "Bob", "type": 1, "flags": 0},
         }
-        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
+        mock_mc.get_contacts = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post("/api/contacts/sync")
 
@@ -523,7 +523,7 @@ class TestSyncContacts:
     async def test_sync_requires_connection(self, test_db, client):
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
 
             response = await client.post("/api/contacts/sync")
 
@@ -544,12 +544,12 @@ class TestSyncContacts:
         mock_result = MagicMock()
         mock_result.type = EventType.OK
         mock_result.payload = {KEY_A: {"adv_name": "Alice", "type": 1, "flags": 0}}
-        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
+        mock_mc.get_contacts = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post("/api/contacts/sync")
 
@@ -689,7 +689,7 @@ class TestRoutingOverride:
         mock_mc = MagicMock()
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.add_contact = AsyncMock(return_value=mock_result)
 
         with (
             patch("app.routers.contacts.radio_manager") as mock_rm,
@@ -703,7 +703,7 @@ class TestRoutingOverride:
             )
 
         assert response.status_code == 200
-        payload = mock_mc.commands.add_contact.call_args.args[0]
+        payload = mock_mc.add_contact.call_args.args[0]
         assert payload["out_path"] == ""
         assert payload["out_path_len"] == -1
         assert payload["out_path_hash_mode"] == -1
@@ -768,17 +768,17 @@ class TestAddRemoveRadio:
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)  # Not on radio
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
         assert response.status_code == 200
-        mock_mc.commands.add_contact.assert_called_once()
+        mock_mc.add_contact.assert_called_once()
 
         # Verify on_radio flag updated in DB
         contact = await ContactRepository.get_by_key(KEY_A)
@@ -797,17 +797,17 @@ class TestAddRemoveRadio:
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
         assert response.status_code == 200
-        payload = mock_mc.commands.add_contact.call_args.args[0]
+        payload = mock_mc.add_contact.call_args.args[0]
         assert payload["out_path"] == "aa00bb00"
         assert payload["out_path_len"] == 2
         assert payload["out_path_hash_mode"] == 1
@@ -820,10 +820,10 @@ class TestAddRemoveRadio:
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=MagicMock())  # On radio
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
@@ -839,17 +839,17 @@ class TestAddRemoveRadio:
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=mock_radio_contact)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_result)
+        mock_mc.remove_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = mock_mc
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
 
         assert response.status_code == 200
-        mock_mc.commands.remove_contact.assert_called_once_with(mock_radio_contact)
+        mock_mc.remove_contact.assert_called_once_with(mock_radio_contact)
 
         # Verify on_radio flag updated in DB
         contact = await ContactRepository.get_by_key(KEY_A)
@@ -859,7 +859,7 @@ class TestAddRemoveRadio:
     async def test_add_requires_connection(self, test_db, client):
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
 
             response = await client.post(f"/api/contacts/{KEY_A}/add-to-radio")
 
@@ -871,7 +871,7 @@ class TestAddRemoveRadio:
 
         with patch("app.dependencies.radio_manager") as mock_dep_rm:
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
 
             response = await client.post(f"/api/contacts/{KEY_A}/remove-from-radio")
 

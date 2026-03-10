@@ -28,7 +28,7 @@ async def get_unreads() -> UnreadCounts:
     for @mention detection.
     """
     name: str | None = None
-    mc = radio_manager.meshcore
+    mc = radio_manager.backend
     if mc and mc.self_info:
         name = mc.self_info.get("name") or None
     settings = await AppSettingsRepository.get()

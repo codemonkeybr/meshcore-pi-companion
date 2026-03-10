@@ -138,7 +138,7 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
                 try:
                     scope = result.flood_scope
                     async with radio_manager.radio_operation("set_flood_scope") as mc:
-                        await mc.commands.set_flood_scope(scope if scope else "")
+                        await mc.set_flood_scope(scope if scope else "")
                         logger.info("Applied flood_scope=%r to radio", scope or "(disabled)")
                 except Exception as e:
                     logger.warning("Failed to apply flood_scope to radio: %s", e)

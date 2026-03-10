@@ -18,10 +18,10 @@ from app.repository import ChannelRepository, MessageRepository
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
 
 
@@ -79,15 +79,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("Private", secret_b)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             response = await client.post("/api/channels/sync?max_channels=5")
@@ -115,15 +115,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("#test", secret)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             response = await client.post("/api/channels/sync?max_channels=5")
@@ -142,15 +142,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("#hashtag-room", secret)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             response = await client.post("/api/channels/sync?max_channels=3")
@@ -174,15 +174,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("MyChannel", secret)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             await client.post("/api/channels/sync?max_channels=3")
@@ -195,7 +195,7 @@ class TestSyncChannelsFromRadio:
         """Sync returns 503 when radio is not connected."""
         with patch("app.dependencies.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.meshcore = None
+            mock_rm.backend = None
 
             response = await client.post("/api/channels/sync")
 
@@ -212,15 +212,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("Test", secret)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             await client.post("/api/channels/sync?max_channels=3")
@@ -242,15 +242,15 @@ class TestSyncChannelsFromRadio:
                 return _make_channel_info("#flightless", secret)
             return _make_empty_channel()
 
-        mock_mc.commands.get_channel = AsyncMock(side_effect=mock_get_channel)
-        radio_manager._meshcore = mock_mc
+        mock_mc.get_channel = AsyncMock(side_effect=mock_get_channel)
+        radio_manager._backend = mock_mc
 
         with (
             patch("app.dependencies.radio_manager") as mock_dep_rm,
             patch("app.routers.channels.radio_manager") as mock_ch_rm,
         ):
             mock_dep_rm.is_connected = True
-            mock_dep_rm.meshcore = mock_mc
+            mock_dep_rm.backend = mock_mc
             mock_ch_rm.radio_operation = lambda desc: _noop_radio_operation(mock_mc)
 
             response = await client.post("/api/channels/sync?max_channels=3")

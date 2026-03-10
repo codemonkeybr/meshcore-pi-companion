@@ -118,8 +118,8 @@ async def _publish_community_packet(
         pubkey_hex = public_key.hex().upper()
 
         device_name = ""
-        if radio_manager.meshcore and radio_manager.meshcore.self_info:
-            device_name = radio_manager.meshcore.self_info.get("name", "")
+        if radio_manager.backend and radio_manager.backend.self_info:
+            device_name = radio_manager.backend.self_info.get("name", "")
 
         packet = _format_raw_packet(data, device_name, pubkey_hex)
         iata = config.get("iata", "").upper().strip()

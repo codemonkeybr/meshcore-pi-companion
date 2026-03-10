@@ -88,7 +88,7 @@ async def _fetch_repeater_response(
 
     while _monotonic() < deadline:
         try:
-            result = await mc.commands.get_msg(timeout=2.0)
+            result = await mc.get_msg(timeout=2.0)
         except asyncio.TimeoutError:
             continue
         except Exception as e:
@@ -152,7 +152,7 @@ async def prepare_repeater_connection(mc, contact: Contact, password: str) -> No
 
     # Send login with password
     logger.info("Sending login to repeater %s", contact.public_key[:12])
-    login_result = await mc.commands.send_login(contact.public_key, password)
+    login_result = await mc.send_login(contact.public_key, password)
 
     if login_result.type == EventType.ERROR:
         raise HTTPException(status_code=401, detail=f"Login failed: {login_result.payload}")
@@ -207,7 +207,7 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
         # Ensure contact is on radio for routing
         await _ensure_on_radio(mc, contact)
 
-        status = await mc.commands.req_status_sync(contact.public_key, timeout=10, min_timeout=5)
+        status = await mc.req_status_sync(contact.public_key, timeout=10, min_timeout=5)
 
     if status is None:
         raise HTTPException(status_code=504, detail="No status response from repeater")
@@ -245,9 +245,7 @@ async def repeater_lpp_telemetry(public_key: str) -> RepeaterLppTelemetryRespons
     ) as mc:
         await _ensure_on_radio(mc, contact)
 
-        telemetry = await mc.commands.req_telemetry_sync(
-            contact.public_key, timeout=10, min_timeout=5
-        )
+        telemetry = await mc.req_telemetry_sync(contact.public_key, timeout=10, min_timeout=5)
 
     if telemetry is None:
         raise HTTPException(status_code=504, detail="No telemetry response from repeater")
@@ -275,7 +273,7 @@ async def repeater_neighbors(public_key: str) -> RepeaterNeighborsResponse:
         # Ensure contact is on radio for routing
         await _ensure_on_radio(mc, contact)
 
-        neighbors_data = await mc.commands.fetch_all_neighbours(
+        neighbors_data = await mc.fetch_all_neighbours(
             contact.public_key, timeout=10, min_timeout=5
         )
 
@@ -309,7 +307,7 @@ async def repeater_acl(public_key: str) -> RepeaterAclResponse:
         # Ensure contact is on radio for routing
         await _ensure_on_radio(mc, contact)
 
-        acl_data = await mc.commands.req_acl_sync(contact.public_key, timeout=10, min_timeout=5)
+        acl_data = await mc.req_acl_sync(contact.public_key, timeout=10, min_timeout=5)
 
     acl_entries: list[AclEntry] = []
     if acl_data and isinstance(acl_data, list):
@@ -357,7 +355,7 @@ async def _batch_cli_fetch(
             if i > 0:
                 await asyncio.sleep(1.0)
 
-            send_result = await mc.commands.send_cmd(contact.public_key, cmd)
+            send_result = await mc.send_cmd(contact.public_key, cmd)
             if send_result.type == EventType.ERROR:
                 logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
                 continue
@@ -474,7 +472,7 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
         # Send the command
         logger.info("Sending command to repeater %s: %s", contact.public_key[:12], request.command)
 
-        send_result = await mc.commands.send_cmd(contact.public_key, request.command)
+        send_result = await mc.send_cmd(contact.public_key, request.command)
 
         if send_result.type == EventType.ERROR:
             raise HTTPException(
