@@ -390,12 +390,23 @@ class RadioManager:
         logger.debug("TCP connection established")
 
     async def _connect_spi(self) -> None:
-        """Connect to the radio via SPI (Raspberry Pi + LoRa HAT)."""
+        """Connect to the radio via SPI (Raspberry Pi + LoRa HAT).
+
+        All parameters come from the config file (``data/config.yaml``).
+        """
+        from pathlib import Path
+
         from app.backends.spi_backend import SpiBackend
+        from app.spi_config_file import load_config
         from app.spi_identity import load_or_create_identity
 
-        profile = settings.spi_profile
-        node_name = settings.node_name or f"RemoteTerm-{id(self) % 10000:04d}"
+        cfg = load_config(Path(settings.config_file))
+        node_cfg = cfg["node"]
+        radio_cfg = cfg["radio"]
+        hw_cfg = cfg["hardware"]
+
+        profile = hw_cfg["profile"]
+        node_name = node_cfg.get("name") or f"RemoteTerm-{id(self) % 10000:04d}"
         identity_seed = load_or_create_identity()
 
         logger.info("Connecting via SPI (profile=%s, node=%s)", profile, node_name)
@@ -404,18 +415,18 @@ class RadioManager:
             profile_name=profile,
             identity_seed=identity_seed,
             node_name=node_name,
-            frequency=settings.spi_frequency,
-            bandwidth=settings.spi_bandwidth,
-            spreading_factor=settings.spi_spreading_factor,
-            coding_rate=settings.spi_coding_rate,
-            tx_power=settings.spi_tx_power,
-            preamble_length=settings.spi_preamble_length,
-            sync_word=settings.spi_sync_word,
-            bus_override=settings.spi_bus,
-            cs_override=settings.spi_cs,
-            reset_override=settings.spi_reset,
-            busy_override=settings.spi_busy,
-            irq_override=settings.spi_irq,
+            frequency=int(radio_cfg["frequency"]),
+            bandwidth=int(radio_cfg["bandwidth"]),
+            spreading_factor=int(radio_cfg["spreading_factor"]),
+            coding_rate=int(radio_cfg["coding_rate"]),
+            tx_power=int(radio_cfg["tx_power"]),
+            preamble_length=int(radio_cfg["preamble_length"]),
+            sync_word=int(radio_cfg["sync_word"]),
+            bus_override=hw_cfg.get("bus_id"),
+            cs_override=hw_cfg.get("cs_pin"),
+            reset_override=hw_cfg.get("reset_pin"),
+            busy_override=hw_cfg.get("busy_pin"),
+            irq_override=hw_cfg.get("irq_pin"),
         )
         self._backend = backend
         self._connection_info = f"SPI: {profile}"

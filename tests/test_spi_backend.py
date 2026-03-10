@@ -10,15 +10,10 @@ They verify:
   - Config transport exclusivity with SPI
 """
 
-import asyncio
 import base64
-import json
 import os
-import sys
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -182,13 +177,71 @@ class TestSpiChannelDB:
 
 
 # ---------------------------------------------------------------------------
-# Config integration
+# Config file integration
 # ---------------------------------------------------------------------------
 
+_MINIMAL_CONFIG_YAML = """\
+node:
+  name: TestNode
+radio:
+  frequency: 910525000
+  tx_power: 22
+  bandwidth: 62500
+  spreading_factor: 7
+  coding_rate: 5
+hardware:
+  profile: waveshare
+"""
 
-class TestSpiConfig:
-    def test_spi_connection_type(self, monkeypatch):
-        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+
+class TestSpiConfigFile:
+    def test_load_config_parses_yaml(self, tmp_path):
+        from app.spi_config_file import load_config
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(_MINIMAL_CONFIG_YAML)
+        cfg = load_config(cfg_path)
+        assert cfg["hardware"]["profile"] == "waveshare"
+        assert cfg["radio"]["frequency"] == 910525000
+        assert cfg["node"]["name"] == "TestNode"
+
+    def test_load_config_applies_defaults(self, tmp_path):
+        from app.spi_config_file import load_config
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text("hardware:\n  profile: waveshare\n")
+        cfg = load_config(cfg_path)
+        assert cfg["radio"]["preamble_length"] == 17
+        assert cfg["radio"]["sync_word"] == 13380
+        assert cfg["logging"]["level"] == "INFO"
+
+    def test_load_config_missing_profile_raises(self, tmp_path):
+        from app.spi_config_file import load_config
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text("radio:\n  frequency: 910525000\n")
+        with pytest.raises(RuntimeError, match="missing hardware.profile"):
+            load_config(cfg_path)
+
+    def test_load_config_file_not_found(self, tmp_path):
+        from app.spi_config_file import load_config
+
+        with pytest.raises(FileNotFoundError):
+            load_config(tmp_path / "nope.yaml")
+
+    def test_config_file_exists_detection(self, tmp_path):
+        from app.spi_config_file import config_file_exists
+
+        assert config_file_exists(tmp_path / "nope.yaml") is False
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(_MINIMAL_CONFIG_YAML)
+        assert config_file_exists(cfg_path) is True
+
+    def test_connection_type_spi_when_config_exists(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(_MINIMAL_CONFIG_YAML)
+
+        monkeypatch.setenv("MESHCORE_CONFIG_FILE", str(cfg_path))
         monkeypatch.setenv("MESHCORE_SERIAL_PORT", "")
         monkeypatch.setenv("MESHCORE_TCP_HOST", "")
         monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
@@ -197,10 +250,12 @@ class TestSpiConfig:
 
         s = Settings()
         assert s.connection_type == "spi"
-        assert s.spi_profile == "waveshare"
 
-    def test_spi_plus_serial_rejected(self, monkeypatch):
-        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+    def test_config_file_plus_serial_rejected(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(_MINIMAL_CONFIG_YAML)
+
+        monkeypatch.setenv("MESHCORE_CONFIG_FILE", str(cfg_path))
         monkeypatch.setenv("MESHCORE_SERIAL_PORT", "/dev/ttyUSB0")
         monkeypatch.setenv("MESHCORE_TCP_HOST", "")
         monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
@@ -210,8 +265,8 @@ class TestSpiConfig:
         with pytest.raises(ValueError, match="Only one transport"):
             Settings()
 
-    def test_spi_default_radio_params(self, monkeypatch):
-        monkeypatch.setenv("MESHCORE_SPI_PROFILE", "waveshare")
+    def test_no_config_file_defaults_to_serial(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MESHCORE_CONFIG_FILE", str(tmp_path / "nonexistent.yaml"))
         monkeypatch.setenv("MESHCORE_SERIAL_PORT", "")
         monkeypatch.setenv("MESHCORE_TCP_HOST", "")
         monkeypatch.setenv("MESHCORE_BLE_ADDRESS", "")
@@ -219,9 +274,7 @@ class TestSpiConfig:
         from app.config import Settings
 
         s = Settings()
-        assert s.spi_frequency == 869525000
-        assert s.spi_tx_power == 22
-        assert s.spi_spreading_factor == 8
+        assert s.connection_type == "serial"
 
 
 # ---------------------------------------------------------------------------
