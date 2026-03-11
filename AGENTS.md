@@ -49,14 +49,20 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 │        ↓                                          └───────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │              RadioManager + Event Handlers               │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└───────────────────────────┼──────────────────────────────────────┘
-                            │ Serial / TCP / BLE
-                     ┌──────┴──────┐
-                     │ MeshCore    │
-                     │   Radio     │
-                     └─────────────┘
+│  └─────────────────────────────┬────────────────────────────┘   │
+│                                │ RadioBackend (abstract)         │
+│                    ┌────────────┴────────────┐                    │
+│                    │ ClientBackend | SpiBackend (meshcore|pymc_core) │
+│                    └────────────┬────────────┘                    │
+└────────────────────────────────┼────────────────────────────────┘
+                                 │ Serial/TCP/BLE    │ SPI (Pi+HAT)
+                          ┌──────┴──────┐     ┌──────┴──────┐
+                          │ MeshCore    │     │ LoRa radio   │
+                          │   Radio     │     │ (e.g. SX1262)│
+                          └─────────────┘     └─────────────┘
 ```
+
+**Radio backends:** One transport is active at a time. When `data/config.yaml` (or `config.yaml`) exists, **SPI mode** is used: `RadioManager` uses `SpiBackend` (pymc_core + LoRa HAT). Otherwise serial/TCP/BLE use `ClientBackend` (meshcore library). Setup API (`GET/POST /api/setup/*`) and CLI (`python -m app.setup_cli`) provision SPI config; see `app/AGENTS.md` and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
 ## Feature Priority
 
@@ -180,10 +186,14 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   │       └── ...
 │   └── vite.config.ts
 ├── scripts/
-│   ├── all_quality.sh      # Run all lint, format, typecheck, tests, build (sequential)
-│   ├── collect_licenses.sh # Gather third-party license attributions
-│   ├── e2e.sh              # End-to-end test runner
-│   └── publish.sh          # Version bump, changelog, docker build & push
+│   ├── all_quality.sh         # Run all lint, format, typecheck, tests, build (sequential)
+│   ├── install_remoterm_pi.sh # Pi install + optional SPI config wizard (--spi-config = wizard only)
+│   ├── run_remoterm.sh        # Run backend (venv + PYTHONPATH); use for Pi/SPI
+│   ├── collect_licenses.sh    # Gather third-party license attributions
+│   ├── e2e.sh                 # End-to-end test runner
+│   └── publish.sh             # Version bump, changelog, docker build & push
+├── docs/
+│   └── PI_DEPLOYMENT.md       # Short Pi + SPI deployment guide
 ├── remoteterm.service      # Systemd unit file for production deployment
 ├── tests/                  # Backend tests (pytest)
 ├── data/                   # SQLite database (runtime)

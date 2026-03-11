@@ -8,7 +8,8 @@ Keep it aligned with `app/` source files and router behavior.
 - FastAPI
 - aiosqlite
 - Pydantic
-- MeshCore Python library (`meshcore` from PyPI)
+- MeshCore Python library (`meshcore` from PyPI) for serial/TCP/BLE
+- Optional: `pymc_core[hardware]` for SPI backend (Pi + LoRa HAT)
 - PyCryptodome
 
 ## Backend Map
@@ -16,25 +17,31 @@ Keep it aligned with `app/` source files and router behavior.
 ```text
 app/
 ├── main.py              # App startup/lifespan, router registration, static frontend mounting
-├── config.py            # Env-driven runtime settings
+├── config.py            # Env-driven runtime settings; SPI when config file exists
 ├── database.py          # SQLite connection + base schema + migration runner
 ├── migrations.py        # Schema migrations (SQLite user_version)
 ├── models.py            # Pydantic request/response models
 ├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout)
-├── radio.py             # RadioManager + auto-reconnect monitor
+├── radio.py             # RadioManager + auto-reconnect; uses RadioBackend (Client or SPI)
+├── radio_backend.py     # RadioBackend ABC; implemented by ClientBackend and SpiBackend
+├── backends/             # ClientBackend (meshcore), SpiBackend (pymc_core), spi_config, adapters
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
 ├── decoder.py           # Packet parsing/decryption
 ├── packet_processor.py  # Raw packet pipeline, dedup, path handling
-├── event_handlers.py    # MeshCore event subscriptions and ACK tracking
+├── event_handlers.py    # Radio event subscriptions and ACK tracking
 ├── websocket.py         # WS manager + broadcast helpers
 ├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise (see fanout/AGENTS_fanout.md)
 ├── dependencies.py      # Shared FastAPI dependency providers
 ├── path_utils.py        # Path hex rendering and hop-width helpers
 ├── keystore.py          # Ephemeral private/public key storage for DM decryption
+├── spi_config_file.py   # Load/save SPI config.yaml (node, radio, hardware)
+├── spi_identity.py      # Identity seed for SPI node (generate, load, import/export)
+├── setup_cli.py         # Interactive CLI wizard for SPI config (node name, profile, presets)
 ├── frontend_static.py   # Mount/serve built frontend (production)
 └── routers/
     ├── health.py
     ├── radio.py
+    ├── setup.py         # SPI provisioning: status, hardware-profiles, radio-presets, provision
     ├── contacts.py
     ├── channels.py
     ├── messages.py
@@ -51,14 +58,14 @@ app/
 
 ### Incoming data
 
-1. Radio emits events.
+1. Radio (or SPI backend) emits events via the active `RadioBackend`.
 2. `on_rx_log_data` stores raw packet and tries decrypt/pipeline handling.
 3. Decrypted messages are inserted into `messages` and broadcast over WS.
 4. `CONTACT_MSG_RECV` is a fallback DM path when packet pipeline cannot decrypt.
 
 ### Outgoing messages
 
-1. Send endpoints in `routers/messages.py` call MeshCore commands.
+1. Send endpoints in `routers/messages.py` call the backend (MeshCore commands for ClientBackend; pymc_core for SpiBackend).
 2. Message is persisted as outgoing.
 3. Endpoint broadcasts WS `message` event so all live clients update.
 4. ACK/repeat updates arrive later as `message_acked` events.
@@ -198,6 +205,12 @@ app/
 
 ### Statistics
 - `GET /statistics` — aggregated mesh network stats (entity counts, message/packet splits, activity windows, busiest channels)
+
+### Setup (SPI provisioning)
+- `GET /setup/status` — whether SPI config is required; mode and config_path
+- `GET /setup/hardware-profiles` — list of supported LoRa HAT profiles (id, name, pins, prerequisites)
+- `GET /setup/radio-presets` — region presets (from api.meshcore.nz or data/radio-presets-fallback.json)
+- `POST /setup/provision` — write/update config.yaml (node_name, hardware_profile, radio_preset, lat/lon)
 
 ### WebSocket
 - `WS /ws`
