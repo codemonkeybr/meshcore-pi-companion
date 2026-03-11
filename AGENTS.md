@@ -304,7 +304,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Connection status, fanout statuses, bots_disabled flag |
+| GET | `/api/health` | Connection status, fanout statuses, bots_disabled, setup_required (SPI) |
 | GET | `/api/radio/config` | Radio configuration, including `path_hash_mode` and `path_hash_mode_supported` |
 | PATCH | `/api/radio/config` | Update name, location, radio params, and `path_hash_mode` when supported |
 | PUT | `/api/radio/private-key` | Import private key to radio |

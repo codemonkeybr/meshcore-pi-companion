@@ -33,6 +33,16 @@ def _spi_config_valid(path: Path) -> bool:
         return False
 
 
+def get_setup_required() -> bool:
+    """Return True when SPI mode is selected but config is missing or invalid (for health/setup UI)."""
+    if settings.connection_type != "spi":
+        return False
+    cfg_path = settings.spi_config_path
+    if cfg_path is None:
+        return False
+    return not _spi_config_valid(cfg_path)
+
+
 @router.get("/setup/status")
 async def get_setup_status() -> dict[str, Any]:
     """Report whether SPI provisioning is required."""

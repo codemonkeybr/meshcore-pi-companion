@@ -87,3 +87,34 @@ class TestHealthFanoutStatus:
         assert data["status"] == "degraded"
         assert data["radio_connected"] is True
         assert data["radio_initializing"] is True
+
+    @pytest.mark.asyncio
+    async def test_health_setup_required_false_when_not_spi(self, test_db):
+        """setup_required is False when not in SPI mode."""
+        with patch("app.routers.health.settings") as mock_settings:
+            mock_settings.connection_type = "serial"
+            mock_settings.database_path = "data/meshcore.db"
+            mock_settings.disable_bots = False
+            with patch(
+                "app.routers.health.RawPacketRepository.get_oldest_undecrypted",
+                return_value=None,
+            ):
+                data = await build_health_data(True, "Serial: /dev/ttyUSB0")
+        assert data["setup_required"] is False
+
+    @pytest.mark.asyncio
+    async def test_health_setup_required_true_when_spi_config_invalid(self, test_db):
+        """setup_required is True when SPI mode is selected but config is invalid."""
+        with (
+            patch("app.routers.health.settings") as mock_settings,
+            patch("app.routers.setup.get_setup_required", return_value=True),
+        ):
+            mock_settings.connection_type = "spi"
+            mock_settings.database_path = "data/meshcore.db"
+            mock_settings.disable_bots = False
+            with patch(
+                "app.routers.health.RawPacketRepository.get_oldest_undecrypted",
+                return_value=None,
+            ):
+                data = await build_health_data(True, "SPI")
+        assert data["setup_required"] is True
