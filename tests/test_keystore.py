@@ -61,14 +61,26 @@ class TestSetPrivateKey:
         assert len(pub) == 32
         assert has_private_key() is True
 
+    def test_accepts_32_byte_key_from_spi(self):
+        """32-byte scalar (e.g. SPI/pymc_core) is expanded to 64 and stored."""
+        scalar = VALID_KEY[:32]  # clamped scalar so derive_public_key works
+        set_private_key(scalar)
+        stored = get_private_key()
+        assert stored is not None
+        assert len(stored) == 64
+        assert stored[:32] == scalar
+        assert get_public_key() is not None
+
     def test_rejects_wrong_length(self):
-        """Keys that aren't 64 bytes are rejected."""
-        with pytest.raises(ValueError, match="64 bytes"):
-            set_private_key(b"\x00" * 32)
+        """Keys that aren't 32 or 64 bytes are rejected."""
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
+            set_private_key(b"\x00" * 31)
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
+            set_private_key(b"\x00" * 65)
 
     def test_rejects_empty_key(self):
         """Empty key is rejected."""
-        with pytest.raises(ValueError, match="64 bytes"):
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
             set_private_key(b"")
 
     def test_overwrites_previous_key(self):
