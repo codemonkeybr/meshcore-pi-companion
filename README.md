@@ -353,7 +353,9 @@ npx playwright test --headed # show the browser window
 
 ## API Documentation
 
-With the backend running: http://localhost:8000/docs
+With the backend running: **http://localhost:8000/docs** (interactive OpenAPI).
+
+Markdown reference for all exposed endpoints: [docs/api/](docs/api/README.md) (health, setup, radio, contacts, channels, messages, packets, read-state, settings, fanout, statistics, WebSocket).
 
 ## Debugging & Bug Reports
 
