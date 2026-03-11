@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.backends.spi_config import HARDWARE_PROFILES
 from app.config import settings
-from app.spi_config_file import DEFAULT_CONFIG_PATH, load_config
+from app.spi_config_file import DEFAULT_CONFIG_PATH, load_config, save_config
 
 
 router = APIRouter(tags=["setup"])
@@ -82,7 +82,12 @@ def _fetch_radio_presets() -> list[dict[str, Any]]:
                 resp = client.get("https://api.meshcore.nz/api/v1/config")
                 resp.raise_for_status()
                 data = resp.json()
-                if isinstance(data, list):
+                if isinstance(data, dict):
+                    suggested = (data.get("config") or {}).get("suggested_radio_settings") or {}
+                    entries = suggested.get("entries")
+                    if isinstance(entries, list):
+                        presets = entries
+                elif isinstance(data, list):
                     presets = data
         except Exception:
             pass
@@ -190,10 +195,7 @@ async def provision_spi_config(payload: dict[str, Any]) -> dict[str, Any]:
     base["radio"] = radio
     base["hardware"] = hardware
 
-    # Persist via load/save path so shape matches spi_config_file expectations.
-    from app.spi_config_file import save_spi_config  # type: ignore
-
-    save_spi_config(base, cfg_path)
+    save_config(base, cfg_path)
 
     return {
         "status": "ok",

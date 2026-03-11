@@ -87,3 +87,17 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
 
     logger.info("Loaded SPI config from %s (profile=%s)", path, hardware["profile"])
     return config
+
+
+def save_config(config: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
+    """Write the SPI config dict to a YAML file.
+
+    Creates the parent directory if needed. Does not validate the config;
+    use load_config() after to verify.
+    """
+    import yaml  # lazy — only available when [spi] extra is installed
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        yaml.safe_dump(config, f, sort_keys=False)
+    logger.info("Saved SPI config to %s", path)

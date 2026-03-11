@@ -153,7 +153,12 @@ def _fetch_radio_presets() -> list[dict[str, Any]]:
                 resp = client.get(API_URL)
                 resp.raise_for_status()
                 data = resp.json()
-                if isinstance(data, list):
+                if isinstance(data, dict):
+                    suggested = (data.get("config") or {}).get("suggested_radio_settings") or {}
+                    entries = suggested.get("entries")
+                    if isinstance(entries, list):
+                        presets = entries
+                elif isinstance(data, list):
                     presets = data
         except Exception:
             pass
