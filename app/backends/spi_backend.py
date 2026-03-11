@@ -520,7 +520,9 @@ class SpiBackend(RadioBackend):
             lon=self._self_info.get("lon", 0.0) if self._self_info else 0.0,
         )
         await self._node.dispatcher.send_packet(pkt, wait_for_ack=False)
-        return _Event(EventType.ADVERT_SENT, {"flood": flood})
+        # Return OK so radio_sync (and callers checking result.type == EventType.OK) sees success.
+        # meshcore may not define ADVERT_SENT; the library uses OK for send_advert success.
+        return _Event(EventType.OK, {"flood": flood})
 
     async def set_time(self, unix_ts: int) -> Any:
         from meshcore import EventType
