@@ -47,9 +47,15 @@ if [ -f frontend/dist/index.html ]; then
   echo "frontend/dist/index.html already exists; skipping frontend build."
 else
   if command -v npm >/dev/null 2>&1; then
-    echo "npm detected; installing frontend deps and building..."
-    (cd frontend && npm install && npm run build)
-    echo "Frontend build complete."
+    echo "npm detected; installing frontend deps (low-memory mode: 1 connection, 768MB heap)..."
+    # Limit Node heap and one connection at a time to avoid OOM on Pi
+    export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=768"
+    if (cd frontend && npm install --maxsockets 1 --prefer-offline --no-audit --no-fund && npm run build); then
+      echo "Frontend build complete."
+    else
+      echo "Frontend build failed (if you saw 'Killed', the Pi ran out of memory)."
+      echo "Add swap and re-run, or build frontend on another machine and copy frontend/dist/ here."
+    fi
   else
     echo "npm not found; skipping frontend build."
     echo "You can either:"
