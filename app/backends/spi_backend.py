@@ -367,7 +367,9 @@ class SpiBackend(RadioBackend):
         await ContactRepository.delete(pk)
         if self._contact_store:
             self._contact_store.remove(pk)
-        return _Event(EventType.CONTACT_REMOVED, {"public_key": pk})
+        # Return OK so radio_sync (and any caller checking result.type == EventType.OK) sees success.
+        # meshcore does not define CONTACT_REMOVED; the library uses OK for remove_contact success.
+        return _Event(EventType.OK, {"public_key": pk})
 
     def get_contact_by_key_prefix(self, prefix: str) -> Any:
         if not self._contact_store:
