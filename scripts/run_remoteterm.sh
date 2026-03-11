@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run RemoteTerm (ensures project root is on PYTHONPATH).
 # Usage: ./scripts/run_remoteterm.sh [options] [uvicorn args...]
-#   --with-frontend   Build the frontend (npm install + npm run build) before starting.
+#   --with-frontend   Serve the web UI: build frontend if missing (npm install + npm run build),
+#                     or use existing frontend/dist (e.g. copied from another machine).
 # Example: ./scripts/run_remoteterm.sh --host 0.0.0.0 --port 8000
 # Example: ./scripts/run_remoteterm.sh --with-frontend --host 0.0.0.0 --port 8000
 
@@ -20,9 +21,20 @@ for arg in "$@"; do
 done
 
 if [ "$build_frontend" = true ]; then
-  echo "Building frontend..."
-  (cd frontend && npm install && npm run build)
-  echo "Frontend build complete."
+  if [ -f frontend/dist/index.html ]; then
+    echo "Frontend already built (frontend/dist), skipping build."
+  else
+    if ! command -v npm >/dev/null 2>&1; then
+      echo "Error: --with-frontend requires either:"
+      echo "  1. npm (Node.js) to build here: sudo apt install nodejs npm"
+      echo "  2. Or copy a built frontend to this machine: rsync -av frontend/dist/ pi:remoteterm/frontend/dist/"
+      echo "Then run this script again with --with-frontend."
+      exit 1
+    fi
+    echo "Building frontend..."
+    (cd frontend && npm install && npm run build)
+    echo "Frontend build complete."
+  fi
 fi
 
 exec uvicorn app.main:app "${args[@]}"
