@@ -16,20 +16,7 @@ from app.radio_sync import (
     stop_periodic_advert,
     stop_periodic_sync,
 )
-from app.routers import (
-    channels,
-    contacts,
-    fanout,
-    health,
-    messages,
-    packets,
-    radio,
-    read_state,
-    repeaters,
-    settings,
-    statistics,
-    ws,
-)
+from app.routers import channels, contacts, fanout, health, messages, packets, radio, read_state, repeaters, settings, setup, statistics, ws
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -143,6 +130,7 @@ app.include_router(messages.router, prefix="/api")
 app.include_router(packets.router, prefix="/api")
 app.include_router(read_state.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
+app.include_router(setup.router, prefix="/api")
 app.include_router(statistics.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 
