@@ -33,9 +33,11 @@ class SpiChannelDB:
         db_channels = await ChannelRepository.get_all()
         new_cache: list[dict[str, str]] = []
         for ch in db_channels:
-            new_cache.append({
-                "name": ch.name,
-                "secret": ch.key,
-            })
+            new_cache.append(
+                {
+                    "name": ch.name,
+                    "secret": ch.key,
+                }
+            )
         self._cache = new_cache
         logger.debug("SpiChannelDB refreshed: %d channels", len(self._cache))

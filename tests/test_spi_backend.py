@@ -127,7 +127,7 @@ class TestSpiIdentity:
 
 class TestSpiContactStore:
     def test_get_by_name(self):
-        from app.backends.spi_contact_store import SpiContact, SpiContactStore
+        from app.backends.spi_contact_store import SpiContactStore
 
         store = SpiContactStore()
         store.add_or_update("aabb" * 8, "Alice")
@@ -524,4 +524,6 @@ class TestSpiBackendPacketPipelineIntegration:
 
         message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
         assert len(message_broadcasts) == 1
-        assert message_broadcasts[0]["data"]["conversation_key"] == fixture["channel_key_hex"].upper()
+        assert (
+            message_broadcasts[0]["data"]["conversation_key"] == fixture["channel_key_hex"].upper()
+        )

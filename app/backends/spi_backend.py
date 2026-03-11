@@ -35,10 +35,11 @@ logger = logging.getLogger(__name__)
 # Lightweight event bridge
 # ---------------------------------------------------------------------------
 
+
 class _Subscription:
     """Mimics meshcore's Subscription object."""
 
-    def __init__(self, bus: "_EventBus", event_type: Any, handler: Any) -> None:
+    def __init__(self, bus: _EventBus, event_type: Any, handler: Any) -> None:
         self._bus = bus
         self._event_type = event_type
         self._handler = handler
@@ -205,14 +206,10 @@ class SpiBackend(RadioBackend):
         self._node.dispatcher.set_raw_packet_callback(self._on_raw_packet)
 
         # Start the Dispatcher maintenance loop as a background task
-        self._dispatcher_task = asyncio.create_task(
-            self._node.start(), name="spi-dispatcher"
-        )
+        self._dispatcher_task = asyncio.create_task(self._node.start(), name="spi-dispatcher")
 
         # Start periodic cache refresh (every 60s)
-        self._refresh_task = asyncio.create_task(
-            self._periodic_refresh(), name="spi-cache-refresh"
-        )
+        self._refresh_task = asyncio.create_task(self._periodic_refresh(), name="spi-cache-refresh")
 
         self._self_info = {
             "public_key": pub_hex,
@@ -223,9 +220,7 @@ class SpiBackend(RadioBackend):
             "tx_power": tx_power,
         }
         self._connected = True
-        logger.info(
-            "SPI backend online — node %s (%s…)", node_name, pub_hex[:12]
-        )
+        logger.info("SPI backend online — node %s (%s…)", node_name, pub_hex[:12])
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -240,12 +235,8 @@ class SpiBackend(RadioBackend):
         """
         from meshcore import EventType
 
-        rssi = getattr(pkt, "_rssi", None) or (
-            self._radio.get_last_rssi() if self._radio else None
-        )
-        snr = getattr(pkt, "_snr", None) or (
-            self._radio.get_last_snr() if self._radio else None
-        )
+        rssi = getattr(pkt, "_rssi", None) or (self._radio.get_last_rssi() if self._radio else None)
+        snr = getattr(pkt, "_snr", None) or (self._radio.get_last_snr() if self._radio else None)
 
         await self._event_bus.emit(
             EventType.RX_LOG_DATA,
@@ -347,16 +338,20 @@ class SpiBackend(RadioBackend):
 
         pk = contact_dict.get("public_key", "").lower()
         name = contact_dict.get("adv_name", "") or contact_dict.get("name", "")
-        await ContactRepository.upsert({
-            "public_key": pk,
-            "name": name,
-            "type": contact_dict.get("type", 0),
-            "flags": contact_dict.get("flags", 0),
-            "last_seen": int(time.time()),
-        })
+        await ContactRepository.upsert(
+            {
+                "public_key": pk,
+                "name": name,
+                "type": contact_dict.get("type", 0),
+                "flags": contact_dict.get("flags", 0),
+                "last_seen": int(time.time()),
+            }
+        )
         if self._contact_store:
             self._contact_store.add_or_update(pk, name)
-        return _Event(EventType.CONTACT_ADDED, {"public_key": pk})
+        # Return OK so radio_sync (and callers checking result.type == EventType.OK) sees success.
+        # meshcore may not define CONTACT_ADDED; the library uses OK for add_contact success.
+        return _Event(EventType.OK, {"public_key": pk})
 
     async def remove_contact(self, contact_data: Any) -> Any:
         from meshcore import EventType
@@ -396,11 +391,14 @@ class SpiBackend(RadioBackend):
         channels = await ChannelRepository.get_all()
         if 0 <= idx < len(channels):
             ch = channels[idx]
-            return _Event(EventType.CHANNEL_INFO, {
-                "idx": idx,
-                "name": ch.name,
-                "key": ch.key,
-            })
+            return _Event(
+                EventType.CHANNEL_INFO,
+                {
+                    "idx": idx,
+                    "name": ch.name,
+                    "key": ch.key,
+                },
+            )
         return _Event(EventType.ERROR, {"error": f"Channel index {idx} out of range"})
 
     async def set_channel(
@@ -418,11 +416,14 @@ class SpiBackend(RadioBackend):
         await ChannelRepository.upsert(key_hex, channel_name)
         if self._channel_db:
             await self._channel_db.refresh()
-        return _Event(EventType.CHANNEL_INFO, {
-            "idx": channel_idx,
-            "name": channel_name,
-            "key": key_hex,
-        })
+        return _Event(
+            EventType.CHANNEL_INFO,
+            {
+                "idx": channel_idx,
+                "name": channel_name,
+                "key": key_hex,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Messaging
@@ -444,11 +445,14 @@ class SpiBackend(RadioBackend):
         result = await self._node.send_text(contact_name, msg)
 
         ack_crc = result.get("crc", 0)
-        return _Event(EventType.MSG_SEND, {
-            "expected_ack": f"{ack_crc:08x}" if isinstance(ack_crc, int) else str(ack_crc),
-            "suggested_timeout": 15000,
-            "success": result.get("success", False),
-        })
+        return _Event(
+            EventType.MSG_SEND,
+            {
+                "expected_ack": f"{ack_crc:08x}" if isinstance(ack_crc, int) else str(ack_crc),
+                "suggested_timeout": 15000,
+                "success": result.get("success", False),
+            },
+        )
 
     async def send_cmd(self, dst: Any, cmd: str) -> Any:
         from meshcore import EventType
@@ -483,9 +487,12 @@ class SpiBackend(RadioBackend):
         if 0 <= chan < len(channels):
             group_name = channels[chan]["name"]
             result = await self._node.send_group_text(group_name, msg)
-            return _Event(EventType.CHAN_MSG_SEND, {
-                "success": result.get("success", False),
-            })
+            return _Event(
+                EventType.CHAN_MSG_SEND,
+                {
+                    "success": result.get("success", False),
+                },
+            )
         return _Event(EventType.ERROR, {"error": f"Channel index {chan} out of range"})
 
     async def get_msg(self, timeout: float = 2.0) -> Any:
@@ -524,13 +531,16 @@ class SpiBackend(RadioBackend):
     async def send_device_query(self) -> Any:
         from meshcore import EventType
 
-        return _Event(EventType.DEVICE_INFO, {
-            "firmware_ver": f"pymc_core",
-            "path_hash_mode": 0,
-            "name": self._self_info.get("adv_name", "") if self._self_info else "",
-            "public_key": self._self_info.get("public_key", "") if self._self_info else "",
-            "tx_power": self._self_info.get("tx_power", 22) if self._self_info else 22,
-        })
+        return _Event(
+            EventType.DEVICE_INFO,
+            {
+                "firmware_ver": "pymc_core",
+                "path_hash_mode": 0,
+                "name": self._self_info.get("adv_name", "") if self._self_info else "",
+                "public_key": self._self_info.get("public_key", "") if self._self_info else "",
+                "tx_power": self._self_info.get("tx_power", 22) if self._self_info else 22,
+            },
+        )
 
     async def set_name(self, name: str) -> Any:
         from meshcore import EventType
@@ -637,7 +647,10 @@ class SpiBackend(RadioBackend):
         return _Event(EventType.LOGIN_RESPONSE, result)
 
     async def req_status_sync(
-        self, public_key: str, timeout: int = 10, min_timeout: int = 5,
+        self,
+        public_key: str,
+        timeout: int = 10,
+        min_timeout: int = 5,
     ) -> Any:
         from meshcore import EventType
 
@@ -650,7 +663,10 @@ class SpiBackend(RadioBackend):
         return _Event(EventType.STATUS_RESPONSE, result)
 
     async def req_telemetry_sync(
-        self, public_key: str, timeout: int = 10, min_timeout: int = 5,
+        self,
+        public_key: str,
+        timeout: int = 10,
+        min_timeout: int = 5,
     ) -> Any:
         from meshcore import EventType
 
@@ -663,7 +679,10 @@ class SpiBackend(RadioBackend):
         return _Event(EventType.TELEMETRY_RESPONSE, result)
 
     async def fetch_all_neighbours(
-        self, public_key: str, timeout: int = 10, min_timeout: int = 5,
+        self,
+        public_key: str,
+        timeout: int = 10,
+        min_timeout: int = 5,
     ) -> Any:
         from meshcore import EventType
 
@@ -672,7 +691,10 @@ class SpiBackend(RadioBackend):
         return _Event(EventType.ERROR, {"error": "Not yet implemented for SPI backend"})
 
     async def req_acl_sync(
-        self, public_key: str, timeout: int = 10, min_timeout: int = 5,
+        self,
+        public_key: str,
+        timeout: int = 10,
+        min_timeout: int = 5,
     ) -> Any:
         from meshcore import EventType
 
@@ -694,7 +716,7 @@ class SpiBackend(RadioBackend):
 
     async def wait_for_event(
         self,
-        event_type: "EventType",
+        event_type: EventType,
         *,
         attribute_filters: dict[str, Any] | None = None,
         timeout: float = 15,
@@ -727,10 +749,13 @@ class SpiBackend(RadioBackend):
     async def get_stats_core(self) -> Any:
         from meshcore import EventType
 
-        return _Event(EventType.STATS_CORE, {
-            "uptime": int(time.time()),
-            "backend": "spi",
-        })
+        return _Event(
+            EventType.STATS_CORE,
+            {
+                "uptime": int(time.time()),
+                "backend": "spi",
+            },
+        )
 
     async def get_stats_radio(self) -> Any:
         from meshcore import EventType

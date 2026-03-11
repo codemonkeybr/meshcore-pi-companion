@@ -19,14 +19,12 @@ The wizard will:
 from __future__ import annotations
 
 import json
-import os
 import random
 import sys
 from pathlib import Path
 from typing import Any
 
 from app.backends.spi_config import HARDWARE_PROFILES
-
 
 API_URL = "https://api.meshcore.nz/api/v1/config"
 FALLBACK_PRESETS_PATH = Path("data/radio-presets-fallback.json")
@@ -81,9 +79,7 @@ def _prompt(text: str, default: str | None = None) -> str:
 def _step_node_name(config: dict[str, Any]) -> None:
     print("=== Step 0: Node Name ===\n")
     existing_name = (
-        (config.get("node") or {}).get("name")
-        if isinstance(config.get("node"), dict)
-        else None
+        (config.get("node") or {}).get("name") if isinstance(config.get("node"), dict) else None
     )
     if existing_name:
         default_name = str(existing_name)
@@ -204,10 +200,7 @@ def _step_radio_settings(config: dict[str, Any]) -> None:
         sf = preset.get("spreading_factor")
         bw_khz = preset.get("bandwidth")
         cr = preset.get("coding_rate")
-        print(
-            f" {idx:2d}) {title:<35} "
-            f"--> {freq_mhz:7.3f} MHz / SF{sf} / BW{bw_khz} / CR{cr}"
-        )
+        print(f" {idx:2d}) {title:<35} --> {freq_mhz:7.3f} MHz / SF{sf} / BW{bw_khz} / CR{cr}")
     print()
 
     while True:
@@ -327,4 +320,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

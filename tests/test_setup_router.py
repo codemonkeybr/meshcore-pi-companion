@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-
 client = TestClient(app)
 
 
@@ -19,6 +18,7 @@ def test_setup_status_when_no_spi_config(monkeypatch, tmp_path):
     monkeypatch.setenv("MESHCORE_CONFIG_FILE", str(tmp_path / "nope.yaml"))
 
     from importlib import reload
+
     from app import config
 
     reload(config)
@@ -111,4 +111,3 @@ def test_provision_writes_config(tmp_path, monkeypatch):
     assert cfg["radio"]["bandwidth"] == 62500
     assert cfg["radio"]["spreading_factor"] == 7
     assert cfg["radio"]["coding_rate"] == 5
-

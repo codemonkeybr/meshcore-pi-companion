@@ -16,7 +16,21 @@ from app.radio_sync import (
     stop_periodic_advert,
     stop_periodic_sync,
 )
-from app.routers import channels, contacts, fanout, health, messages, packets, radio, read_state, repeaters, settings, setup, statistics, ws
+from app.routers import (
+    channels,
+    contacts,
+    fanout,
+    health,
+    messages,
+    packets,
+    radio,
+    read_state,
+    repeaters,
+    settings,
+    setup,
+    statistics,
+    ws,
+)
 
 setup_logging()
 logger = logging.getLogger(__name__)

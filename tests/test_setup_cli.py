@@ -138,4 +138,3 @@ def test_setup_cli_uses_existing_config_when_present(tmp_path, monkeypatch):
     # Radio settings updated from preset (869.618 MHz and 62.5 kHz).
     assert data["radio"]["frequency"] == 869618000
     assert data["radio"]["bandwidth"] == 62500
-

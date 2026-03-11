@@ -22,8 +22,12 @@ class TestClientBackendDelegation:
         m.self_info = {"public_key": "ab" * 32, "adv_name": "TestRadio"}
         m.disconnect = AsyncMock()
         m.commands = MagicMock()
-        m.commands.get_contacts = AsyncMock(return_value=[{"name": "Alice", "public_key": "aa" * 32}])
-        m.commands.send_msg = AsyncMock(return_value=MagicMock(type=1, payload={"expected_ack": "abc"}))
+        m.commands.get_contacts = AsyncMock(
+            return_value=[{"name": "Alice", "public_key": "aa" * 32}]
+        )
+        m.commands.send_msg = AsyncMock(
+            return_value=MagicMock(type=1, payload={"expected_ack": "abc"})
+        )
         m.commands.get_msg = AsyncMock(return_value=MagicMock(type=0))  # NO_MORE_MSGS
         m.subscribe = MagicMock(return_value=MagicMock(unsubscribe=MagicMock()))
         m._contacts = {}

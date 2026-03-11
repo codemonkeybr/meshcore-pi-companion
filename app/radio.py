@@ -352,9 +352,7 @@ class RadioManager:
             logger.info("No serial port specified, auto-detecting...")
             port = await find_radio_port(settings.serial_baudrate)
             if not port:
-                logger.warning(
-                    "No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT."
-                )
+                logger.warning("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
                 return
 
         logger.debug(

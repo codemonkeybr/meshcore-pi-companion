@@ -15,7 +15,6 @@ from app.backends.spi_config import HARDWARE_PROFILES
 from app.config import settings
 from app.spi_config_file import DEFAULT_CONFIG_PATH, load_config, save_config
 
-
 router = APIRouter(tags=["setup"])
 
 
@@ -211,4 +210,3 @@ async def provision_spi_config(payload: dict[str, Any]) -> dict[str, Any]:
         "status": "ok",
         "config_path": str(cfg_path),
     }
-
