@@ -315,7 +315,7 @@ def main() -> int:
         "  - Enable SPI via `sudo raspi-config` → Interface Options → SPI\n"
         "  - Install SPI extras: `uv add 'pymc_core[hardware]' pyyaml httpx` "
         "  (or use the [spi] extra defined in pyproject.toml)\n"
-        "  - Start RemoteTerm with `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`\n"
+        "  - Start RemoteTerm with `./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000`\n"
     )
     return 0
 
