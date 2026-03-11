@@ -32,6 +32,8 @@ To **only** run the SPI config wizard (e.g. to change node name or region later)
 
 Config is stored in **`config.yaml`** in the project root (or `data/config.yaml`). Copy from `config.yaml.example` if you prefer to edit by hand; the wizard writes the same structure.
 
+**Setup API (optional):** For automation or a future web wizard, the backend exposes `GET /api/setup/status`, `GET /api/setup/hardware-profiles`, `GET /api/setup/radio-presets`, and `POST /api/setup/provision`; see `app/AGENTS.md` for payloads.
+
 ## 2. Run the server
 
 From the project root:

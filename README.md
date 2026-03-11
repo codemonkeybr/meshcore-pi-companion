@@ -27,7 +27,7 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 - Python 3.10+
 - Node.js LTS or current (20, 22, 24, 25)
 - [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- MeshCore radio connected via USB serial, TCP, or BLE
+- **Radio:** MeshCore device over USB serial, TCP, or BLE — *or* on Raspberry Pi, a supported LoRa HAT (SPI; see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode))
 
 <details>
 <summary>Finding your serial port</summary>
