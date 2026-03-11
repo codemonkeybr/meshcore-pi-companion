@@ -322,6 +322,13 @@ class SpiBackend(RadioBackend):
 
         from app.repository import ContactRepository
 
+        # meshcore.EventType may use CONTACTS or CONTACT_LIST depending on version
+        contact_list_type = getattr(EventType, "CONTACT_LIST", None) or getattr(
+            EventType, "CONTACTS", None
+        )
+        if contact_list_type is None:
+            contact_list_type = object()  # sentinel so sync accepts result (not ERROR)
+
         db_contacts = await ContactRepository.get_all()
         payload: dict[str, dict[str, Any]] = {}
         for c in db_contacts:
@@ -331,7 +338,7 @@ class SpiBackend(RadioBackend):
                 "type": c.type,
                 "flags": c.flags,
             }
-        return _Event(EventType.CONTACT_LIST, payload)
+        return _Event(contact_list_type, payload)
 
     async def add_contact(self, contact_dict: dict[str, Any]) -> Any:
         from meshcore import EventType

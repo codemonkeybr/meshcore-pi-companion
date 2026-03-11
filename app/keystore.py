@@ -87,7 +87,16 @@ async def export_and_store_private_key(backend: "RadioBackend") -> bool:
         result = await backend.export_private_key()
 
         if result.type == EventType.PRIVATE_KEY:
-            private_key_bytes = result.payload["private_key"]
+            payload = result.payload or {}
+            # MeshCore serial client uses "private_key" (bytes); SPI backend uses "key" (hex str)
+            if "private_key" in payload:
+                private_key_bytes = payload["private_key"]
+            elif "key" in payload:
+                key_str = payload["key"]
+                private_key_bytes = bytes.fromhex(key_str) if isinstance(key_str, str) else key_str
+            else:
+                logger.error("Private key payload missing 'private_key' and 'key'")
+                return False
             set_private_key(private_key_bytes)
             return True
         elif result.type == EventType.DISABLED:
