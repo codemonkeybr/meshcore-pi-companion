@@ -231,6 +231,27 @@ Access at `http://localhost:8000`. All API routes are prefixed with `/api`.
 
 If `frontend/dist` (or `frontend/dist/index.html`) is missing, backend startup now logs an explicit error and continues serving API routes. In that case, frontend static routes are not mounted until a frontend build is present.
 
+### Future: Prebuilt Frontend `dist` for Pi
+
+For low-memory Raspberry Pi deployments, running `npm install` locally is fragile (OOM kills). The long-term plan is:
+
+- Ship **prebuilt `frontend/dist` assets** as part of release artifacts (e.g. tarball, Docker image), or
+- Have the Pi install script download a versioned `dist.tar.gz` from a release URL when `frontend/dist` is missing.
+
+Goals:
+
+- Pi users should be able to run a **single install script** (`scripts/install_remoterm_pi.sh`) that only needs Python + radio SPI deps on-device.
+- No `npm install` or Vite build should be required on the Pi; all Node-based tooling runs on CI/dev machines.
+
+Implementation notes (for future work):
+
+- CI pipeline should:
+  - Build frontend using `frontend/package-lock.docker.json` (deterministic deps).
+  - Run `npm test` / `npm run build` and then publish `frontend/dist` into:
+    - A release artifact (e.g. `remoteterm-<version>-pi.tar.gz`), and/or
+    - A downloadable `dist-<version>.tar.gz` used by `install_remoterm_pi.sh`.
+- Backend already serves static files from `frontend/dist`; no code changes are required once `dist` is present on disk.
+
 ## Testing
 
 ### Backend (pytest)
