@@ -40,7 +40,9 @@ def test_hardware_profiles_returns_known_profiles():
 
 def test_radio_presets_uses_fallback(tmp_path, monkeypatch):
     """When API fetch fails, presets should come from fallback JSON if present."""
-    fallback = tmp_path / "radio-presets-fallback.json"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    fallback = data_dir / "radio-presets-fallback.json"
     fallback.write_text(
         json.dumps(
             [
@@ -56,8 +58,8 @@ def test_radio_presets_uses_fallback(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(tmp_path)
 
-    # Force httpx import to fail inside router helper.
-    with patch("app.routers.setup.httpx", None):  # type: ignore[attr-defined]
+    # Force API path to be skipped so fallback file is used (router uses module-level httpx).
+    with patch("app.routers.setup.httpx", None):
         resp = client.get("/api/setup/radio-presets")
 
     assert resp.status_code == 200

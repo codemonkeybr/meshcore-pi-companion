@@ -6,6 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+try:
+    import httpx
+except ImportError:  # optional dependency; tests may patch this to force fallback
+    httpx = None  # type: ignore[assignment]
+
 from app.backends.spi_config import HARDWARE_PROFILES
 from app.config import settings
 from app.spi_config_file import DEFAULT_CONFIG_PATH, load_config, save_config
@@ -69,11 +74,6 @@ async def get_hardware_profiles() -> list[dict[str, Any]]:
 
 def _fetch_radio_presets() -> list[dict[str, Any]]:
     """Fetch radio presets from the MeshCore API, with local JSON fallback."""
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - guarded by optional dependency
-        httpx = None
-
     presets: list[dict[str, Any]] = []
 
     if httpx is not None:

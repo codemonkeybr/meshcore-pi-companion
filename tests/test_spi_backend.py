@@ -8,14 +8,24 @@ They verify:
   - Channel DB adapter
   - SpiBackend event bridge and RadioBackend method contracts
   - Config transport exclusivity with SPI
+  - Integration: packet pipeline with SPI backend (mock radio, real DB)
 """
 
 import base64
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Load shared packet pipeline fixtures for integration tests
+_FIXTURES_PATH = Path(__file__).parent / "fixtures" / "websocket_events.json"
+if _FIXTURES_PATH.exists():
+    with open(_FIXTURES_PATH, encoding="utf-8") as f:
+        _PIPELINE_FIXTURES = json.load(f)
+else:
+    _PIPELINE_FIXTURES = {}
 
 # ---------------------------------------------------------------------------
 # Hardware profiles
@@ -458,3 +468,60 @@ class TestSpiBackendMethods:
         assert result.name == "Alice"
 
         assert backend.get_contact_by_key_prefix("zzzz") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Integration — packet pipeline with SPI backend (mock radio, real DB)
+# ---------------------------------------------------------------------------
+
+
+class TestSpiBackendPacketPipelineIntegration:
+    """Integration tests: SpiBackend RX_LOG_DATA → event handlers → process_raw_packet → DB + broadcast."""
+
+    @pytest.mark.asyncio
+    async def test_spi_backend_rx_log_data_flows_to_packet_processor(
+        self, test_db, captured_broadcasts
+    ):
+        """Emitting RX_LOG_DATA on SpiBackend reaches process_raw_packet; channel message is stored and broadcast."""
+        if "channel_message" not in _PIPELINE_FIXTURES:
+            pytest.skip("fixtures/websocket_events.json not found or missing channel_message")
+
+        from meshcore import EventType
+
+        from app.backends.spi_backend import SpiBackend
+        from app.event_handlers import register_event_handlers
+        from app.repository import ChannelRepository, MessageRepository
+
+        fixture = _PIPELINE_FIXTURES["channel_message"]
+        await ChannelRepository.upsert(
+            key=fixture["channel_key_hex"].upper(),
+            name=fixture["channel_name"],
+            is_hashtag=True,
+        )
+
+        backend = SpiBackend()
+        backend._connected = True
+        register_event_handlers(backend)
+
+        broadcasts, mock_broadcast = captured_broadcasts
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            await backend._event_bus.emit(
+                EventType.RX_LOG_DATA,
+                {
+                    "payload": fixture["raw_packet_hex"],
+                    "snr": 7.5,
+                    "rssi": -85,
+                },
+            )
+
+        messages = await MessageRepository.get_all(
+            msg_type="CHAN",
+            conversation_key=fixture["channel_key_hex"].upper(),
+            limit=10,
+        )
+        assert len(messages) == 1
+        assert "Flightless" in messages[0].text or "hashtag" in messages[0].text
+
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert len(message_broadcasts) == 1
+        assert message_broadcasts[0]["data"]["conversation_key"] == fixture["channel_key_hex"].upper()
