@@ -489,7 +489,7 @@ class SpiBackend(RadioBackend):
             group_name = channels[chan]["name"]
             result = await self._node.send_group_text(group_name, msg)
             return _Event(
-                EventType.CHAN_MSG_SEND,
+                EventType.MSG_SENT,
                 {
                     "success": result.get("success", False),
                 },
