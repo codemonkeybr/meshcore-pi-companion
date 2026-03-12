@@ -553,9 +553,10 @@ class RadioManager:
                     if not current_connected:
                         # During reboot cooldown, do not reconnect so GPIO can be released
                         if time.monotonic() < self._suppress_reconnect_until:
-                            logger.debug(
-                                "Suppressing reconnect (reboot cooldown until %.1fs)",
-                                self._suppress_reconnect_until - time.monotonic(),
+                            remaining = self._suppress_reconnect_until - time.monotonic()
+                            logger.info(
+                                "Suppressing reconnect (reboot cooldown, %.1fs remaining)",
+                                remaining,
                             )
                         # Attempt reconnection on every loop while disconnected
                         elif not self.is_reconnecting and await self.reconnect(
