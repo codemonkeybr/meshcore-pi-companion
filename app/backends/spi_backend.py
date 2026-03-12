@@ -610,7 +610,8 @@ class SpiBackend(RadioBackend):
         await self.disconnect()
         # Give the driver time to release GPIO (IRQ pin 16, etc.) before the
         # connection monitor reconnects and creates a new SX1262Radio instance.
-        await asyncio.sleep(2)
+        # 5s is conservative; 2s was insufficient on some Pi/hardware.
+        await asyncio.sleep(5)
         # Caller (RadioManager) is expected to re-connect after this
 
     # ------------------------------------------------------------------
