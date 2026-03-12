@@ -37,6 +37,6 @@ Channels are group conversations (hashtag or custom). Keys are 32-character hex;
 
 Set or clear a per-channel flood-scope override. When set, channel sends use this scope for the duration of the send.
 
-**Request body (JSON):** `{ "flood_scope": "region" }` or `{}` / `null` to clear.
+**Request body (JSON):** `{ "flood_scope_override": "region" }` or `{}` / `null` to clear.
 
 **Response (200):** Updated `Channel`.
