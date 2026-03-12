@@ -1,12 +1,10 @@
 import asyncio
 import logging
-import os
 
 from fastapi import APIRouter, HTTPException
 from meshcore import EventType
 from pydantic import BaseModel, Field
 
-from app.config import settings
 from app.dependencies import require_connected
 from app.radio import radio_manager
 from app.radio_sync import send_advertisement as do_send_advertisement
@@ -249,34 +247,22 @@ async def _attempt_reconnect() -> dict:
     return {"status": "ok", "message": "Reconnected successfully", "connected": True}
 
 
-async def _exit_after_reboot() -> None:
-    """Exit process after a short delay so HTTP response is sent; supervisor restarts us."""
-    await asyncio.sleep(2)
-    logger.info("Exiting after SPI radio reboot so GPIO is released; supervisor should restart.")
-    os._exit(0)  # Terminate without raising; avoids "Task exception was never retrieved"
-
-
 @router.post("/reboot")
 async def reboot_radio() -> dict:
     """Reboot the radio, or reconnect if not currently connected.
 
     If connected: sends reboot command, connection will temporarily drop and auto-reconnect.
     If not connected: attempts to reconnect (same as /reconnect endpoint).
+
+    Note: On SPI backend, the driver may not release GPIO until process exit. If reconnect
+    fails with \"GPIO already in use\", restart the app manually to clear the pin.
     """
     if radio_manager.is_connected:
         logger.info("Rebooting radio")
-        # Prevent connection monitor from reconnecting during cooldown so GPIO is released
+        # Prevent connection monitor from reconnecting during cooldown so GPIO can be released
         radio_manager.set_suppress_reconnect_until(20)
         async with radio_manager.radio_operation("reboot_radio") as mc:
             await mc.reboot()
-        # SPI: GPIO is not released by the driver until process exit. Schedule exit so
-        # the response is sent first; a process manager (systemd, Docker) should restart us.
-        if settings.connection_type == "spi":
-            asyncio.create_task(_exit_after_reboot())
-            return {
-                "status": "ok",
-                "message": "Reboot command sent. App will exit and restart to release GPIO.",
-            }
         return {
             "status": "ok",
             "message": "Reboot command sent. Radio will reconnect automatically.",
