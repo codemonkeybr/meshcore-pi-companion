@@ -67,3 +67,5 @@ Open **http://\<pi-ip\>:8000** in a browser (e.g. `http://192.168.1.191:8000`).
 ## 5. Optional: run as a service
 
 Use the same systemd approach as in the main README (Systemd Service): install under e.g. `/opt/remoteterm`, point the service at the venv and set `WorkingDirectory` to the project root. SPI mode is selected automatically when `config.yaml` (or `data/config.yaml`) exists; no extra env vars are required for transport.
+
+**SPI radio reboot:** Calling `POST /api/radio/reboot` while connected via SPI causes the app to **exit** after sending the reboot command, so the OS releases the GPIO pins. Configure the service with **`Restart=always`** (or `Restart=on-failure`) so the app restarts automatically and reconnects to the radio. Without a process manager, you would need to start the app again manually after a reboot.

@@ -47,7 +47,9 @@ Send an advertisement (flood or directed).
 
 Reboot the radio (firmware) or, for SPI, restart the dispatcher/radio stack. If disconnected, attempts reconnect.
 
-**Response (200):** Acknowledgment.
+**SPI backend:** The driver does not release GPIO until the process exits. After a successful reboot, the app **exits** so the OS releases the pins; a process manager (e.g. systemd with `Restart=always`) should restart the app, which then reconnects to the radio.
+
+**Response (200):** `{ "status": "ok", "message": "..." }`. For SPI, the message indicates the app will exit and restart.
 
 ## POST /api/radio/reconnect
 
