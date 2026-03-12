@@ -445,8 +445,9 @@ class SpiBackend(RadioBackend):
         result = await self._node.send_text(contact_name, msg)
 
         ack_crc = result.get("crc", 0)
+        # meshcore uses MSG_SENT for successful send acknowledgements; mirror that here
         return _Event(
-            EventType.MSG_SEND,
+            EventType.MSG_SENT,
             {
                 "expected_ack": f"{ack_crc:08x}" if isinstance(ack_crc, int) else str(ack_crc),
                 "suggested_timeout": 15000,
