@@ -1,5 +1,5 @@
 # Build the RemoteTerminal frontend only when frontend code changes.
-# Artifacts can be downloaded from the Actions tab and extracted into frontend/dist on the Pi.
+# Artifacts can be downloaded from the Actions tab; on push to main, also published to release "frontend-latest" for the Pi install script.
 name: Frontend build
 
 on:
@@ -40,3 +40,31 @@ jobs:
           name: frontend-dist
           path: frontend/dist/
           retention-days: 30
+
+  # Publish to release so the Pi install script can download without auth (push to main/master or manual run from main).
+  publish-release:
+    needs: build
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+
+      - name: Zip for release asset
+        run: |
+          zip -r frontend-dist.zip .
+        working-directory: frontend-dist
+
+      - name: Create or update frontend-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view frontend-latest 2>/dev/null; then
+            gh release create frontend-latest --target ${{ github.ref_name }} --title "Prebuilt frontend (latest from main)" --generate-notes
+          fi
+          gh release upload frontend-latest frontend-dist.zip --clobber
+        working-directory: frontend-dist

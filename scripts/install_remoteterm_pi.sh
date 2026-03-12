@@ -43,24 +43,62 @@ pip install ".[spi]"
 
 echo
 echo "== Frontend (optional) =="
+FRONTEND_RELEASE_URL="${FRONTEND_RELEASE_URL:-https://github.com/codemonkeybr/remote-terminal-fork/releases/download/frontend-latest/frontend-dist.zip}"
 if [ -f frontend/dist/index.html ]; then
-  echo "frontend/dist/index.html already exists; skipping frontend build."
+  echo "frontend/dist/index.html already exists; skipping frontend."
 else
-  if command -v npm >/dev/null 2>&1; then
-    echo "npm detected; installing frontend deps (low-memory mode: 1 connection, 768MB heap)..."
-    # Limit Node heap and one connection at a time to avoid OOM on Pi
-    export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=768"
-    if (cd frontend && npm install --maxsockets 1 --prefer-offline --no-audit --no-fund && npm run build); then
-      echo "Frontend build complete."
+  echo "Trying to download prebuilt frontend from GitHub..."
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sfL --connect-timeout 15 -o /tmp/frontend-dist.zip "$FRONTEND_RELEASE_URL"; then
+      mkdir -p frontend/dist
+      if (cd frontend/dist && unzip -o -q /tmp/frontend-dist.zip); then
+        rm -f /tmp/frontend-dist.zip
+        echo "Prebuilt frontend downloaded and extracted to frontend/dist."
+      else
+        rm -f /tmp/frontend-dist.zip
+        echo "Unzip failed; falling back to local build or manual copy."
+        try_npm_build=1
+      fi
     else
-      echo "Frontend build failed (if you saw 'Killed', the Pi ran out of memory)."
-      echo "Add swap and re-run, or build frontend on another machine and copy frontend/dist/ here."
+      echo "Download failed (no release yet or no network); falling back to local build or manual copy."
+      try_npm_build=1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if wget -q --timeout=15 -O /tmp/frontend-dist.zip "$FRONTEND_RELEASE_URL"; then
+      mkdir -p frontend/dist
+      if (cd frontend/dist && unzip -o -q /tmp/frontend-dist.zip); then
+        rm -f /tmp/frontend-dist.zip
+        echo "Prebuilt frontend downloaded and extracted to frontend/dist."
+      else
+        rm -f /tmp/frontend-dist.zip
+        echo "Unzip failed; falling back to local build or manual copy."
+        try_npm_build=1
+      fi
+    else
+      echo "wget failed; falling back to local build or manual copy."
+      try_npm_build=1
     fi
   else
-    echo "npm not found; skipping frontend build."
-    echo "You can either:"
-    echo "  - Install Node.js/npm and run: (cd frontend && npm install && npm run build)"
-    echo "  - Or build the frontend on another machine and copy frontend/dist here."
+    echo "Neither curl nor wget found; skipping download."
+    try_npm_build=1
+  fi
+
+  if [ "${try_npm_build:-0}" = "1" ]; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "npm detected; installing frontend deps (low-memory mode: 1 connection, 768MB heap)..."
+      export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=768"
+      if (cd frontend && npm install --maxsockets 1 --prefer-offline --no-audit --no-fund && npm run build); then
+        echo "Frontend build complete."
+      else
+        echo "Frontend build failed (if you saw 'Killed', the Pi ran out of memory)."
+        echo "Add swap and re-run, or copy frontend/dist from another machine or download from: $FRONTEND_RELEASE_URL"
+      fi
+    else
+      echo "You can either:"
+      echo "  - Install curl/wget and re-run this script to download the prebuilt frontend"
+      echo "  - Install Node.js/npm and run: (cd frontend && npm install && npm run build)"
+      echo "  - Download manually: $FRONTEND_RELEASE_URL and extract into frontend/dist/"
+    fi
   fi
 fi
 

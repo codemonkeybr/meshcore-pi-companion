@@ -7,7 +7,7 @@ Short guide to run RemoteTerm on a Raspberry Pi with a LoRa HAT (e.g. Waveshare 
 - Raspberry Pi (3/4/Zero 2 W or similar) with Raspberry Pi OS
 - LoRa HAT supported by the SPI backend (Waveshare, uConsole, PiMesh-1W, meshadv, HT-RA62, etc.)
 - **SPI enabled:** `sudo raspi-config` → Interface Options → SPI → Enable, then reboot
-- Python 3.10+ and (optional) Node.js if you build the frontend on the Pi
+- Python 3.10+ (Node.js is **not** required on the Pi if you use the prebuilt frontend from CI — see below)
 
 ## 1. Install and configure
 
@@ -22,7 +22,24 @@ This script:
 
 - Creates a virtualenv (`.venv`) if missing and installs backend deps with `.[spi]`
 - If `config.yaml` does not exist, runs the **SPI setup wizard** to create it (node name, hardware profile, radio preset, location)
-- Optionally builds the frontend if `npm` is available (can be skipped and `frontend/dist` copied from elsewhere to save memory)
+- **Frontend:** Tries to **download the prebuilt frontend** from the GitHub release `frontend-latest` (no Node on the Pi). If the download fails (no network or release not yet created), it will build with `npm` if available, or tell you how to copy `frontend/dist` manually.
+
+### Prebuilt frontend (no Node on the Pi)
+
+You do **not** need Node.js or npm on the Pi. The install script automatically tries to download the prebuilt frontend from:
+
+`https://github.com/codemonkeybr/remote-terminal-fork/releases/download/frontend-latest/frontend-dist.zip`
+
+(Customize the URL by setting `FRONTEND_RELEASE_URL` before running the install script.) The CI builds the frontend when `frontend/` changes and publishes this zip on push to `main`.
+
+**Manual fallback:** If the script didn’t download it (e.g. no curl/wget or no network), get the zip from the link above or from **Actions** → latest **Frontend build** run → **Artifacts** → **frontend-dist**. Then in the project root:
+
+```bash
+mkdir -p frontend/dist
+unzip -o frontend-dist.zip -d frontend/dist
+```
+
+Then run the server as in **§2**.
 
 To **only** run the SPI config wizard (e.g. to change node name or region later):
 
