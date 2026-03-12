@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -182,6 +183,10 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
     return {"status": "ok"}
 
 
+# Max time for advertise: wait for radio lock + build packet + TX complete
+ADVERTISE_TIMEOUT_SECONDS = 25
+
+
 @router.post("/advertise")
 async def send_advertisement() -> dict:
     """Send a flood advertisement to announce presence on the mesh.
@@ -196,8 +201,18 @@ async def send_advertisement() -> dict:
     require_connected()
 
     logger.info("Sending flood advertisement")
-    async with radio_manager.radio_operation("manual_advertisement") as mc:
-        success = await do_send_advertisement(mc, force=True)
+    try:
+        async def _do():
+            async with radio_manager.radio_operation("manual_advertisement") as mc:
+                return await do_send_advertisement(mc, force=True)
+
+        success = await asyncio.wait_for(_do(), timeout=ADVERTISE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("Advertisement timed out (radio busy or TX did not complete)")
+        raise HTTPException(
+            status_code=503,
+            detail="Advertisement timed out. Radio may be busy or transmission did not complete; try again in a few seconds.",
+        ) from None
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send advertisement")
