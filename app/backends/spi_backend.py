@@ -608,6 +608,9 @@ class SpiBackend(RadioBackend):
     async def reboot(self) -> None:
         logger.info("Rebooting SPI radio…")
         await self.disconnect()
+        # Give the driver time to release GPIO (IRQ pin 16, etc.) before the
+        # connection monitor reconnects and creates a new SX1262Radio instance.
+        await asyncio.sleep(2)
         # Caller (RadioManager) is expected to re-connect after this
 
     # ------------------------------------------------------------------
