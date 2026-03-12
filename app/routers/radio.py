@@ -256,6 +256,8 @@ async def reboot_radio() -> dict:
     """
     if radio_manager.is_connected:
         logger.info("Rebooting radio")
+        # Prevent connection monitor from reconnecting during cooldown so GPIO is released
+        radio_manager.set_suppress_reconnect_until(10)
         async with radio_manager.radio_operation("reboot_radio") as mc:
             await mc.reboot()
         return {

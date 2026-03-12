@@ -2,6 +2,7 @@ import asyncio
 import glob
 import logging
 import platform
+import time
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
@@ -130,6 +131,7 @@ class RadioManager:
         self._setup_lock: asyncio.Lock | None = None
         self._setup_in_progress: bool = False
         self._setup_complete: bool = False
+        self._suppress_reconnect_until: float = 0.0  # monotonic time; used during reboot cooldown
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
 
@@ -319,6 +321,10 @@ class RadioManager:
     @property
     def is_reconnecting(self) -> bool:
         return self._reconnect_lock is not None and self._reconnect_lock.locked()
+
+    def set_suppress_reconnect_until(self, seconds_from_now: float) -> None:
+        """Temporarily suppress connection monitor from reconnecting (e.g. during reboot cooldown)."""
+        self._suppress_reconnect_until = time.monotonic() + seconds_from_now
 
     @property
     def is_setup_in_progress(self) -> bool:
@@ -545,8 +551,14 @@ class RadioManager:
                         consecutive_setup_failures = 0
 
                     if not current_connected:
+                        # During reboot cooldown, do not reconnect so GPIO can be released
+                        if time.monotonic() < self._suppress_reconnect_until:
+                            logger.debug(
+                                "Suppressing reconnect (reboot cooldown until %.1fs)",
+                                self._suppress_reconnect_until - time.monotonic(),
+                            )
                         # Attempt reconnection on every loop while disconnected
-                        if not self.is_reconnecting and await self.reconnect(
+                        elif not self.is_reconnecting and await self.reconnect(
                             broadcast_on_success=False
                         ):
                             await self.post_connect_setup()
