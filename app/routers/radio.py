@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import sys
+import os
 
 from fastapi import APIRouter, HTTPException
 from meshcore import EventType
@@ -253,7 +253,7 @@ async def _exit_after_reboot() -> None:
     """Exit process after a short delay so HTTP response is sent; supervisor restarts us."""
     await asyncio.sleep(2)
     logger.info("Exiting after SPI radio reboot so GPIO is released; supervisor should restart.")
-    sys.exit(0)
+    os._exit(0)  # Terminate without raising; avoids "Task exception was never retrieved"
 
 
 @router.post("/reboot")
