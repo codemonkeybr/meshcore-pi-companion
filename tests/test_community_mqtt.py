@@ -10,7 +10,6 @@ import nacl.bindings
 import pytest
 
 from app.fanout.community_mqtt import (
-    _CLIENT_ID,
     _DEFAULT_BROKER,
     _STATS_REFRESH_INTERVAL,
     CommunityMqttPublisher,
@@ -69,6 +68,7 @@ def _make_community_settings(**overrides) -> SimpleNamespace:
         "community_mqtt_password": "",
         "community_mqtt_iata": "",
         "community_mqtt_email": "",
+        "community_mqtt_owner": "",
         "community_mqtt_token_audience": "mqtt-us-v1.letsmesh.net",
     }
     defaults.update(overrides)
@@ -119,9 +119,10 @@ class TestJwtGeneration:
         assert "exp" in payload
         assert payload["exp"] - payload["iat"] == 86400
         assert payload["aud"] == _DEFAULT_BROKER
-        assert payload["owner"] == public_key.hex().upper()
-        assert payload["client"] == _CLIENT_ID
-        assert "email" not in payload  # omitted when empty
+        # LetsMesh/pyMCRepeater format: email and owner as strings (empty when not set)
+        assert payload["email"] == ""
+        assert payload["owner"] == ""
+        assert "client" not in payload
 
     def test_payload_includes_email_when_provided(self):
         private_key, public_key = _make_test_keys()

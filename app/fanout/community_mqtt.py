@@ -30,8 +30,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BROKER = "mqtt-us-v1.letsmesh.net"
 _DEFAULT_PORT = 443  # Community protocol uses WSS on port 443 by default
-_CLIENT_ID = "RemoteTerm (github.com/jkingsman/Remote-Terminal-for-MeshCore)"
-
 # Proactive JWT renewal: reconnect 1 hour before the 24h token expires
 _TOKEN_LIFETIME = 86400  # 24 hours (must match _generate_jwt_token exp)
 _TOKEN_RENEWAL_THRESHOLD = _TOKEN_LIFETIME - 3600  # 23 hours
@@ -61,6 +59,7 @@ class CommunityMqttSettings(Protocol):
     community_mqtt_password: str
     community_mqtt_iata: str
     community_mqtt_email: str
+    community_mqtt_owner: str
     community_mqtt_token_audience: str
 
 
@@ -97,37 +96,41 @@ def _generate_jwt_token(
     *,
     audience: str = _DEFAULT_BROKER,
     email: str = "",
+    owner: str = "",
 ) -> str:
-    """Generate a JWT token for community MQTT authentication.
+    """Generate a JWT token for community MQTT (LetsMesh) authentication.
 
-    Creates a token with Ed25519 signature using MeshCore's expanded key format.
-    Token format: header_b64.payload_b64.signature_hex
-
-    Optional ``email`` embeds a node-claiming identity so the community
-    aggregator can associate this radio with an owner.
+    Payload and signing match pyMCRepeater/LetsMesh: publicKey, aud, iat, exp,
+    email, owner (human name, not pubkey). Signed with Ed25519 (PyNaCl when
+    key is 32-byte seed, else MeshCore expanded format).
     """
     header = {"alg": "Ed25519", "typ": "JWT"}
     now = int(time.time())
     pubkey_hex = public_key.hex().upper()
     payload: dict[str, object] = {
         "publicKey": pubkey_hex,
+        "aud": audience,
         "iat": now,
         "exp": now + _TOKEN_LIFETIME,
-        "aud": audience,
-        "owner": pubkey_hex,
-        "client": _CLIENT_ID,
+        "email": email or "",
+        "owner": owner or "",
     }
-    if email:
-        payload["email"] = email
 
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
 
     signing_input = f"{header_b64}.{payload_b64}".encode()
 
-    scalar = private_key[:32]
-    prefix = private_key[32:]
-    signature = _ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
+    # Use PyNaCl (same as pyMCRepeater) when key is 32-byte seed or keystore-expanded seed+pubkey
+    if len(private_key) == 64 and private_key[32:] == public_key:
+        from nacl.signing import SigningKey
+
+        signer = SigningKey(private_key[:32])
+        signature = signer.sign(signing_input).signature
+    else:
+        scalar = private_key[:32]
+        prefix = private_key[32:]
+        signature = _ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
 
     return f"{header_b64}.{payload_b64}.{signature.hex()}"
 
@@ -375,11 +378,15 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         if auth_mode == "token":
             assert private_key is not None
             token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
+            # Match pyMCRepeater/LetsMesh: email/owner only when TLS verified (or empty)
+            email_val = (s.community_mqtt_email or "").strip() if secure_connection else ""
+            owner_val = (getattr(s, "community_mqtt_owner", "") or "").strip() if secure_connection else ""
             jwt_token = _generate_jwt_token(
                 private_key,
                 public_key,
                 audience=token_audience,
-                email=(s.community_mqtt_email or "") if secure_connection else "",
+                email=email_val,
+                owner=owner_val,
             )
             kwargs["username"] = f"v1_{pubkey_hex}"
             kwargs["password"] = jwt_token

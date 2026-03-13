@@ -61,6 +61,7 @@ def _config_to_settings(config: dict) -> SimpleNamespace:
         community_mqtt_password=config.get("password", ""),
         community_mqtt_iata=config.get("iata", ""),
         community_mqtt_email=config.get("email", ""),
+        community_mqtt_owner=config.get("owner", ""),
         community_mqtt_token_audience=config.get("token_audience", ""),
     )
 
