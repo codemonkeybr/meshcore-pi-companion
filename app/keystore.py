@@ -34,15 +34,14 @@ def set_private_key(key: bytes) -> None:
     """Store the private key in memory and derive the public key.
 
     Args:
-        key: 64-byte Ed25519 private key in MeshCore format, or 32-byte scalar
-             (e.g. from SPI/pymc_core identity seed). 32-byte keys are expanded
-             to 64 by appending the derived public key so DM decryption works.
+        key: 64-byte Ed25519 private key in MeshCore format, or 32-byte seed
+             (e.g. from SPI/pymc_core). 32-byte keys are stored as-is; public key
+             is derived with standard Ed25519 (from_seed=True) so JWT/LetsMesh auth works.
     """
     global _private_key, _public_key
     if len(key) == 32:
-        # SPI/pymc_core exports 32-byte seed/scalar; expand to 64 for compatibility
-        _public_key = derive_public_key(key)
-        _private_key = key + _public_key
+        _public_key = derive_public_key(key, from_seed=True)
+        _private_key = key
     elif len(key) == 64:
         _private_key = key
         _public_key = derive_public_key(key)
@@ -55,7 +54,7 @@ def get_private_key() -> bytes | None:
     """Get the stored private key.
 
     Returns:
-        The 64-byte private key, or None if not set
+        The private key (32-byte SPI seed or 64-byte MeshCore key), or None if not set
     """
     return _private_key
 

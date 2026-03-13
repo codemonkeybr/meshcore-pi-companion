@@ -130,8 +130,10 @@ async def run_historical_dm_decryption(
 
     logger.info("Starting historical DM decryption of %d TEXT_MESSAGE packets", total)
 
-    # Derive our public key from the private key
-    our_public_key_bytes = derive_public_key(private_key_bytes)
+    # Derive our public key (32-byte SPI seed vs 64-byte MeshCore key)
+    our_public_key_bytes = derive_public_key(
+        private_key_bytes, from_seed=(len(private_key_bytes) == 32)
+    )
 
     for packet_id, packet_data, packet_timestamp in packets:
         # Note: passing our_public_key=None disables the outbound hash check in

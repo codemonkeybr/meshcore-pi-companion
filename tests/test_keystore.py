@@ -62,13 +62,13 @@ class TestSetPrivateKey:
         assert has_private_key() is True
 
     def test_accepts_32_byte_key_from_spi(self):
-        """32-byte scalar (e.g. SPI/pymc_core) is expanded to 64 and stored."""
-        scalar = VALID_KEY[:32]  # clamped scalar so derive_public_key works
-        set_private_key(scalar)
+        """32-byte seed (e.g. SPI/pymc_core) is stored as-is; public key from standard Ed25519."""
+        seed = VALID_KEY[:32]
+        set_private_key(seed)
         stored = get_private_key()
         assert stored is not None
-        assert len(stored) == 64
-        assert stored[:32] == scalar
+        assert len(stored) == 32
+        assert stored == seed
         assert get_public_key() is not None
 
     def test_rejects_wrong_length(self):

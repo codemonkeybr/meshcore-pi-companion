@@ -97,17 +97,26 @@ def _generate_jwt_token(
     *,
     audience: str = _DEFAULT_BROKER,
     email: str = "",
-) -> str:
+) -> tuple[str, str]:
     """Generate a JWT token for community MQTT (LetsMesh) authentication.
 
-    Payload matches main branch / broker expectation: publicKey, iat, exp, aud,
-    owner (pubkey hex), client (identifier). Optional email for node-claiming.
-    Signed with Ed25519: PyNaCl when key is 32-byte seed (SPI), else MeshCore
-    expanded format.
+    Returns (token, pubkey_hex) so the caller can use the same pubkey for the
+    MQTT username (v1_{pubkey_hex}). Payload: publicKey, iat, exp, aud, owner, client.
+    Signed with standard Ed25519 when key is 32-byte seed (SPI), else MeshCore expanded.
     """
+    from nacl.signing import SigningKey
+
     header = {"alg": "Ed25519", "typ": "JWT"}
     now = int(time.time())
-    pubkey_hex = public_key.hex().upper()
+
+    if len(private_key) == 32:
+        signer = SigningKey(private_key)
+        pubkey_for_jwt = signer.verify_key.encode()
+        pubkey_hex = pubkey_for_jwt.hex().upper()
+    else:
+        pubkey_hex = public_key.hex().upper()
+        pubkey_for_jwt = public_key
+
     payload: dict[str, object] = {
         "publicKey": pubkey_hex,
         "iat": now,
@@ -121,21 +130,17 @@ def _generate_jwt_token(
 
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
-
     signing_input = f"{header_b64}.{payload_b64}".encode()
 
-    # Use PyNaCl when key is 32-byte seed (keystore stores seed+pubkey for SPI)
-    if len(private_key) == 64 and private_key[32:] == public_key:
-        from nacl.signing import SigningKey
-
-        signer = SigningKey(private_key[:32])
+    if len(private_key) == 32:
         signature = signer.sign(signing_input).signature
     else:
         scalar = private_key[:32]
         prefix = private_key[32:]
-        signature = _ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
+        signature = _ed25519_sign_expanded(signing_input, scalar, prefix, pubkey_for_jwt)
 
-    return f"{header_b64}.{payload_b64}.{signature.hex()}"
+    token = f"{header_b64}.{payload_b64}.{signature.hex()}"
+    return (token, pubkey_hex)
 
 
 def _calculate_packet_hash(raw_bytes: bytes) -> str:
@@ -341,7 +346,6 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         public_key = get_public_key()
         assert public_key is not None  # guaranteed by _pre_connect
 
-        pubkey_hex = public_key.hex().upper()
         broker_host = s.community_mqtt_broker_host or _DEFAULT_BROKER
         broker_port = s.community_mqtt_broker_port or _DEFAULT_PORT
         transport = s.community_mqtt_transport or "websockets"
@@ -349,6 +353,20 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         tls_verify = bool(s.community_mqtt_tls_verify)
         auth_mode = s.community_mqtt_auth_mode or "token"
         secure_connection = use_tls and tls_verify
+
+        if auth_mode == "token":
+            assert private_key is not None
+            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
+            email_val = (s.community_mqtt_email or "").strip() if secure_connection else ""
+            jwt_token, jwt_pubkey_hex = _generate_jwt_token(
+                private_key,
+                public_key,
+                audience=token_audience,
+                email=email_val,
+            )
+            pubkey_hex = jwt_pubkey_hex
+        else:
+            pubkey_hex = public_key.hex().upper()
 
         tls_context: ssl.SSLContext | None = None
         if use_tls:
@@ -379,15 +397,6 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             "will": aiomqtt.Will(status_topic, offline_payload, retain=True),
         }
         if auth_mode == "token":
-            assert private_key is not None
-            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
-            email_val = (s.community_mqtt_email or "").strip() if secure_connection else ""
-            jwt_token = _generate_jwt_token(
-                private_key,
-                public_key,
-                audience=token_audience,
-                email=email_val,
-            )
             kwargs["username"] = f"v1_{pubkey_hex}"
             kwargs["password"] = jwt_token
         elif auth_mode == "password":
