@@ -113,6 +113,11 @@ class SpiBackend(RadioBackend):
         # Periodic cache refresh task
         self._refresh_task: asyncio.Task | None = None
 
+        # Slot -> channel name for send_chan_msg. App calls set_channel(slot, name, secret)
+        # before send; we must send to that channel, not channels[slot] from DB (DB order
+        # is ORDER BY name, so slot 0 would be #bot not the channel we loaded).
+        self._channel_slot_map: dict[int, str] = {}
+
     # ------------------------------------------------------------------
     # Initialisation (called by RadioManager._connect_spi)
     # ------------------------------------------------------------------
@@ -416,6 +421,7 @@ class SpiBackend(RadioBackend):
         await ChannelRepository.upsert(key_hex, channel_name)
         if self._channel_db:
             await self._channel_db.refresh()
+        self._channel_slot_map[channel_idx] = channel_name
         return _Event(
             EventType.CHANNEL_INFO,
             {
@@ -484,9 +490,14 @@ class SpiBackend(RadioBackend):
         if not self._node or not self._channel_db:
             return _Event(EventType.ERROR, {"error": "Not connected"})
 
-        channels = self._channel_db.get_channels()
-        if 0 <= chan < len(channels):
-            group_name = channels[chan]["name"]
+        # Use the channel loaded into this slot by set_channel, not DB list order
+        # (get_channels() is ORDER BY name, so slot 0 would be #bot etc.).
+        group_name = self._channel_slot_map.get(chan)
+        if not group_name:
+            channels = self._channel_db.get_channels()
+            if 0 <= chan < len(channels):
+                group_name = channels[chan]["name"]
+        if group_name:
             result = await self._node.send_group_text(group_name, msg)
             return _Event(
                 EventType.MSG_SENT,
