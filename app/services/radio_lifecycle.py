@@ -21,15 +21,13 @@ async def run_post_connect_setup(radio_manager) -> None:
         sync_radio_time,
     )
 
-    if not radio_manager.meshcore:
+    if not radio_manager.backend:
         return
 
     if radio_manager._setup_lock is None:
         radio_manager._setup_lock = asyncio.Lock()
 
     async def _setup_body() -> None:
-        if not radio_manager.meshcore:
-            return
         be = radio_manager.backend
         if not be:
             return
@@ -41,15 +39,16 @@ async def run_post_connect_setup(radio_manager) -> None:
             # from interleaving commands on the serial link.
             await radio_manager._acquire_operation_lock("post_connect_setup", blocking=True)
             try:
-                mc = radio_manager.meshcore
                 be = radio_manager.backend
-                if not mc or not be:
+                mc = radio_manager.meshcore
+                if not be:
                     return
 
-                # Register event handlers against the locked, current transport.
-                register_event_handlers(mc)
+                # MeshCore-only: register library event handlers (SPI uses callbacks, not events).
+                if mc is not None:
+                    register_event_handlers(mc)
 
-                await export_and_store_private_key(mc)
+                await export_and_store_private_key(be)
 
                 # Sync radio clock with system time (use current backend after lock)
                 await sync_radio_time(be)
@@ -62,67 +61,86 @@ async def run_post_connect_setup(radio_manager) -> None:
                 app_settings = await AppSettingsRepository.get()
                 scope = normalize_region_scope(app_settings.flood_scope)
                 try:
-                    await mc.commands.set_flood_scope(scope if scope else "")
+                    if mc is not None:
+                        await mc.commands.set_flood_scope(scope if scope else "")
+                    else:
+                        await be.set_flood_scope(scope if scope else "")
                     logger.info("Applied flood_scope=%r", scope or "(disabled)")
                 except Exception as exc:
                     logger.warning("set_flood_scope failed (firmware may not support it): %s", exc)
 
-                # Query path hash mode support (best-effort; older firmware won't report it).
-                # If the library's parsed payload is missing path_hash_mode (e.g. stale
-                # .pyc on WSL2 Windows mounts), fall back to raw-frame extraction.
-                reader = mc._reader
-                _original_handle_rx = reader.handle_rx
-                _captured_frame: list[bytes] = []
-
-                async def _capture_handle_rx(data: bytearray) -> None:
-                    from meshcore.packets import PacketType
-
-                    if len(data) > 0 and data[0] == PacketType.DEVICE_INFO.value:
-                        _captured_frame.append(bytes(data))
-                    return await _original_handle_rx(data)
-
-                reader.handle_rx = _capture_handle_rx
+                # Query device capabilities (max_channels, path_hash_mode).
+                # MeshCore path uses mc.commands + optional raw-frame fallback; SPI uses backend.
                 radio_manager.max_channels = 40
                 radio_manager.path_hash_mode = 0
                 radio_manager.path_hash_mode_supported = False
-                try:
-                    device_query = await mc.commands.send_device_query()
-                    if device_query and "max_channels" in device_query.payload:
-                        radio_manager.max_channels = max(
-                            1, int(device_query.payload["max_channels"])
-                        )
-                    if device_query and "path_hash_mode" in device_query.payload:
-                        radio_manager.path_hash_mode = device_query.payload["path_hash_mode"]
-                        radio_manager.path_hash_mode_supported = True
-                    elif _captured_frame:
-                        # Raw-frame fallback:
-                        # byte 1 = fw_ver, byte 3 = max_channels, byte 81 = path_hash_mode
-                        raw = _captured_frame[-1]
-                        fw_ver = raw[1] if len(raw) > 1 else 0
-                        if fw_ver >= 3 and len(raw) >= 4:
-                            radio_manager.max_channels = max(1, raw[3])
-                        if fw_ver >= 10 and len(raw) >= 82:
-                            radio_manager.path_hash_mode = raw[81]
-                            radio_manager.path_hash_mode_supported = True
-                            logger.warning(
-                                "path_hash_mode=%d extracted from raw frame "
-                                "(stale .pyc? try: rm %s)",
-                                radio_manager.path_hash_mode,
-                                getattr(
-                                    __import__("meshcore.reader", fromlist=["reader"]),
-                                    "__cached__",
-                                    "meshcore __pycache__/reader.*.pyc",
-                                ),
+                if mc is not None:
+                    reader = mc._reader
+                    _original_handle_rx = reader.handle_rx
+                    _captured_frame: list[bytes] = []
+
+                    async def _capture_handle_rx(data: bytearray) -> None:
+                        from meshcore.packets import PacketType
+
+                        if len(data) > 0 and data[0] == PacketType.DEVICE_INFO.value:
+                            _captured_frame.append(bytes(data))
+                        return await _original_handle_rx(data)
+
+                    reader.handle_rx = _capture_handle_rx
+                    try:
+                        device_query = await mc.commands.send_device_query()
+                        if device_query and "max_channels" in device_query.payload:
+                            radio_manager.max_channels = max(
+                                1, int(device_query.payload["max_channels"])
                             )
-                    if radio_manager.path_hash_mode_supported:
+                        if device_query and "path_hash_mode" in device_query.payload:
+                            radio_manager.path_hash_mode = device_query.payload["path_hash_mode"]
+                            radio_manager.path_hash_mode_supported = True
+                        elif _captured_frame:
+                            # Raw-frame fallback:
+                            # byte 1 = fw_ver, byte 3 = max_channels, byte 81 = path_hash_mode
+                            raw = _captured_frame[-1]
+                            fw_ver = raw[1] if len(raw) > 1 else 0
+                            if fw_ver >= 3 and len(raw) >= 4:
+                                radio_manager.max_channels = max(1, raw[3])
+                            if fw_ver >= 10 and len(raw) >= 82:
+                                radio_manager.path_hash_mode = raw[81]
+                                radio_manager.path_hash_mode_supported = True
+                                logger.warning(
+                                    "path_hash_mode=%d extracted from raw frame "
+                                    "(stale .pyc? try: rm %s)",
+                                    radio_manager.path_hash_mode,
+                                    getattr(
+                                        __import__("meshcore.reader", fromlist=["reader"]),
+                                        "__cached__",
+                                        "meshcore __pycache__/reader.*.pyc",
+                                    ),
+                                )
+                        if radio_manager.path_hash_mode_supported:
+                            logger.info(
+                                "Path hash mode: %d (supported)", radio_manager.path_hash_mode
+                            )
+                        else:
+                            logger.debug("Firmware does not report path_hash_mode")
+                        logger.info("Max channel slots: %d", radio_manager.max_channels)
+                    except Exception as exc:
+                        logger.debug("Failed to query device info capabilities: %s", exc)
+                    finally:
+                        reader.handle_rx = _original_handle_rx
+                else:
+                    try:
+                        device_query = await be.send_device_query()
+                        payload = (device_query.payload or {}) if device_query else {}
+                        radio_manager.max_channels = max(
+                            1, int(payload.get("max_channels", 8))
+                        )
+                        if "path_hash_mode" in payload:
+                            radio_manager.path_hash_mode = payload["path_hash_mode"]
+                            radio_manager.path_hash_mode_supported = True
                         logger.info("Path hash mode: %d (supported)", radio_manager.path_hash_mode)
-                    else:
-                        logger.debug("Firmware does not report path_hash_mode")
-                    logger.info("Max channel slots: %d", radio_manager.max_channels)
-                except Exception as exc:
-                    logger.debug("Failed to query device info capabilities: %s", exc)
-                finally:
-                    reader.handle_rx = _original_handle_rx
+                        logger.info("Max channel slots: %d", radio_manager.max_channels)
+                    except Exception as exc:
+                        logger.debug("Failed to query device info (SPI): %s", exc)
 
                 # Sync contacts/channels from radio to DB and clear radio
                 logger.info("Syncing and offloading radio data...")

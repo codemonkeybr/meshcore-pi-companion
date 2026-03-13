@@ -144,9 +144,11 @@ class TestRunPostConnectSetup:
             await run_post_connect_setup(radio_manager)
 
         mock_register_handlers.assert_called_once_with(replacement_mc)
-        mock_export_key.assert_awaited_once_with(replacement_mc)
+        # export_and_store_private_key(be) and sync_radio_time(be) are called with the backend
+        mock_export_key.assert_awaited_once()
+        export_be = mock_export_key.call_args[0][0]
+        assert getattr(export_be, "_mc", None) is replacement_mc
         mock_sync_time.assert_awaited_once()
-        # sync_radio_time(be) is called with the backend; backend._mc should be replacement_mc
         called_with = mock_sync_time.call_args[0][0]
         assert getattr(called_with, "_mc", None) is replacement_mc
         replacement_mc.start_auto_message_fetching.assert_awaited_once()
