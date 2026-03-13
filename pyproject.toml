@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
+ main
 
 [project.optional-dependencies]
 spi = ["pymc_core[hardware]>=1.0.7"]

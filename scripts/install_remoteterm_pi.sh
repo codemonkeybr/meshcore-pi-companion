@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-time (or occasional) install/setup script for RemoteTerm on a Pi.
 # - Creates a Python venv (if missing) and installs backend deps (with SPI extras)
-# - Optionally builds the frontend if npm is available
+
+# - If frontend/frontend-dist.zip exists, extracts it to frontend/dist (no download)
 #
 # Usage:
 #   chmod +x scripts/install_remoterm_pi.sh   # once
@@ -43,63 +44,19 @@ pip install ".[spi]"
 
 echo
 echo "== Frontend (optional) =="
-FRONTEND_RELEASE_URL="${FRONTEND_RELEASE_URL:-https://github.com/codemonkeybr/remote-terminal-fork/releases/download/frontend-latest/frontend-dist.zip}"
 if [ -f frontend/dist/index.html ]; then
   echo "frontend/dist/index.html already exists; skipping frontend."
-else
-  echo "Trying to download prebuilt frontend from GitHub..."
-  if command -v curl >/dev/null 2>&1; then
-    if curl -sfL --connect-timeout 15 -o /tmp/frontend-dist.zip "$FRONTEND_RELEASE_URL"; then
-      mkdir -p frontend/dist
-      if (cd frontend/dist && unzip -o -q /tmp/frontend-dist.zip); then
-        rm -f /tmp/frontend-dist.zip
-        echo "Prebuilt frontend downloaded and extracted to frontend/dist."
-      else
-        rm -f /tmp/frontend-dist.zip
-        echo "Unzip failed; falling back to local build or manual copy."
-        try_npm_build=1
-      fi
-    else
-      echo "Download failed (no release yet or no network); falling back to local build or manual copy."
-      try_npm_build=1
-    fi
-  elif command -v wget >/dev/null 2>&1; then
-    if wget -q --timeout=15 -O /tmp/frontend-dist.zip "$FRONTEND_RELEASE_URL"; then
-      mkdir -p frontend/dist
-      if (cd frontend/dist && unzip -o -q /tmp/frontend-dist.zip); then
-        rm -f /tmp/frontend-dist.zip
-        echo "Prebuilt frontend downloaded and extracted to frontend/dist."
-      else
-        rm -f /tmp/frontend-dist.zip
-        echo "Unzip failed; falling back to local build or manual copy."
-        try_npm_build=1
-      fi
-    else
-      echo "wget failed; falling back to local build or manual copy."
-      try_npm_build=1
-    fi
+elif [ -f frontend/frontend-dist.zip ]; then
+  echo "Found frontend/frontend-dist.zip; extracting to frontend/dist..."
+  mkdir -p frontend/dist
+  if (cd frontend/dist && unzip -o -q ../frontend-dist.zip); then
+    echo "Frontend extracted to frontend/dist."
   else
-    echo "Neither curl nor wget found; skipping download."
-    try_npm_build=1
+    echo "Unzip failed. Check that frontend/frontend-dist.zip is valid."
   fi
-
-  if [ "${try_npm_build:-0}" = "1" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      echo "npm detected; installing frontend deps (low-memory mode: 1 connection, 768MB heap)..."
-      export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=768"
-      if (cd frontend && npm install --maxsockets 1 --prefer-offline --no-audit --no-fund && npm run build); then
-        echo "Frontend build complete."
-      else
-        echo "Frontend build failed (if you saw 'Killed', the Pi ran out of memory)."
-        echo "Add swap and re-run, or copy frontend/dist from another machine or download from: $FRONTEND_RELEASE_URL"
-      fi
-    else
-      echo "You can either:"
-      echo "  - Install curl/wget and re-run this script to download the prebuilt frontend"
-      echo "  - Install Node.js/npm and run: (cd frontend && npm install && npm run build)"
-      echo "  - Download manually: $FRONTEND_RELEASE_URL and extract into frontend/dist/"
-    fi
-  fi
+else
+  echo "No frontend/dist and no frontend/frontend-dist.zip."
+  echo "Place frontend-dist.zip in the frontend/ folder and re-run, or build/copy frontend/dist manually."
 fi
 
 echo
@@ -107,4 +64,3 @@ echo "== Done =="
 echo "Backend deps are installed in $VENV_DIR."
 echo "Start the server with, for example:"
 echo "  ./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000"
-
