@@ -115,18 +115,24 @@ async def get_radio_config() -> RadioConfigResponse:
 
 
 @router.patch("/config", response_model=RadioConfigResponse)
+def _meshcore_from_backend(be):
+    """Return the underlying MeshCore for command services; ClientBackend has _mc, SpiBackend is passed through."""
+    return getattr(be, "_mc", be)
+
+
 async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
     """Update radio configuration. Only provided fields will be updated."""
     require_connected()
 
-    async with radio_manager.radio_operation("update_radio_config") as mc:
+    async with radio_manager.radio_operation("update_radio_config") as be:
+        mc = _meshcore_from_backend(be)
         try:
             await apply_radio_config_update(
                 mc,
                 update,
                 path_hash_mode_supported=radio_manager.path_hash_mode_supported,
                 set_path_hash_mode=lambda mode: setattr(radio_manager, "path_hash_mode", mode),
-                sync_radio_time_fn=sync_radio_time,
+                sync_radio_time_fn=lambda _: sync_radio_time(be),
             )
         except PathHashModeUnsupportedError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -147,9 +153,10 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
         raise HTTPException(status_code=400, detail="Invalid hex string for private key") from None
 
     logger.info("Importing private key")
-    async with radio_manager.radio_operation("import_private_key") as mc:
+    async with radio_manager.radio_operation("import_private_key") as be:
         from app.keystore import export_and_store_private_key
 
+        mc = _meshcore_from_backend(be)
         try:
             await import_private_key_and_refresh_keystore(
                 mc,

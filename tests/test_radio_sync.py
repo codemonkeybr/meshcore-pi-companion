@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.models import Favorite
 from app.radio import RadioManager, radio_manager
 from app.radio_sync import (
@@ -37,7 +38,7 @@ def reset_sync_state():
     """Reset polling pause state, sync timestamp, and radio_manager before/after each test."""
     import app.radio_sync as radio_sync
 
-    prev_mc = radio_manager._meshcore
+    prev_backend = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     prev_max_channels = radio_manager.max_channels
     prev_connection_info = radio_manager._connection_info
@@ -50,7 +51,7 @@ def reset_sync_state():
     yield
     radio_sync._polling_pause_count = 0
     radio_sync._last_contact_sync = 0.0
-    radio_manager._meshcore = prev_mc
+    radio_manager._backend = prev_backend
     radio_manager._operation_lock = prev_lock
     radio_manager.max_channels = prev_max_channels
     radio_manager._connection_info = prev_connection_info
@@ -168,7 +169,7 @@ class TestSyncRadioTime:
         mock_mc = MagicMock()
         mock_mc.commands.set_time = AsyncMock()
 
-        result = await sync_radio_time(mock_mc)
+        result = await sync_radio_time(ClientBackend(mock_mc))
 
         assert result is True
         mock_mc.commands.set_time.assert_called_once()
@@ -184,7 +185,7 @@ class TestSyncRadioTime:
         mock_mc = MagicMock()
         mock_mc.commands.set_time = AsyncMock(side_effect=Exception("Radio error"))
 
-        result = await sync_radio_time(mock_mc)
+        result = await sync_radio_time(ClientBackend(mock_mc))
 
         assert result is False
 
@@ -210,7 +211,7 @@ class TestSyncRecentContactsToRadio:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 2
@@ -234,7 +235,7 @@ class TestSyncRecentContactsToRadio:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 4
@@ -261,7 +262,7 @@ class TestSyncRecentContactsToRadio:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 4
@@ -317,7 +318,7 @@ class TestSyncAndOffloadAll:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
@@ -344,7 +345,7 @@ class TestSyncAndOffloadAll:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 2
@@ -363,7 +364,7 @@ class TestSyncAndOffloadAll:
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=MagicMock())  # Found
         mock_mc.commands.add_contact = AsyncMock()
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 0
@@ -376,7 +377,7 @@ class TestSyncAndOffloadAll:
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
 
         # First call succeeds
         result1 = await sync_recent_contacts_to_radio()
@@ -392,7 +393,7 @@ class TestSyncAndOffloadAll:
         """force=True bypasses the throttle window."""
         mock_mc = MagicMock()
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
 
         # First call
         await sync_recent_contacts_to_radio()
@@ -426,7 +427,7 @@ class TestSyncAndOffloadAll:
         mock_result.payload = {"error": "Radio full"}
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 0
@@ -451,7 +452,7 @@ class TestSyncAndOffloadAll:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
@@ -480,7 +481,7 @@ class TestSyncAndOffloadAll:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
@@ -513,7 +514,7 @@ class TestSyncAndOffloadAll:
         with patch.object(
             radio_manager, "radio_operation", side_effect=radio_operation_should_not_be_called
         ):
-            result = await sync_recent_contacts_to_radio(mc=mock_mc)
+            result = await sync_recent_contacts_to_radio(be=ClientBackend(mock_mc))
 
         assert result["loaded"] == 1
         mock_mc.commands.add_contact.assert_called_once()
@@ -524,11 +525,11 @@ class TestSyncAndOffloadAll:
         mock_mc = MagicMock()
 
         # First call to set _last_contact_sync
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         await sync_recent_contacts_to_radio()
 
         # Second call with mc= but no force — should still be throttled
-        result = await sync_recent_contacts_to_radio(mc=mock_mc)
+        result = await sync_recent_contacts_to_radio(be=ClientBackend(mock_mc))
         assert result["throttled"] is True
         assert result["loaded"] == 0
 
@@ -547,9 +548,9 @@ class TestSyncAndOffloadAll:
         new_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
         # Pre-check sees old_mc (truthy, passes is_connected guard)
-        radio_manager._meshcore = old_mc
-        # Simulate reconnect swapping _meshcore before lock acquisition
-        radio_manager._meshcore = new_mc
+        radio_manager._backend = ClientBackend(old_mc) if old_mc else None
+        # Simulate reconnect swapping _backend before lock acquisition
+        radio_manager._backend = ClientBackend(new_mc) if new_mc else None
 
         result = await sync_recent_contacts_to_radio()
 
@@ -571,7 +572,7 @@ class TestSyncAndOffloadAll:
         mock_result.type = EventType.OK
         mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         result = await ensure_contact_on_radio(KEY_A, force=True)
 
         assert result["loaded"] == 1
@@ -600,10 +601,11 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
-        result = await sync_and_offload_contacts(mock_mc)
+        result = await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         assert result["synced"] == 2
         assert result["removed"] == 2
@@ -640,6 +642,7 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
@@ -652,7 +655,7 @@ class TestSyncAndOffloadContacts:
             return task
 
         with patch("app.radio_sync.asyncio.create_task", side_effect=_capture_task):
-            await sync_and_offload_contacts(mock_mc)
+            await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         await asyncio.gather(*created_tasks)
 
@@ -676,6 +679,7 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
@@ -698,7 +702,7 @@ class TestSyncAndOffloadContacts:
             patch("app.radio_sync.reconcile_contact_messages", side_effect=_slow_reconcile),
             patch("app.radio_sync.asyncio.create_task", side_effect=_capture_task),
         ):
-            result = await sync_and_offload_contacts(mock_mc)
+            result = await sync_and_offload_contacts(ClientBackend(mock_mc))
             await asyncio.sleep(0)
 
         assert result["synced"] == 1
@@ -732,11 +736,12 @@ class TestSyncAndOffloadContacts:
         mock_ok_result.type = EventType.OK
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         # First remove fails, second succeeds
         mock_mc.commands.remove_contact = AsyncMock(side_effect=[mock_fail_result, mock_ok_result])
 
-        result = await sync_and_offload_contacts(mock_mc)
+        result = await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         # Both contacts synced, but only one removed successfully
         assert result["synced"] == 2
@@ -754,10 +759,11 @@ class TestSyncAndOffloadContacts:
         mock_get_result.payload = contact_payload
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         mock_mc.commands.remove_contact = AsyncMock(side_effect=Exception("Timeout"))
 
-        result = await sync_and_offload_contacts(mock_mc)
+        result = await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         assert result["synced"] == 1
         assert result["removed"] == 0
@@ -774,7 +780,7 @@ class TestSyncAndOffloadContacts:
         mock_mc = MagicMock()
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_error_result)
 
-        result = await sync_and_offload_contacts(mock_mc)
+        result = await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         assert result["synced"] == 0
         assert result["removed"] == 0
@@ -795,10 +801,11 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
+        mock_mc._contacts = {}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
-        await sync_and_offload_contacts(mock_mc)
+        await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         contact = await ContactRepository.get_by_key(KEY_A)
         assert contact is not None
@@ -837,7 +844,7 @@ class TestSyncAndOffloadContacts:
             KEY_B: {"public_key": KEY_B, "adv_name": "Bob"},
         }
 
-        await sync_and_offload_contacts(mock_mc)
+        await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         # Both contacts should have been evicted from the library cache
         assert KEY_A not in mock_mc._contacts
@@ -872,7 +879,7 @@ class TestSyncAndOffloadContacts:
             KEY_A: {"public_key": KEY_A, "adv_name": "Alice"},
         }
 
-        await sync_and_offload_contacts(mock_mc)
+        await sync_and_offload_contacts(ClientBackend(mock_mc))
 
         # Contact should still be in the cache since removal failed
         assert KEY_A in mock_mc._contacts
@@ -904,7 +911,7 @@ class TestSyncAndOffloadChannels:
         clear_result.type = EventType.OK
         mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
-        result = await sync_and_offload_channels(mock_mc)
+        result = await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert result["synced"] == 1
         assert result["cleared"] == 1
@@ -936,7 +943,7 @@ class TestSyncAndOffloadChannels:
             side_effect=[empty_name_result] + [other_result] * 39
         )
 
-        result = await sync_and_offload_channels(mock_mc)
+        result = await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert result["synced"] == 0
         assert result["cleared"] == 0
@@ -961,7 +968,7 @@ class TestSyncAndOffloadChannels:
             side_effect=[zero_key_result] + [other_result] * 39
         )
 
-        result = await sync_and_offload_channels(mock_mc)
+        result = await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert result["synced"] == 0
 
@@ -987,7 +994,7 @@ class TestSyncAndOffloadChannels:
         clear_result.type = EventType.OK
         mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
-        await sync_and_offload_channels(mock_mc)
+        await sync_and_offload_channels(ClientBackend(mock_mc))
 
         channel = await ChannelRepository.get_by_key("8B3387E9C5CDEA6AC9E5EDBAA115CD72")
         assert channel is not None
@@ -1015,7 +1022,7 @@ class TestSyncAndOffloadChannels:
         clear_result.type = EventType.OK
         mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
-        await sync_and_offload_channels(mock_mc)
+        await sync_and_offload_channels(ClientBackend(mock_mc))
 
         mock_mc.commands.set_channel.assert_called_once_with(
             channel_idx=0,
@@ -1053,7 +1060,7 @@ class TestSyncAndOffloadChannels:
 
         mock_mc.commands.set_channel = AsyncMock(side_effect=[fail_result, ok_result])
 
-        result = await sync_and_offload_channels(mock_mc)
+        result = await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert result["synced"] == 2
         assert result["cleared"] == 1
@@ -1070,7 +1077,7 @@ class TestSyncAndOffloadChannels:
         mock_mc.commands.get_channel = AsyncMock(return_value=empty_result)
         radio_manager.max_channels = 8
 
-        result = await sync_and_offload_channels(mock_mc)
+        result = await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert mock_mc.commands.get_channel.call_count == 8
         assert result["synced"] == 0
@@ -1089,7 +1096,7 @@ class TestSyncAndOffloadChannels:
         radio_manager.max_channels = 2
         radio_manager.note_channel_slot_loaded("AA" * 16, 0)
 
-        await sync_and_offload_channels(mock_mc)
+        await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert radio_manager.get_cached_channel_slot("AA" * 16) is None
 
@@ -1113,7 +1120,7 @@ class TestSyncAndOffloadChannels:
         mock_mc.commands.get_channel = AsyncMock(side_effect=[channel_result] + [empty_result] * 39)
         mock_mc.commands.set_channel = AsyncMock(return_value=MagicMock(type=EventType.OK))
 
-        await sync_and_offload_channels(mock_mc)
+        await sync_and_offload_channels(ClientBackend(mock_mc))
 
         assert radio_manager.get_pending_message_channel_key(0) == channel_key.upper()
 
@@ -1156,7 +1163,7 @@ class TestPendingChannelMessageFallback:
         mock_mc.commands.get_channel = AsyncMock(return_value=empty_slot)
 
         with patch("app.radio_sync.broadcast_event") as mock_broadcast:
-            drained = await drain_pending_messages(mock_mc)
+            drained = await drain_pending_messages(ClientBackend(mock_mc))
 
         assert drained == 1
         stored = await MessageRepository.get_all(msg_type="CHAN", conversation_key=channel_key)
@@ -1200,7 +1207,7 @@ class TestPendingChannelMessageFallback:
         mock_mc.commands.get_channel = AsyncMock(return_value=channel_result)
 
         with patch("app.radio_sync.broadcast_event"):
-            count = await poll_for_messages(mock_mc)
+            count = await poll_for_messages(ClientBackend(mock_mc))
 
         assert count == 1
         stored = await MessageRepository.get_all(msg_type="CHAN", conversation_key=channel_key)
@@ -1299,22 +1306,22 @@ def _make_connected_manager() -> tuple[RadioManager, MagicMock]:
     mock_mc.is_connected = True
     mock_mc.stop_auto_message_fetching = AsyncMock()
     mock_mc.start_auto_message_fetching = AsyncMock()
-    rm._meshcore = mock_mc
+    rm._backend = ClientBackend(mock_mc)
     return rm, mock_mc
 
 
 def _disconnect_on_acquire(rm: RadioManager):
-    """Monkey-patch rm so _meshcore is set to None right after the lock is acquired.
+    """Monkey-patch rm so _backend is set to None right after the lock is acquired.
 
     This simulates the exact race: is_connected pre-check passes, but by the
-    time radio_operation() checks _meshcore post-lock, a reconnect has set it
+    time radio_operation() checks _backend post-lock, a reconnect has set it
     to None → RadioDisconnectedError.
     """
     original = rm._acquire_operation_lock
 
     async def _acquire_then_disconnect(name, *, blocking):
         await original(name, blocking=blocking)
-        rm._meshcore = None
+        rm._backend = None
 
     rm._acquire_operation_lock = _acquire_then_disconnect
 
@@ -1429,7 +1436,8 @@ class TestMessagePollLoopRaces:
         ):
             await _message_poll_loop()
 
-        mock_poll.assert_called_once_with(mock_mc)
+        assert mock_poll.call_count == 1
+        assert getattr(mock_poll.call_args[0][0], "_mc", None) is mock_mc
 
     @pytest.mark.asyncio
     async def test_hourly_audit_crows_loudly_when_it_finds_hidden_messages(self):
@@ -1492,7 +1500,7 @@ class TestChannelSendCacheAudit:
         mock_mc.commands.get_channel = AsyncMock(return_value=ok_result)
 
         with patch("app.radio_sync.broadcast_error") as mock_broadcast_error:
-            assert await audit_channel_send_cache(mock_mc) is True
+            assert await audit_channel_send_cache(ClientBackend(mock_mc)) is True
 
         mock_mc.commands.get_channel.assert_awaited_once_with(0)
         mock_broadcast_error.assert_not_called()
@@ -1518,7 +1526,7 @@ class TestChannelSendCacheAudit:
             patch("app.radio_sync.logger") as mock_logger,
             patch("app.radio_sync.broadcast_error") as mock_broadcast_error,
         ):
-            assert await audit_channel_send_cache(mock_mc) is False
+            assert await audit_channel_send_cache(ClientBackend(mock_mc)) is False
 
         mock_logger.error.assert_called_once()
         mock_broadcast_error.assert_called_once()
@@ -1529,9 +1537,10 @@ class TestChannelSendCacheAudit:
         chan_key = "ef" * 16
         radio_manager.note_channel_slot_loaded(chan_key, 0)
         mock_mc = MagicMock()
+        mock_mc.commands = MagicMock()
 
         with patch("app.radio.settings.force_channel_slot_reconfigure", True):
-            assert await audit_channel_send_cache(mock_mc) is True
+            assert await audit_channel_send_cache(ClientBackend(mock_mc)) is True
 
         mock_mc.commands.get_channel.assert_not_called()
 
@@ -1595,7 +1604,8 @@ class TestPeriodicAdvertLoopRaces:
         ):
             await _periodic_advert_loop()
 
-        mock_advert.assert_called_once_with(mock_mc)
+        assert mock_advert.call_count == 1
+        assert getattr(mock_advert.call_args[0][0], "_mc", None) is mock_mc
 
 
 class TestPeriodicSyncLoopRaces:
@@ -1614,7 +1624,7 @@ class TestPeriodicSyncLoopRaces:
         mock_result.payload = {f"{i:064x}": {"adv_name": f"Node{i}"} for i in range(95)}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
 
-        assert await should_run_full_periodic_sync(mock_mc) is True
+        assert await should_run_full_periodic_sync(ClientBackend(mock_mc)) is True
 
     @pytest.mark.asyncio
     async def test_should_skip_full_periodic_sync_below_trigger_threshold(self, test_db):
@@ -1629,7 +1639,7 @@ class TestPeriodicSyncLoopRaces:
         mock_result.payload = {f"{i:064x}": {"adv_name": f"Node{i}"} for i in range(94)}
         mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
 
-        assert await should_run_full_periodic_sync(mock_mc) is False
+        assert await should_run_full_periodic_sync(ClientBackend(mock_mc)) is False
 
     @pytest.mark.asyncio
     async def test_disconnect_race_between_precheck_and_lock(self):
@@ -1707,8 +1717,10 @@ class TestPeriodicSyncLoopRaces:
             await _periodic_sync_loop()
 
         mock_cleanup.assert_called_once()
-        mock_sync.assert_called_once_with(mock_mc)
-        mock_time.assert_called_once_with(mock_mc)
+        assert mock_sync.call_count == 1
+        assert getattr(mock_sync.call_args[0][0], "_mc", None) is mock_mc
+        assert mock_time.call_count == 1
+        assert getattr(mock_time.call_args[0][0], "_mc", None) is mock_mc
 
     @pytest.mark.asyncio
     async def test_skips_full_sync_below_threshold_but_still_syncs_time(self):
@@ -1732,4 +1744,5 @@ class TestPeriodicSyncLoopRaces:
 
         mock_cleanup.assert_called_once()
         mock_sync.assert_not_called()
-        mock_time.assert_called_once_with(mock_mc)
+        assert mock_time.call_count == 1
+        assert getattr(mock_time.call_args[0][0], "_mc", None) is mock_mc

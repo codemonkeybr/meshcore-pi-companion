@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.backends.client_backend import ClientBackend
+
 
 class TestRadioManagerConnect:
     """Test that connect() dispatches to the correct transport."""
@@ -161,7 +163,7 @@ class TestRadioManagerConnect:
             mock_meshcore.create_tcp = AsyncMock(return_value=new_mc)
 
             rm = RadioManager()
-            rm._meshcore = old_mc
+            rm._backend = ClientBackend(old_mc)
 
             await rm.connect()
 
@@ -180,8 +182,9 @@ class TestConnectionMonitor:
         rm = RadioManager()
         rm._connection_info = "Serial: /dev/ttyUSB0"
         rm._last_connected = True
-        rm._meshcore = MagicMock()
-        rm._meshcore.is_connected = False
+        _mock0 = MagicMock()
+        _mock0.is_connected = False
+        rm._backend = ClientBackend(_mock0)
 
         reconnect_calls = 0
 
@@ -189,8 +192,9 @@ class TestConnectionMonitor:
             nonlocal reconnect_calls
             reconnect_calls += 1
             if reconnect_calls == 1:
-                rm._meshcore = MagicMock()
-                rm._meshcore.is_connected = True
+                _mock1 = MagicMock()
+                _mock1.is_connected = True
+                rm._backend = ClientBackend(_mock1)
                 return True
             return False
 
@@ -233,7 +237,7 @@ class TestConnectionMonitor:
         # but setup failed so _setup_complete=False.
         mock_mc = MagicMock()
         mock_mc.is_connected = True
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc)
         rm._last_connected = True
         rm._setup_complete = False
 
@@ -281,7 +285,7 @@ class TestConnectionMonitor:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.is_connected = True
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
         rm._connection_info = "TCP: test:4000"
         rm._last_connected = True
         rm._setup_complete = False
@@ -333,7 +337,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         connect_count = 0
 
@@ -344,7 +348,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = ClientBackend(mock_mc) if mock_mc else None
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -369,7 +373,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         call_order: list[str] = []
 
@@ -378,7 +382,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = ClientBackend(mock_mc) if mock_mc else None
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -401,7 +405,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         attempt = 0
 
@@ -414,7 +418,7 @@ class TestReconnectLock:
             # Second attempt succeeds
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._meshcore = mock_mc
+            rm._backend = ClientBackend(mock_mc) if mock_mc else None
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -473,7 +477,7 @@ class TestManualDisconnectCleanup:
         mock_mc = MagicMock()
         mock_mc.disconnect = AsyncMock(side_effect=_disconnect)
         mock_mc.connection_manager = connection_manager
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
         rm._setup_complete = True
         rm.max_channels = 8
         rm.path_hash_mode = 2
@@ -501,7 +505,7 @@ class TestManualDisconnectCleanup:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.disconnect = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
         rm._connection_desired = True
         rm._last_connected = True
 
@@ -632,7 +636,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         call_order = []
 
@@ -681,7 +685,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         observed_during = None
 
@@ -723,7 +727,7 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -745,7 +749,7 @@ class TestPostConnectSetupOrdering:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._meshcore = None
+        rm._backend = None
 
         # Should not raise or call any functions
         await rm.post_connect_setup()
@@ -761,7 +765,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         mock_settings = AppSettings(flood_scope="#TestRegion")
 
@@ -795,7 +799,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         mock_settings = AppSettings(flood_scope="TestRegion")
 
@@ -829,7 +833,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         mock_settings = AppSettings(flood_scope="")
 
@@ -863,7 +867,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -895,7 +899,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._meshcore = mock_mc
+        rm._backend = ClientBackend(mock_mc) if mock_mc else None
 
         with (
             patch("app.event_handlers.register_event_handlers"),

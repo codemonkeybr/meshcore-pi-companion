@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.repository import ContactAdvertPathRepository, ContactRepository, MessageRepository
 
 # Sample 64-char hex public keys for testing
@@ -347,8 +348,7 @@ class TestDeleteContact:
 
         with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = True
-            mock_rm.meshcore = mock_mc
-            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+            mock_rm.radio_operation = _noop_radio_operation(ClientBackend(mock_mc))
 
             response = await client.delete(f"/api/contacts/{KEY_A}")
 
@@ -491,7 +491,7 @@ class TestRoutingOverride:
             patch("app.websocket.broadcast_event"),
         ):
             mock_rm.is_connected = True
-            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+            mock_rm.radio_operation = _noop_radio_operation(ClientBackend(mock_mc))
             response = await client.post(
                 f"/api/contacts/{KEY_A}/routing-override",
                 json={"route": "-1"},

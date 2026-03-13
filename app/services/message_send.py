@@ -17,6 +17,12 @@ from app.services.messages import (
 
 logger = logging.getLogger(__name__)
 
+
+def _meshcore_from_backend(be) -> Any:
+    """Return the underlying MeshCore for code that uses .commands; ClientBackend has _mc."""
+    return getattr(be, "_mc", be)
+
+
 BroadcastFn = Callable[..., Any]
 TrackAckFn = Callable[[str, int, int], None]
 NowFn = Callable[[], float]
@@ -175,7 +181,8 @@ async def send_direct_message_to_contact(
 ) -> Any:
     """Send a direct message and persist/broadcast the outgoing row."""
     contact_data = contact.to_radio_dict()
-    async with radio_manager.radio_operation("send_direct_message") as mc:
+    async with radio_manager.radio_operation("send_direct_message") as be:
+        mc = _meshcore_from_backend(be)
         logger.debug("Ensuring contact %s is on radio before sending", contact.public_key[:12])
         add_result = await mc.commands.add_contact(contact_data)
         if add_result.type == EventType.ERROR:
@@ -241,7 +248,8 @@ async def send_channel_message_to_channel(
     our_public_key: str | None = None
     text_with_sender = text
 
-    async with radio_manager.radio_operation("send_channel_message") as mc:
+    async with radio_manager.radio_operation("send_channel_message") as be:
+        mc = _meshcore_from_backend(be)
         radio_name = mc.self_info.get("name", "") if mc.self_info else ""
         our_public_key = (mc.self_info.get("public_key") or None) if mc.self_info else None
         text_with_sender = f"{radio_name}: {text}" if radio_name else text
@@ -335,7 +343,8 @@ async def resend_channel_message_record(
     resend_public_key: str | None = None
     radio_name = ""
 
-    async with radio_manager.radio_operation("resend_channel_message") as mc:
+    async with radio_manager.radio_operation("resend_channel_message") as be:
+        mc = _meshcore_from_backend(be)
         radio_name = mc.self_info.get("name", "") if mc.self_info else ""
         resend_public_key = (mc.self_info.get("public_key") or None) if mc.self_info else None
         text_to_send = message.text

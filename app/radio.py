@@ -442,7 +442,7 @@ class RadioManager:
             port = await find_radio_port(settings.serial_baudrate)
             if not port:
                 logger.warning("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
-                return
+                raise RuntimeError("No MeshCore radio found")
 
         logger.debug(
             "Connecting to radio at %s (baud %d)",
@@ -548,7 +548,10 @@ class RadioManager:
         """Disconnect from the radio."""
         if self._backend is not None:
             logger.debug("Disconnecting from radio")
+            mc = getattr(self._backend, "_mc", None)
             await self._backend.disconnect()
+            if mc is not None:
+                await self._disable_meshcore_auto_reconnect(mc)
             self._backend = None
             self._setup_complete = False
             self.max_channels = 40

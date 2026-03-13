@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.models import CommandRequest, Contact, RepeaterLoginRequest
 from app.radio import radio_manager
 from app.repository import ContactRepository
@@ -72,6 +73,10 @@ async def _insert_contact(public_key: str, name: str = "Node", contact_type: int
 
 def _mock_mc():
     mc = MagicMock()
+    mc.commands = MagicMock()
+    mc.commands.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.commands.get_msg = AsyncMock()
     mc.req_status_sync = AsyncMock()
     mc.fetch_all_neighbours = AsyncMock()
     mc.req_acl_sync = AsyncMock()
@@ -943,7 +948,7 @@ class TestRepeaterNodeInfo:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await repeater_node_info(KEY_A)
@@ -972,7 +977,7 @@ class TestRepeaterNodeInfo:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch(_MONOTONIC, side_effect=clock_ticks),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):

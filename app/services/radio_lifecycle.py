@@ -30,6 +30,9 @@ async def run_post_connect_setup(radio_manager) -> None:
     async def _setup_body() -> None:
         if not radio_manager.meshcore:
             return
+        be = radio_manager.backend
+        if not be:
+            return
         radio_manager._setup_in_progress = True
         radio_manager._setup_complete = False
         try:
@@ -39,7 +42,8 @@ async def run_post_connect_setup(radio_manager) -> None:
             await radio_manager._acquire_operation_lock("post_connect_setup", blocking=True)
             try:
                 mc = radio_manager.meshcore
-                if not mc:
+                be = radio_manager.backend
+                if not mc or not be:
                     return
 
                 # Register event handlers against the locked, current transport.
@@ -47,8 +51,8 @@ async def run_post_connect_setup(radio_manager) -> None:
 
                 await export_and_store_private_key(mc)
 
-                # Sync radio clock with system time
-                await sync_radio_time(mc)
+                # Sync radio clock with system time (use current backend after lock)
+                await sync_radio_time(be)
 
                 # Apply flood scope from settings (best-effort; older firmware
                 # may not support set_flood_scope)
@@ -122,11 +126,11 @@ async def run_post_connect_setup(radio_manager) -> None:
 
                 # Sync contacts/channels from radio to DB and clear radio
                 logger.info("Syncing and offloading radio data...")
-                result = await sync_and_offload_all(mc)
+                result = await sync_and_offload_all(be)
                 logger.info("Sync complete: %s", result)
 
                 # Send advertisement to announce our presence (if enabled and not throttled)
-                if await send_advertisement(mc):
+                if await send_advertisement(be):
                     logger.info("Advertisement sent")
                 else:
                     logger.debug("Advertisement skipped (disabled or throttled)")
@@ -134,12 +138,12 @@ async def run_post_connect_setup(radio_manager) -> None:
                 # Drain any messages that were queued before we connected.
                 # This must happen BEFORE starting auto-fetch, otherwise both
                 # compete on get_msg() with interleaved radio I/O.
-                drained = await drain_pending_messages(mc)
+                drained = await drain_pending_messages(be)
                 if drained > 0:
                     logger.info("Drained %d pending message(s)", drained)
                 radio_manager.clear_pending_message_channel_slots()
 
-                await mc.start_auto_message_fetching()
+                await be.start_auto_message_fetching()
                 logger.info("Auto message fetching started")
             finally:
                 radio_manager._release_operation_lock("post_connect_setup")

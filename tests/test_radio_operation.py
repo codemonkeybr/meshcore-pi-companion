@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.backends.client_backend import ClientBackend
 from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
 from app.radio_sync import is_polling_paused
 from app.services.radio_runtime import RadioRuntime
@@ -17,18 +18,18 @@ def _runtime(manager):
 @pytest.fixture(autouse=True)
 def reset_radio_operation_state():
     """Reset shared radio operation lock state before/after each test."""
-    prev_meshcore = radio_manager._meshcore
+    prev_backend = radio_manager._backend
     radio_manager._operation_lock = None
-    # Default to a non-None MagicMock so radio_operation() doesn't raise
+    # Default to a non-None backend so radio_operation() doesn't raise
     # RadioDisconnectedError for tests that only exercise locking.
-    radio_manager._meshcore = MagicMock()
+    radio_manager._backend = ClientBackend(MagicMock())
 
     import app.radio_sync as radio_sync
 
     radio_sync._polling_pause_count = 0
     yield
     radio_manager._operation_lock = None
-    radio_manager._meshcore = prev_meshcore
+    radio_manager._backend = prev_backend
     radio_sync._polling_pause_count = 0
 
 
@@ -94,7 +95,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock()
-        radio_manager._meshcore = mc
+        radio_manager._backend = ClientBackend(mc) if mc else None
 
         async with radio_manager.radio_operation(
             "auto_fetch_toggle",
@@ -110,7 +111,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock(side_effect=asyncio.CancelledError())
-        radio_manager._meshcore = mc
+        radio_manager._backend = ClientBackend(mc) if mc else None
 
         with pytest.raises(asyncio.CancelledError):
             async with radio_manager.radio_operation(
@@ -137,43 +138,47 @@ class TestRadioOperationYield:
 
     @pytest.mark.asyncio
     async def test_radio_operation_yields_current_meshcore(self):
-        """The yielded value is the current _meshcore at lock-acquisition time."""
+        """The yielded value is the backend (wrapping current meshcore) at lock-acquisition time."""
         mc = MagicMock()
-        radio_manager._meshcore = mc
+        be = ClientBackend(mc)
+        radio_manager._backend = be
 
         async with radio_manager.radio_operation("test_yield") as yielded:
-            assert yielded is mc
+            assert yielded is be
+            assert yielded._mc is mc
 
     @pytest.mark.asyncio
     async def test_radio_operation_raises_when_disconnected_after_lock(self):
         """RadioDisconnectedError is raised when _meshcore is None after acquiring the lock."""
-        radio_manager._meshcore = None
+        radio_manager._backend = None
 
         with pytest.raises(RadioDisconnectedError):
             async with radio_manager.radio_operation("test_disconnected"):
                 pass  # pragma: no cover
 
         # Lock must be released even after the error
-        radio_manager._meshcore = MagicMock()
+        radio_manager._backend = ClientBackend(MagicMock())
         async with radio_manager.radio_operation("after_error", blocking=False):
             pass
 
     @pytest.mark.asyncio
     async def test_radio_operation_yields_fresh_reference_after_swap(self):
-        """If _meshcore is swapped between pre-check and lock acquisition,
-        the yielded value is the new (current) instance, not the old one."""
+        """If _backend is swapped between pre-check and lock acquisition,
+        the yielded value is the new backend (wrapping new meshcore), not the old one."""
         old_mc = MagicMock(name="old")
         new_mc = MagicMock(name="new")
+        old_be = ClientBackend(old_mc)
+        new_be = ClientBackend(new_mc)
 
-        # Start with old_mc
-        radio_manager._meshcore = old_mc
-
-        # Simulate a reconnect swapping _meshcore before the caller enters the block
-        radio_manager._meshcore = new_mc
+        radio_manager._backend = old_be
+        # Simulate a reconnect swapping _backend before the caller enters the block
+        radio_manager._backend = new_be
 
         async with radio_manager.radio_operation("test_swap") as yielded:
-            assert yielded is new_mc
-            assert yielded is not old_mc
+            assert yielded is new_be
+            assert yielded._mc is new_mc
+            assert yielded is not old_be
+            assert yielded._mc is not old_mc
 
 
 class TestRequireConnected:

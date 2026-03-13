@@ -217,7 +217,8 @@ async def _probe_radio() -> DebugRadioProbe:
         async with radio_runtime.radio_operation(
             "debug_support_snapshot",
             suspend_auto_fetch=True,
-        ) as mc:
+        ) as be:
+            mc = getattr(be, "_mc", be)
             device_info = None
             stats_core = None
             stats_radio = None

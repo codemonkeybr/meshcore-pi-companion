@@ -14,7 +14,7 @@ This runs all linting, formatting, type checking, tests, and builds for both bac
 
 ## Overview
 
-A web interface for MeshCore mesh radio networks. The backend connects to a MeshCore-compatible radio over Serial, TCP, or BLE and exposes REST/WebSocket APIs. The React frontend provides real-time messaging and radio configuration.
+A web interface for MeshCore mesh radio networks. The backend connects to a MeshCore-compatible radio over Serial, TCP, or BLE — or, on Raspberry Pi with a LoRa HAT, drives the radio directly over **SPI** (no external device). It exposes REST/WebSocket APIs. The React frontend provides real-time messaging and radio configuration.
 
 **For detailed component documentation, see these primary AGENTS.md files:**
 - `app/AGENTS.md` - Backend (FastAPI, database, radio connection, packet decryption)
@@ -51,14 +51,20 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 │  │ Radio runtime seam +     │                     │  Manager  │  │
 │  │ RadioManager lifecycle   │                     └───────────┘  │
 │  │ / event adapters         │                                    │
-│  └──────────────────────────┘                                    │
-└───────────────────────────┼──────────────────────────────────────┘
-                            │ Serial / TCP / BLE
-                     ┌──────┴──────┐
-                     │ MeshCore    │
-                     │   Radio     │
-                     └─────────────┘
+│  └─────────────────────────┬────────────────────────────────────┘
+│                            │ RadioBackend (abstract)             │
+│                ┌───────────┴───────────┐                         │
+│                │ ClientBackend | SpiBackend (meshcore | pymc_core)│
+│                └───────────┬───────────┘                         │
+└────────────────────────────┼─────────────────────────────────────┘
+                             │ Serial/TCP/BLE    │ SPI (Pi + LoRa HAT)
+                      ┌──────┴──────┐     ┌──────┴──────┐
+                      │ MeshCore    │     │ LoRa radio  │
+                      │   Radio     │     │ (e.g. SX1262)│
+                      └─────────────┘     └─────────────┘
 ```
+
+**Radio backends:** One transport is active at a time. When `data/config.yaml` (or `config.yaml`) exists, **SPI mode** is used: `RadioManager` uses `SpiBackend` (pymc_core + LoRa HAT). Otherwise serial/TCP/BLE use `ClientBackend` (meshcore library). Setup API (`GET/POST /api/setup/*`) and CLI (`python -m app.setup_cli`) provision SPI config; see `app/AGENTS.md` and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
 ## Feature Priority
 
@@ -289,7 +295,11 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Connection status, fanout statuses, bots_disabled flag |
+| GET | `/api/health` | Connection status, fanout statuses, bots_disabled, setup_required (SPI) |
+| GET | `/api/setup/status` | SPI: whether provisioning is required and config path |
+| GET | `/api/setup/hardware-profiles` | SPI: list supported LoRa HAT profiles |
+| GET | `/api/setup/radio-presets` | SPI: region/radio presets |
+| POST | `/api/setup/provision` | SPI: write or update config.yaml (node, radio, hardware) |
 | GET | `/api/debug` | Support snapshot: recent logs, live radio probe, contact/channel drift audit, and running version/git info |
 | GET | `/api/radio/config` | Radio configuration, including `path_hash_mode`, `path_hash_mode_supported`, and whether adverts include current node location |
 | PATCH | `/api/radio/config` | Update name, location, advert-location on/off, radio params, and `path_hash_mode` when supported |

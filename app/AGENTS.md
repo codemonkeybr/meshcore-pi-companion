@@ -8,7 +8,7 @@ Keep it aligned with `app/` source files and router behavior.
 - FastAPI
 - aiosqlite
 - Pydantic
-- MeshCore Python library (`meshcore` from PyPI)
+- MeshCore Python library (`meshcore` from PyPI) for serial/TCP/BLE; **pymc_core** for SPI (Pi + LoRa HAT)
 - PyCryptodome
 
 ## Code Ethos
@@ -37,6 +37,8 @@ app/
 │   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
 │   ├── radio_commands.py        # Radio config/private-key command workflows
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
+├── radio_backend.py     # RadioBackend ABC; implemented by ClientBackend and SpiBackend
+├── backends/            # ClientBackend (meshcore), SpiBackend (pymc_core), spi_config, adapters
 ├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
 ├── decoder.py           # Packet parsing/decryption
@@ -51,8 +53,12 @@ app/
 ├── region_scope.py      # Normalize/validate regional flood-scope values
 ├── keystore.py          # Ephemeral private/public key storage for DM decryption
 ├── frontend_static.py   # Mount/serve built frontend (production)
+├── spi_config_file.py  # Load/save SPI config (data/config.yaml)
+├── spi_identity.py      # SPI identity key (load_or_create, export, import)
+├── setup_cli.py         # CLI wizard for SPI provisioning (node, radio, hardware)
 └── routers/
     ├── health.py
+    ├── setup.py          # SPI provisioning (status, hardware-profiles, radio-presets, provision)
     ├── debug.py
     ├── radio.py
     ├── contacts.py
@@ -79,7 +85,7 @@ app/
 ### Outgoing messages
 
 1. Send endpoints in `routers/messages.py` validate requests and delegate to `services/message_send.py`.
-2. Service-layer send workflows call MeshCore commands, persist outgoing messages, and wire ACK tracking.
+2. Service-layer send workflows call the active backend (MeshCore commands for ClientBackend; pymc_core for SpiBackend), persist outgoing messages, and wire ACK tracking.
 3. Endpoint broadcasts WS `message` event so all live clients update.
 4. ACK/repeat updates arrive later as `message_acked` events.
 5. Channel resend (`POST /messages/channel/{id}/resend`) strips the sender name prefix by exact match against the current radio name. This assumes the radio name hasn't changed between the original send and the resend. Name changes require an explicit radio config update and are rare, but the `new_timestamp=true` resend path has no time window, so a mismatch is possible if the name was changed between the original send and a later resend.

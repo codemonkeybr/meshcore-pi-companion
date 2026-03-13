@@ -8,8 +8,10 @@ from app.dependencies import require_connected
 from app.models import (
     Contact,
     ContactActiveRoom,
+    ContactAdvertPath,
     ContactAdvertPathSummary,
     ContactAnalytics,
+    ContactDetail,
     ContactRoutingOverrideRequest,
     ContactUpsert,
     CreateContactRequest,

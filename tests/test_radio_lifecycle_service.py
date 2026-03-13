@@ -107,8 +107,11 @@ class TestRunPostConnectSetup:
         replacement_mc._reader.handle_rx = AsyncMock()
         replacement_mc.start_auto_message_fetching = AsyncMock()
 
+        from app.backends.client_backend import ClientBackend
+
         radio_manager = MagicMock()
         radio_manager.meshcore = initial_mc
+        radio_manager.backend = ClientBackend(initial_mc)
         radio_manager._setup_lock = None
         radio_manager._setup_in_progress = False
         radio_manager._setup_complete = False
@@ -118,6 +121,7 @@ class TestRunPostConnectSetup:
 
         async def _acquire(*args, **kwargs):
             radio_manager.meshcore = replacement_mc
+            radio_manager.backend = ClientBackend(replacement_mc)
 
         radio_manager._acquire_operation_lock = AsyncMock(side_effect=_acquire)
         radio_manager._release_operation_lock = MagicMock()
@@ -141,7 +145,10 @@ class TestRunPostConnectSetup:
 
         mock_register_handlers.assert_called_once_with(replacement_mc)
         mock_export_key.assert_awaited_once_with(replacement_mc)
-        mock_sync_time.assert_awaited_once_with(replacement_mc)
+        mock_sync_time.assert_awaited_once()
+        # sync_radio_time(be) is called with the backend; backend._mc should be replacement_mc
+        called_with = mock_sync_time.call_args[0][0]
+        assert getattr(called_with, "_mc", None) is replacement_mc
         replacement_mc.start_auto_message_fetching.assert_awaited_once()
         initial_mc.start_auto_message_fetching.assert_not_called()
         assert radio_manager.max_channels == 8

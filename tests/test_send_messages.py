@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.models import (
     SendChannelMessageRequest,
     SendDirectMessageRequest,
@@ -29,14 +30,14 @@ from app.routers.messages import (
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     prev_max_channels = radio_manager.max_channels
     prev_connection_info = radio_manager._connection_info
     prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
     prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
     radio_manager.max_channels = prev_max_channels
     radio_manager._connection_info = prev_connection_info
@@ -103,7 +104,7 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="!lasttime Alice")
@@ -150,7 +151,7 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
@@ -179,7 +180,7 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
@@ -208,7 +209,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="!lasttime5 someone")
@@ -232,7 +233,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="acked now")
@@ -259,7 +260,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
@@ -289,7 +290,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
@@ -312,7 +313,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
@@ -333,7 +334,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             pytest.raises(HTTPException) as exc_info,
         ):
@@ -355,7 +356,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             await send_channel_message(
@@ -383,7 +384,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             await send_channel_message(
@@ -424,7 +425,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             await send_channel_message(
@@ -448,7 +449,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch("app.radio.settings.force_channel_slot_reconfigure", True),
         ):
@@ -476,7 +477,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             pytest.raises(HTTPException) as exc_info,
         ):
@@ -511,7 +512,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
 
@@ -572,7 +573,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
@@ -609,7 +610,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_error") as mock_broadcast_error,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
@@ -638,7 +639,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):
@@ -736,7 +737,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
@@ -763,7 +764,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -792,7 +793,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -827,7 +828,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -882,7 +883,7 @@ class TestRadioExceptionMidSend:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(ConnectionError):
                 await send_direct_message(
@@ -910,7 +911,7 @@ class TestRadioExceptionMidSend:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(ConnectionError):
                 await send_channel_message(
@@ -935,7 +936,7 @@ class TestRadioExceptionMidSend:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(TimeoutError):
                 await send_channel_message(
@@ -971,7 +972,7 @@ class TestRadioExceptionMidSend:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(TimeoutError):
                 await send_channel_message(
@@ -1001,7 +1002,7 @@ class TestRadioExceptionMidSend:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             pytest.raises(HTTPException) as exc_info,
         ):
             await send_channel_message(
@@ -1034,7 +1035,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             results = await asyncio.gather(
@@ -1088,7 +1089,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):
@@ -1131,7 +1132,7 @@ class TestChannelSendLockScope:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch(
                 "app.services.message_send.MessageRepository.create",

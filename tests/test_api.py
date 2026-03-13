@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
+from app.backends.client_backend import ClientBackend
 from app.radio import radio_manager
 from app.repository import (
     ChannelRepository,
@@ -24,14 +25,14 @@ from app.repository import (
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     prev_max_channels = radio_manager.max_channels
     prev_connection_info = radio_manager._connection_info
     prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
     prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
     radio_manager.max_channels = prev_max_channels
     radio_manager._connection_info = prev_connection_info
@@ -173,7 +174,7 @@ class TestDebugEndpoint:
             return MagicMock(type=EventType.OK, payload={})
 
         mock_mc.commands.get_channel = AsyncMock(side_effect=_channel_event)
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
 
         logging.getLogger("tests.debug").warning("support snapshot marker")
 
@@ -215,7 +216,7 @@ class TestDebugEndpoint:
         from app.routers.debug import DebugApplicationInfo
 
         clear_recent_log_lines()
-        radio_manager._meshcore = None
+        radio_manager._backend = None
         radio_manager._connection_info = None
 
         with patch(
@@ -247,7 +248,7 @@ class TestRadioDisconnectedHandler:
         await _insert_contact(pub_key, "Alice")
 
         # require_connected() passes, but _meshcore is None when radio_operation() checks
-        radio_manager._meshcore = None
+        radio_manager._backend = None
         with _patch_require_connected(MagicMock()):
             response = await client.post(
                 "/api/messages/direct", json={"destination": pub_key, "text": "Hi"}
@@ -299,7 +300,7 @@ class TestMessagesEndpoint:
             return_value=MagicMock(type=EventType.MSG_SENT, payload={})
         )
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         with (
             _patch_require_connected(mock_mc),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
@@ -334,7 +335,7 @@ class TestMessagesEndpoint:
         mock_mc.commands.set_channel = AsyncMock(return_value=ok_result)
         mock_mc.commands.send_chan_msg = AsyncMock(return_value=ok_result)
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         with (
             _patch_require_connected(mock_mc),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
@@ -382,7 +383,7 @@ class TestMessagesEndpoint:
             return_value=MagicMock(type=MagicMock(name="OK"), payload={"expected_ack": b"\x00\x01"})
         )
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         with (
             _patch_require_connected(mock_mc),
             patch("app.routers.messages.MessageRepository") as mock_msg_repo,
@@ -417,7 +418,7 @@ class TestMessagesEndpoint:
             return_value=MagicMock(type=MagicMock(name="OK"), payload={})
         )
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         with (
             _patch_require_connected(mock_mc),
             patch("app.routers.messages.MessageRepository") as mock_msg_repo,
@@ -472,7 +473,7 @@ class TestMessagesEndpoint:
             return_value=MagicMock(type=EventType.MSG_SENT, payload={})
         )
 
-        radio_manager._meshcore = mock_mc
+        radio_manager._backend = ClientBackend(mock_mc) if mock_mc else None
         with _patch_require_connected(mock_mc):
             response = await client.post(f"/api/messages/channel/{msg_id}/resend")
 
@@ -756,11 +757,11 @@ class TestReadStateEndpoints:
             sender_timestamp=1001,
         )
 
-        # Mock radio_manager.meshcore to return a name
+        # Mock radio_manager.backend to return a backend with self_info (name for mentions)
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "RadioUser"}
         with patch("app.routers.read_state.radio_manager") as mock_rm:
-            mock_rm.meshcore = mock_mc
+            mock_rm.backend = ClientBackend(mock_mc)
             response = await client.get("/api/read-state/unreads")
 
         assert response.status_code == 200
