@@ -17,6 +17,9 @@ dependencies = [
     "apprise>=1.9.7",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app"]
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",
