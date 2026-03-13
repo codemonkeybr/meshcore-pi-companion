@@ -49,12 +49,13 @@ jobs:
     permissions:
       contents: write
     steps:
-    main
+      - uses: actions/checkout@v4
+
       - name: Download frontend artifact
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
-    main
+          path: frontend-dist
 
       - name: Zip for release asset
         run: |
@@ -68,4 +69,4 @@ jobs:
           if ! gh release view frontend-latest 2>/dev/null; then
             gh release create frontend-latest --target ${{ github.ref_name }} --title "Prebuilt frontend (latest from main)" --generate-notes
           fi
-    main
+          gh release upload frontend-latest frontend-dist/frontend-dist.zip --clobber
