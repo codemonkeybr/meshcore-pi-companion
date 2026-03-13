@@ -8,7 +8,7 @@ test.describe('Health & UI basics', () => {
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
     // Sidebar is visible with key sections
-    await expect(page.getByRole('heading', { name: 'Conversations' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeVisible();
     await expect(page.getByText('Packet Feed')).toBeVisible();
     await expect(page.getByText('Node Map')).toBeVisible();
   });

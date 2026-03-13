@@ -10,6 +10,36 @@ from app.fanout.base import FanoutModule
 logger = logging.getLogger(__name__)
 
 
+def _derive_path_bytes_per_hop(paths: object, path_value: str | None) -> int | None:
+    """Derive hop width from the first serialized message path when possible."""
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    if not isinstance(paths, list) or not paths:
+        return None
+
+    first_path = paths[0]
+    if not isinstance(first_path, dict):
+        return None
+
+    path_hops = first_path.get("path_len")
+    if not isinstance(path_hops, int) or path_hops <= 0:
+        return None
+
+    path_hex_chars = len(path_value)
+    if path_hex_chars % 2 != 0:
+        return None
+
+    path_bytes = path_hex_chars // 2
+    if path_bytes % path_hops != 0:
+        return None
+
+    hop_width = path_bytes // path_hops
+    if hop_width not in (1, 2, 3):
+        return None
+
+    return hop_width
+
+
 class BotModule(FanoutModule):
     """Wraps a single bot's code execution and response routing.
 
@@ -101,11 +131,11 @@ class BotModule(FanoutModule):
 
         sender_timestamp = data.get("sender_timestamp")
         path_value = data.get("path")
+        paths = data.get("paths")
         # Message model serializes paths as list of dicts; extract first path string
-        if path_value is None:
-            paths = data.get("paths")
-            if paths and isinstance(paths, list) and len(paths) > 0:
-                path_value = paths[0].get("path") if isinstance(paths[0], dict) else None
+        if path_value is None and paths and isinstance(paths, list) and len(paths) > 0:
+            path_value = paths[0].get("path") if isinstance(paths[0], dict) else None
+        path_bytes_per_hop = _derive_path_bytes_per_hop(paths, path_value)
 
         # Wait for message to settle (allows retransmissions to be deduped)
         await asyncio.sleep(2)
@@ -130,6 +160,7 @@ class BotModule(FanoutModule):
                         sender_timestamp,
                         path_value,
                         is_outgoing,
+                        path_bytes_per_hop,
                     ),
                     timeout=BOT_EXECUTION_TIMEOUT,
                 )

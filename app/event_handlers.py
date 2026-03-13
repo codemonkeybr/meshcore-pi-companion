@@ -4,15 +4,20 @@ from typing import TYPE_CHECKING
 
 from meshcore import EventType
 
-from app.models import CONTACT_TYPE_REPEATER, Contact, Message, MessagePath
+from app.models import CONTACT_TYPE_REPEATER, Contact, ContactUpsert
 from app.packet_processor import process_raw_packet
 from app.radio_backend import RadioBackend
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
-    ContactNameHistoryRepository,
     ContactRepository,
-    MessageRepository,
 )
+from app.services import dm_ack_tracker
+from app.services.contact_reconciliation import (
+    claim_prefix_messages_for_contact,
+    promote_prefix_contacts_for_contact,
+    record_contact_name_and_reconcile,
+)
+from app.services.messages import create_fallback_direct_message, increment_ack_and_broadcast
 from app.websocket import broadcast_event
 
 if TYPE_CHECKING:
@@ -23,33 +28,17 @@ logger = logging.getLogger(__name__)
 # Track active subscriptions so we can unsubscribe before re-registering
 # This prevents handler duplication after reconnects
 _active_subscriptions: list["Subscription"] = []
-
-
-# Track pending ACKs: expected_ack_code -> (message_id, timestamp, timeout_ms)
-_pending_acks: dict[str, tuple[int, float, int]] = {}
+_pending_acks = dm_ack_tracker._pending_acks
 
 
 def track_pending_ack(expected_ack: str, message_id: int, timeout_ms: int) -> None:
-    """Track a pending ACK for a direct message."""
-    _pending_acks[expected_ack] = (message_id, time.time(), timeout_ms)
-    logger.debug(
-        "Tracking pending ACK %s for message %d (timeout %dms)",
-        expected_ack,
-        message_id,
-        timeout_ms,
-    )
+    """Compatibility wrapper for pending DM ACK tracking."""
+    dm_ack_tracker.track_pending_ack(expected_ack, message_id, timeout_ms)
 
 
 def cleanup_expired_acks() -> None:
-    """Remove expired pending ACKs."""
-    now = time.time()
-    expired = []
-    for code, (_msg_id, created_at, timeout_ms) in _pending_acks.items():
-        if now - created_at > (timeout_ms / 1000) * 2:  # 2x timeout as buffer
-            expired.append(code)
-    for code in expired:
-        del _pending_acks[code]
-        logger.debug("Expired pending ACK %s", code)
+    """Compatibility wrapper for expiring stale DM ACK entries."""
+    dm_ack_tracker.cleanup_expired_acks()
 
 
 async def on_contact_message(event: "Event") -> None:
@@ -91,7 +80,7 @@ async def on_contact_message(event: "Event") -> None:
         sender_pubkey = contact.public_key.lower()
 
         # Promote any prefix-stored messages to this full key
-        await MessageRepository.claim_prefix_messages(sender_pubkey)
+        await claim_prefix_messages_for_contact(public_key=sender_pubkey, log=logger)
 
         # Skip messages from repeaters - they only send CLI responses, not chat messages.
         # CLI responses are handled by the command endpoint and txt_type filter above.
@@ -101,6 +90,20 @@ async def on_contact_message(event: "Event") -> None:
                 sender_pubkey[:12],
             )
             return
+    elif sender_pubkey:
+        placeholder_upsert = ContactUpsert(
+            public_key=sender_pubkey.lower(),
+            type=0,
+            last_seen=received_at,
+            last_contacted=received_at,
+            first_seen=received_at,
+            on_radio=False,
+            out_path_hash_mode=-1,
+        )
+        await ContactRepository.upsert(placeholder_upsert)
+        contact = await ContactRepository.get_by_key(sender_pubkey.lower())
+        if contact:
+            broadcast_event("contact", contact.model_dump())
 
     # Try to create message - INSERT OR IGNORE handles duplicates atomically
     # If the packet processor already stored this message, this returns None
@@ -109,21 +112,21 @@ async def on_contact_message(event: "Event") -> None:
     sender_name = contact.name if contact else None
     path = payload.get("path")
     path_len = payload.get("path_len")
-    msg_id = await MessageRepository.create(
-        msg_type="PRIV",
-        text=payload.get("text", ""),
+    message = await create_fallback_direct_message(
         conversation_key=sender_pubkey,
+        text=payload.get("text", ""),
         sender_timestamp=sender_timestamp,
         received_at=received_at,
         path=path,
         path_len=path_len,
         txt_type=txt_type,
         signature=payload.get("signature"),
-        sender_key=sender_pubkey,
         sender_name=sender_name,
+        sender_key=sender_pubkey,
+        broadcast_fn=broadcast_event,
     )
 
-    if msg_id is None:
+    if message is None:
         # Already handled by packet processor (or exact duplicate) - nothing more to do
         logger.debug("DM from %s already processed by packet processor", sender_pubkey[:12])
         return
@@ -131,31 +134,6 @@ async def on_contact_message(event: "Event") -> None:
     # If we get here, the packet processor didn't handle this message
     # (likely because private key export is not available)
     logger.debug("DM from %s handled by event handler (fallback path)", sender_pubkey[:12])
-
-    # Build paths array for broadcast
-    paths = (
-        [MessagePath(path=path or "", received_at=received_at, path_len=path_len)]
-        if path is not None
-        else None
-    )
-
-    # Broadcast the new message
-    broadcast_event(
-        "message",
-        Message(
-            id=msg_id,
-            type="PRIV",
-            conversation_key=sender_pubkey,
-            text=payload.get("text", ""),
-            sender_timestamp=sender_timestamp,
-            received_at=received_at,
-            paths=paths,
-            txt_type=txt_type,
-            signature=payload.get("signature"),
-            sender_key=sender_pubkey,
-            sender_name=sender_name,
-        ).model_dump(),
-    )
 
     # Update contact last_contacted (contact was already fetched above)
     if contact:
@@ -266,30 +244,42 @@ async def on_new_contact(event: "Event") -> None:
 
     logger.debug("New contact: %s", public_key[:12])
 
-    contact_data = {
-        **Contact.from_radio_dict(public_key.lower(), payload, on_radio=True),
-        "last_seen": int(time.time()),
-    }
-    await ContactRepository.upsert(contact_data)
+    contact_upsert = ContactUpsert.from_radio_dict(public_key.lower(), payload, on_radio=False)
+    contact_upsert.last_seen = int(time.time())
+    await ContactRepository.upsert(contact_upsert)
+    promoted_keys = await promote_prefix_contacts_for_contact(
+        public_key=public_key,
+        log=logger,
+    )
 
-    # Record name history if contact has a name
     adv_name = payload.get("adv_name")
-    if adv_name:
-        await ContactNameHistoryRepository.record_name(
-            public_key.lower(), adv_name, int(time.time())
-        )
-        backfilled = await MessageRepository.backfill_channel_sender_key(public_key, adv_name)
-        if backfilled > 0:
-            logger.info(
-                "Backfilled sender_key on %d channel message(s) for %s",
-                backfilled,
-                adv_name,
-            )
+    await record_contact_name_and_reconcile(
+        public_key=public_key,
+        contact_name=adv_name,
+        timestamp=int(time.time()),
+        log=logger,
+    )
 
     # Read back from DB so the broadcast includes all fields (last_contacted,
     # last_read_at, etc.) matching the REST Contact shape exactly.
     db_contact = await ContactRepository.get_by_key(public_key)
-    broadcast_event("contact", (db_contact.model_dump() if db_contact else contact_data))
+    broadcast_event(
+        "contact",
+        (
+            db_contact.model_dump()
+            if db_contact
+            else Contact(**contact_upsert.model_dump(exclude_none=True)).model_dump()
+        ),
+    )
+    if db_contact:
+        for old_key in promoted_keys:
+            broadcast_event(
+                "contact_resolved",
+                {
+                    "previous_public_key": old_key,
+                    "contact": db_contact.model_dump(),
+                },
+            )
 
 
 async def on_ack(event: "Event") -> None:
@@ -305,15 +295,13 @@ async def on_ack(event: "Event") -> None:
 
     cleanup_expired_acks()
 
-    if ack_code in _pending_acks:
-        message_id, _, _ = _pending_acks.pop(ack_code)
+    message_id = dm_ack_tracker.pop_pending_ack(ack_code)
+    if message_id is not None:
         logger.info("ACK received for message %d", message_id)
-
-        ack_count = await MessageRepository.increment_ack_count(message_id)
         # DM ACKs don't carry path data, so paths is intentionally omitted.
         # The frontend's mergePendingAck handles the missing field correctly,
         # preserving any previously known paths.
-        broadcast_event("message_acked", {"message_id": message_id, "ack_count": ack_count})
+        await increment_ack_and_broadcast(message_id=message_id, broadcast_fn=broadcast_event)
     else:
         logger.debug("ACK code %s does not match any pending messages", ack_code)
 

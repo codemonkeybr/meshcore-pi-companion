@@ -40,6 +40,7 @@
     --success-foreground: 0 0% 100%;
     --info: 217 91% 60%;
     --info-foreground: 0 0% 100%;
+    --region-override: 270 80% 74%;
 
     /* Favorites */
     --favorite: 43 96% 56%;

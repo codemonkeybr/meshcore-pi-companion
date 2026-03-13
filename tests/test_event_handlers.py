@@ -239,8 +239,9 @@ class TestContactMessageCLIFiltering:
             assert len(messages) == 1
             assert messages[0].text == "Hello, this is a normal message"
 
-            # SHOULD broadcast via WebSocket
-            mock_broadcast.assert_called_once()
+            # Placeholder contact is broadcast first, then the message
+            assert mock_broadcast.call_count == 2
+            assert mock_broadcast.call_args_list[-1].args[0] == "message"
 
     @pytest.mark.asyncio
     async def test_broadcast_payload_has_correct_acked_type(self, test_db):
@@ -259,9 +260,8 @@ class TestContactMessageCLIFiltering:
 
             await on_contact_message(MockEvent())
 
-            # Verify broadcast was called
-            mock_broadcast.assert_called_once()
-            call_args = mock_broadcast.call_args
+            # Last broadcast is the message; first may be placeholder contact
+            call_args = mock_broadcast.call_args_list[-1]
 
             # First arg is event type, second is payload dict
             event_type, payload = call_args[0]
@@ -305,8 +305,7 @@ class TestContactMessageCLIFiltering:
 
             await on_contact_message(MockEvent())
 
-            mock_broadcast.assert_called_once()
-            event_type, payload = mock_broadcast.call_args[0]
+            event_type, payload = mock_broadcast.call_args_list[-1][0]
             assert event_type == "message"
             assert set(payload.keys()) == EXPECTED_MESSAGE_KEYS
 
@@ -361,6 +360,158 @@ class TestContactMessageCLIFiltering:
             assert len(messages) == 1
 
     @pytest.mark.asyncio
+    async def test_unknown_full_key_dm_creates_placeholder_contact(self, test_db):
+        """Fallback DMs with a full unknown key create a durable placeholder contact."""
+        from app.event_handlers import on_contact_message
+
+        full_key = "ab" * 32
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {
+                    "public_key": full_key,
+                    "text": "hello from unknown full key",
+                    "txt_type": 0,
+                    "sender_timestamp": 1700000000,
+                }
+
+            await on_contact_message(MockEvent())
+
+            contact = await ContactRepository.get_by_key(full_key)
+            assert contact is not None
+            assert contact.public_key == full_key
+            assert contact.name is None
+
+            messages = await MessageRepository.get_all(conversation_key=full_key)
+            assert len(messages) == 1
+
+            assert mock_broadcast.call_args_list[0].args[0] == "contact"
+            assert mock_broadcast.call_args_list[-1].args[0] == "message"
+
+    @pytest.mark.asyncio
+    async def test_new_contact_promotes_prefix_placeholder_and_broadcasts_resolution(self, test_db):
+        """NEW_CONTACT promotes prefix placeholders to the full key and emits contact_resolved."""
+        from app.event_handlers import on_new_contact
+
+        prefix = "abc123def456"
+        full_key = prefix + ("00" * 26)
+        await ContactRepository.upsert(
+            {
+                "public_key": prefix,
+                "type": 0,
+                "last_seen": 1700000000,
+                "last_contacted": 1700000000,
+                "first_seen": 1700000000,
+                "out_path_hash_mode": -1,
+            }
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello",
+            conversation_key=prefix,
+            sender_timestamp=1700000000,
+            received_at=1700000000,
+        )
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {
+                    "public_key": full_key,
+                    "adv_name": "Resolved Sender",
+                    "type": 1,
+                    "flags": 0,
+                    "adv_lat": 0.0,
+                    "adv_lon": 0.0,
+                    "last_advert": 1700000010,
+                    "out_path": "",
+                    "out_path_len": -1,
+                    "out_path_hash_mode": -1,
+                }
+
+            await on_new_contact(MockEvent())
+
+            assert await ContactRepository.get_by_key(prefix) is None
+            resolved = await ContactRepository.get_by_key(full_key)
+            assert resolved is not None
+            assert resolved.name == "Resolved Sender"
+
+            messages = await MessageRepository.get_all(conversation_key=full_key)
+            assert len(messages) == 1
+            assert messages[0].conversation_key == full_key
+
+            event_types = [call.args[0] for call in mock_broadcast.call_args_list]
+            assert "contact" in event_types
+            assert "contact_resolved" in event_types
+
+    @pytest.mark.asyncio
+    async def test_new_contact_keeps_ambiguous_prefix_placeholder_unresolved(self, test_db):
+        """Ambiguous prefix placeholders should not resolve until a unique full-key match exists."""
+        from app.event_handlers import on_new_contact
+
+        prefix = "abc123"
+        full_key = prefix + ("00" * 29)
+        conflicting_full_key = prefix + ("ff" * 29)
+        await ContactRepository.upsert(
+            {
+                "public_key": prefix,
+                "type": 0,
+                "last_seen": 1700000000,
+                "out_path_hash_mode": -1,
+            }
+        )
+        await ContactRepository.upsert(
+            {
+                "public_key": conflicting_full_key,
+                "name": "Conflicting Sender",
+                "type": 1,
+                "flags": 0,
+            }
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello from ambiguous prefix",
+            conversation_key=prefix,
+            sender_timestamp=1700000000,
+            received_at=1700000000,
+        )
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {
+                    "public_key": full_key,
+                    "adv_name": "Resolved Sender",
+                    "type": 1,
+                    "flags": 0,
+                    "adv_lat": 0.0,
+                    "adv_lon": 0.0,
+                    "last_advert": 1700000010,
+                    "out_path": "",
+                    "out_path_len": -1,
+                    "out_path_hash_mode": -1,
+                }
+
+            await on_new_contact(MockEvent())
+
+            placeholder = await ContactRepository.get_by_key(prefix)
+            assert placeholder is not None
+
+            resolved = await ContactRepository.get_by_key(full_key)
+            assert resolved is not None
+            assert resolved.name == "Resolved Sender"
+
+            prefix_messages = await MessageRepository.get_all(conversation_key=prefix)
+            assert len(prefix_messages) == 1
+
+            resolved_messages = await MessageRepository.get_all(conversation_key=full_key)
+            assert resolved_messages == []
+
+            event_types = [call.args[0] for call in mock_broadcast.call_args_list]
+            assert "contact" in event_types
+            assert "contact_resolved" not in event_types
+
+    @pytest.mark.asyncio
     async def test_ambiguous_prefix_stores_dm_under_prefix(self, test_db):
         """Ambiguous sender prefixes should still be stored under the prefix key."""
         from app.event_handlers import on_contact_message
@@ -400,7 +551,9 @@ class TestContactMessageCLIFiltering:
             assert len(messages) == 1
             assert messages[0].conversation_key == "abc123"
 
-            mock_broadcast.assert_called_once()
+            assert mock_broadcast.call_count == 2
+            assert mock_broadcast.call_args_list[0].args[0] == "contact"
+            assert mock_broadcast.call_args_list[-1].args[0] == "message"
             _, payload = mock_broadcast.call_args.args
             assert payload["conversation_key"] == "abc123"
 
@@ -762,7 +915,7 @@ class TestOnNewContact:
             contact = await ContactRepository.get_by_key("cc" * 32)
             assert contact is not None
             assert contact.name == "Charlie"
-            assert contact.on_radio is True
+            assert contact.on_radio is False
             assert contact.last_seen == 1700000000
 
             mock_broadcast.assert_called_once()

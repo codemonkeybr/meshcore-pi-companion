@@ -80,6 +80,28 @@ export function formatAdvertInterval(val: string | null): string {
   return `${trimmed}h`;
 }
 
+function formatFetchedRelative(fetchedAt: number): string {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - fetchedAt) / 1000));
+
+  if (elapsedSeconds < 60) return 'Just now';
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes} minute${elapsedMinutes === 1 ? '' : 's'} ago`;
+  }
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  return `${elapsedHours} hour${elapsedHours === 1 ? '' : 's'} ago`;
+}
+
+function formatFetchedTime(fetchedAt: number): string {
+  return new Date(fetchedAt).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 // --- Generic Pane Wrapper ---
 
 export function RepeaterPane({
@@ -99,10 +121,22 @@ export function RepeaterPane({
   className?: string;
   contentClassName?: string;
 }) {
+  const fetchedAt = state.fetched_at ?? null;
+
   return (
     <div className={cn('border border-border rounded-lg overflow-hidden', className)}>
       <div className="flex items-center justify-between px-3 py-2 bg-muted/50 border-b border-border">
-        <h3 className="text-sm font-medium">{title}</h3>
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium">{title}</h3>
+          {fetchedAt && (
+            <p
+              className="text-[11px] text-muted-foreground"
+              title={new Date(fetchedAt).toLocaleString()}
+            >
+              Fetched {formatFetchedTime(fetchedAt)} ({formatFetchedRelative(fetchedAt)})
+            </p>
+          )}
+        </div>
         {onRefresh && (
           <button
             type="button"

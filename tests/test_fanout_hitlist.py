@@ -36,6 +36,7 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["is_outgoing"] = is_outgoing
             captured["is_dm"] = is_dm
@@ -84,6 +85,7 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["is_outgoing"] = is_outgoing
             return None
@@ -129,8 +131,10 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["path"] = path
+            captured["path_bytes_per_hop"] = path_bytes_per_hop
             return None
 
         mod = BotModule("test", {"code": "def bot(**k): pass"}, name="Test")
@@ -150,11 +154,12 @@ class TestBotModuleParameterExtraction:
                     "type": "PRIV",
                     "conversation_key": "pk1",
                     "text": "hello",
-                    "paths": [{"path": "aabb", "rssi": -50}],
+                    "paths": [{"path": "aabbccdd", "path_len": 2, "rssi": -50}],
                 }
             )
 
-        assert captured["path"] == "aabb"
+        assert captured["path"] == "aabbccdd"
+        assert captured["path_bytes_per_hop"] == 2
 
     @pytest.mark.asyncio
     async def test_channel_sender_prefix_stripped(self):
@@ -174,6 +179,7 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["message_text"] = message_text
             captured["sender_name"] = sender_name
@@ -221,6 +227,7 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["channel_name"] = channel_name
             return None
@@ -267,6 +274,7 @@ class TestBotModuleParameterExtraction:
             sender_timestamp,
             path,
             is_outgoing,
+            path_bytes_per_hop,
         ):
             captured["sender_name"] = sender_name
             captured["sender_key"] = sender_key

@@ -25,13 +25,13 @@ export function ThemeSelector() {
   };
 
   return (
-    <fieldset className="flex flex-wrap gap-2">
+    <fieldset className="flex flex-wrap gap-2 md:grid md:grid-cols-4">
       <legend className="sr-only">Color theme</legend>
       {THEMES.map((theme) => (
         <label
           key={theme.id}
           className={
-            'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer border transition-colors focus-within:ring-2 focus-within:ring-ring ' +
+            'flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer border transition-colors focus-within:ring-2 focus-within:ring-ring md:w-full ' +
             (current === theme.id
               ? 'border-primary bg-primary/5'
               : 'border-transparent hover:bg-accent/50')

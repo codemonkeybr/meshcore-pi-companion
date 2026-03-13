@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bell,
+  CheckCheck,
+  ChevronDown,
+  ChevronRight,
+  LockOpen,
+  Logs,
+  Map,
+  Search as SearchIcon,
+  SquarePen,
+  Waypoints,
+  X,
+} from 'lucide-react';
+import {
   CONTACT_TYPE_REPEATER,
   type Contact,
   type Channel,
@@ -24,6 +37,7 @@ type ConversationRow = {
   name: string;
   unreadCount: number;
   isMention: boolean;
+  notificationsEnabled: boolean;
   contact?: Contact;
 };
 
@@ -81,6 +95,7 @@ interface SidebarProps {
   sortOrder?: SortOrder;
   /** Callback when sort order changes */
   onSortOrderChange?: (order: SortOrder) => void;
+  isConversationNotificationsEnabled?: (type: 'channel' | 'contact', id: string) => boolean;
 }
 
 export function Sidebar({
@@ -99,6 +114,7 @@ export function Sidebar({
   favorites,
   sortOrder: sortOrderProp = 'recent',
   onSortOrderChange,
+  isConversationNotificationsEnabled,
 }: SidebarProps) {
   const sortOrder = sortOrderProp;
   const [searchQuery, setSearchQuery] = useState('');
@@ -393,15 +409,18 @@ export function Sidebar({
     name: channel.name,
     unreadCount: getUnreadCount('channel', channel.key),
     isMention: hasMention('channel', channel.key),
+    notificationsEnabled: isConversationNotificationsEnabled?.('channel', channel.key) ?? false,
   });
 
   const buildContactRow = (contact: Contact, keyPrefix: string): ConversationRow => ({
     key: `${keyPrefix}-${contact.public_key}`,
     type: 'contact',
     id: contact.public_key,
-    name: getContactDisplayName(contact.name, contact.public_key),
+    name: getContactDisplayName(contact.name, contact.public_key, contact.last_advert),
     unreadCount: getUnreadCount('contact', contact.public_key),
     isMention: hasMention('contact', contact.public_key),
+    notificationsEnabled:
+      isConversationNotificationsEnabled?.('contact', contact.public_key) ?? false,
     contact,
   });
 
@@ -434,19 +453,26 @@ export function Sidebar({
         />
       )}
       <span className="name flex-1 truncate text-[13px]">{row.name}</span>
-      {row.unreadCount > 0 && (
-        <span
-          className={cn(
-            'text-[10px] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center',
-            row.isMention
-              ? 'bg-badge-mention text-badge-mention-foreground'
-              : 'bg-badge-unread/90 text-badge-unread-foreground'
-          )}
-          aria-label={`${row.unreadCount} unread message${row.unreadCount !== 1 ? 's' : ''}`}
-        >
-          {row.unreadCount}
-        </span>
-      )}
+      <span className="ml-auto flex items-center gap-1">
+        {row.notificationsEnabled && (
+          <span aria-label="Notifications enabled" title="Notifications enabled">
+            <Bell className="h-3.5 w-3.5 text-muted-foreground" />
+          </span>
+        )}
+        {row.unreadCount > 0 && (
+          <span
+            className={cn(
+              'text-[10px] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center',
+              row.isMention
+                ? 'bg-badge-mention text-badge-mention-foreground'
+                : 'bg-badge-unread/90 text-badge-unread-foreground'
+            )}
+            aria-label={`${row.unreadCount} unread message${row.unreadCount !== 1 ? 's' : ''}`}
+          >
+            {row.unreadCount}
+          </span>
+        )}
+      </span>
     </div>
   );
 
@@ -459,7 +485,7 @@ export function Sidebar({
   }: {
     key: string;
     active?: boolean;
-    icon: string;
+    icon: React.ReactNode;
     label: React.ReactNode;
     onClick: () => void;
   }) => (
@@ -475,10 +501,10 @@ export function Sidebar({
       onKeyDown={handleKeyboardActivate}
       onClick={onClick}
     >
-      <span className="text-muted-foreground text-xs" aria-hidden="true">
+      <span className="sidebar-tool-icon text-muted-foreground" aria-hidden="true">
         {icon}
       </span>
-      <span className="flex-1 truncate text-muted-foreground">{label}</span>
+      <span className="sidebar-tool-label flex-1 truncate text-muted-foreground">{label}</span>
     </div>
   );
 
@@ -507,7 +533,7 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-raw',
           active: isActive('raw', 'raw'),
-          icon: '📡',
+          icon: <Logs className="h-4 w-4" />,
           label: 'Packet Feed',
           onClick: () =>
             handleSelectConversation({
@@ -519,7 +545,7 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-map',
           active: isActive('map', 'map'),
-          icon: '🗺️',
+          icon: <Map className="h-4 w-4" />,
           label: 'Node Map',
           onClick: () =>
             handleSelectConversation({
@@ -531,7 +557,7 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-visualizer',
           active: isActive('visualizer', 'visualizer'),
-          icon: '✨',
+          icon: <Waypoints className="h-4 w-4" />,
           label: 'Mesh Visualizer',
           onClick: () =>
             handleSelectConversation({
@@ -543,7 +569,7 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-search',
           active: isActive('search', 'search'),
-          icon: '🔍',
+          icon: <SearchIcon className="h-4 w-4" />,
           label: 'Message Search',
           onClick: () =>
             handleSelectConversation({
@@ -555,7 +581,7 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-cracker',
           active: showCracker,
-          icon: '🔓',
+          icon: <LockOpen className="h-4 w-4" />,
           label: (
             <>
               {showCracker ? 'Hide' : 'Show'} Room Finder
@@ -597,9 +623,11 @@ export function Sidebar({
           }}
           title={effectiveCollapsed ? `Expand ${title}` : `Collapse ${title}`}
         >
-          <span className="text-[9px]" aria-hidden="true">
-            {effectiveCollapsed ? '▸' : '▾'}
-          </span>
+          {effectiveCollapsed ? (
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
           <span>{title}</span>
         </button>
         {(showSortToggle || unreadCount > 0) && (
@@ -639,42 +667,37 @@ export function Sidebar({
       aria-label="Conversations"
     >
       {/* Header */}
-      <div className="flex justify-between items-center px-3 py-2.5 border-b border-border">
-        <h2 className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-          Conversations
-        </h2>
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+        <div className="relative min-w-0 flex-1">
+          <Input
+            type="text"
+            placeholder="Search rooms/contacts..."
+            aria-label="Search conversations"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className={cn('h-7 text-[13px] bg-background/50', searchQuery ? 'pr-8' : 'pr-3')}
+          />
+          {searchQuery && (
+            <button
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+              onClick={() => setSearchQuery('')}
+              title="Clear search"
+              aria-label="Clear search"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
         <Button
           variant="ghost"
           size="sm"
           onClick={onNewMessage}
           title="New Message"
           aria-label="New message"
-          className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground transition-colors"
+          className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground transition-colors"
         >
-          +
+          <SquarePen className="h-4 w-4" />
         </Button>
-      </div>
-
-      {/* Search */}
-      <div className="relative px-3 py-2">
-        <Input
-          type="text"
-          placeholder="Search..."
-          aria-label="Search conversations"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="h-7 text-[13px] pr-8 bg-background/50"
-        />
-        {searchQuery && (
-          <button
-            className="absolute right-4 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
-            onClick={() => setSearchQuery('')}
-            title="Clear search"
-            aria-label="Clear search"
-          >
-            ×
-          </button>
-        )}
       </div>
 
       {/* List */}
@@ -696,9 +719,7 @@ export function Sidebar({
             onKeyDown={handleKeyboardActivate}
             onClick={onMarkAllRead}
           >
-            <span className="text-muted-foreground text-xs" aria-hidden="true">
-              ✓
-            </span>
+            <CheckCheck className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             <span className="flex-1 truncate text-muted-foreground">Mark all as read</span>
           </div>
         )}

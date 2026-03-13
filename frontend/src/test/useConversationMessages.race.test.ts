@@ -101,6 +101,40 @@ describe('useConversationMessages ACK ordering', () => {
     expect(result.current.messages[0].paths).toEqual(paths);
   });
 
+  it('preserves a WebSocket-arrived message when latest fetch resolves afterward', async () => {
+    const deferred = createDeferred<Message[]>();
+    mockGetMessages.mockReturnValueOnce(deferred.promise);
+
+    const { result } = renderHook(() => useConversationMessages(createConversation()));
+    await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      const added = result.current.addMessageIfNew(
+        createMessage({
+          id: 99,
+          text: 'ws-arrived',
+          sender_timestamp: 1700000099,
+          received_at: 1700000099,
+        })
+      );
+      expect(added).toBe(true);
+    });
+
+    deferred.resolve([
+      createMessage({
+        id: 42,
+        text: 'rest-fetched',
+        sender_timestamp: 1700000000,
+        received_at: 1700000001,
+      }),
+    ]);
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages.some((msg) => msg.text === 'rest-fetched')).toBe(true);
+    expect(result.current.messages.some((msg) => msg.text === 'ws-arrived')).toBe(true);
+  });
+
   it('keeps highest ACK state when out-of-order ACK updates arrive', async () => {
     mockGetMessages.mockResolvedValueOnce([]);
 
@@ -221,6 +255,167 @@ describe('useConversationMessages conversation switch', () => {
     await waitFor(() => expect(result.current.messagesLoading).toBe(false));
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.messages[0].conversation_key).toBe('conv_b');
+  });
+});
+
+describe('useConversationMessages background reconcile ordering', () => {
+  beforeEach(() => {
+    mockGetMessages.mockReset();
+    messageCache.clear();
+  });
+
+  it('ignores stale reconnect reconcile responses that finish after newer ones', async () => {
+    const conv = createConversation();
+    mockGetMessages.mockResolvedValueOnce([
+      createMessage({ id: 42, text: 'initial snapshot', acked: 0 }),
+    ]);
+
+    const { result } = renderHook(() => useConversationMessages(conv));
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages[0].text).toBe('initial snapshot');
+
+    const firstReconcile = createDeferred<Message[]>();
+    const secondReconcile = createDeferred<Message[]>();
+    mockGetMessages
+      .mockReturnValueOnce(firstReconcile.promise)
+      .mockReturnValueOnce(secondReconcile.promise);
+
+    act(() => {
+      result.current.triggerReconcile();
+      result.current.triggerReconcile();
+    });
+
+    secondReconcile.resolve([createMessage({ id: 42, text: 'newer snapshot', acked: 2 })]);
+    await waitFor(() => expect(result.current.messages[0].text).toBe('newer snapshot'));
+    expect(result.current.messages[0].acked).toBe(2);
+
+    firstReconcile.resolve([createMessage({ id: 42, text: 'stale snapshot', acked: 1 })]);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(result.current.messages[0].text).toBe('newer snapshot');
+    expect(result.current.messages[0].acked).toBe(2);
+  });
+
+  it('clears stale hasOlderMessages when cached conversations reconcile to a short latest page', async () => {
+    const conv = createConversation();
+    const cachedMessage = createMessage({ id: 42, text: 'cached snapshot' });
+
+    messageCache.set(conv.id, {
+      messages: [cachedMessage],
+      seenContent: new Set([
+        `PRIV-${cachedMessage.conversation_key}-${cachedMessage.text}-${cachedMessage.sender_timestamp}`,
+      ]),
+      hasOlderMessages: true,
+    });
+
+    mockGetMessages.mockResolvedValueOnce([cachedMessage]);
+
+    const { result } = renderHook(() => useConversationMessages(conv));
+
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.hasOlderMessages).toBe(true);
+
+    await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.hasOlderMessages).toBe(false));
+  });
+});
+
+describe('useConversationMessages older-page dedup and reentry', () => {
+  beforeEach(() => {
+    mockGetMessages.mockReset();
+    messageCache.clear();
+  });
+
+  it('prevents duplicate overlapping older-page fetches in the same tick', async () => {
+    const conv: Conversation = { type: 'contact', id: 'conv_a', name: 'Contact A' };
+
+    const fullPage = Array.from({ length: 200 }, (_, i) =>
+      createMessage({
+        id: i + 1,
+        conversation_key: 'conv_a',
+        text: `msg-${i + 1}`,
+        sender_timestamp: 1700000000 + i,
+        received_at: 1700000000 + i,
+      })
+    );
+    mockGetMessages.mockResolvedValueOnce(fullPage);
+
+    const olderDeferred = createDeferred<Message[]>();
+    mockGetMessages.mockReturnValueOnce(olderDeferred.promise);
+
+    const { result } = renderHook(() => useConversationMessages(conv));
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages).toHaveLength(200);
+    expect(result.current.hasOlderMessages).toBe(true);
+
+    act(() => {
+      void result.current.fetchOlderMessages();
+      void result.current.fetchOlderMessages();
+    });
+
+    expect(mockGetMessages).toHaveBeenCalledTimes(2); // initial page + one older fetch
+
+    olderDeferred.resolve([
+      createMessage({
+        id: 0,
+        conversation_key: 'conv_a',
+        text: 'older-msg',
+        sender_timestamp: 1699999999,
+        received_at: 1699999999,
+      }),
+    ]);
+
+    await waitFor(() => expect(result.current.loadingOlder).toBe(false));
+    expect(result.current.messages).toHaveLength(201);
+    expect(result.current.messages.filter((msg) => msg.id === 0)).toHaveLength(1);
+  });
+
+  it('does not append duplicate messages from an overlapping older page', async () => {
+    const conv: Conversation = { type: 'contact', id: 'conv_a', name: 'Contact A' };
+
+    const fullPage = Array.from({ length: 200 }, (_, i) =>
+      createMessage({
+        id: i + 1,
+        conversation_key: 'conv_a',
+        text: `msg-${i + 1}`,
+        sender_timestamp: 1700000000 + i,
+        received_at: 1700000000 + i,
+      })
+    );
+    mockGetMessages.mockResolvedValueOnce(fullPage);
+    mockGetMessages.mockResolvedValueOnce([
+      createMessage({
+        id: 1,
+        conversation_key: 'conv_a',
+        text: 'msg-1',
+        sender_timestamp: 1700000000,
+        received_at: 1700000000,
+      }),
+      createMessage({
+        id: 0,
+        conversation_key: 'conv_a',
+        text: 'older-msg',
+        sender_timestamp: 1699999999,
+        received_at: 1699999999,
+      }),
+    ]);
+
+    const { result } = renderHook(() => useConversationMessages(conv));
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages).toHaveLength(200);
+
+    await act(async () => {
+      await result.current.fetchOlderMessages();
+    });
+
+    expect(result.current.messages.filter((msg) => msg.id === 1)).toHaveLength(1);
+    expect(result.current.messages.filter((msg) => msg.id === 0)).toHaveLength(1);
+    expect(result.current.messages).toHaveLength(201);
   });
 });
 
@@ -391,5 +586,66 @@ describe('useConversationMessages forward pagination', () => {
     expect(result.current.hasNewerMessages).toBe(false);
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.messages[0].text).toBe('latest-msg');
+  });
+
+  it('preserves around-loaded messages when the jump target is cleared in the same conversation', async () => {
+    const conv: Conversation = { type: 'channel', id: 'ch1', name: 'Channel' };
+
+    const aroundMessages = [
+      createMessage({
+        id: 4,
+        conversation_key: 'ch1',
+        text: 'older-context',
+        sender_timestamp: 1700000004,
+        received_at: 1700000004,
+      }),
+      createMessage({
+        id: 5,
+        conversation_key: 'ch1',
+        text: 'target-message',
+        sender_timestamp: 1700000005,
+        received_at: 1700000005,
+      }),
+      createMessage({
+        id: 6,
+        conversation_key: 'ch1',
+        text: 'newer-context',
+        sender_timestamp: 1700000006,
+        received_at: 1700000006,
+      }),
+    ];
+
+    mockGetMessagesAround.mockResolvedValueOnce({
+      messages: aroundMessages,
+      has_older: true,
+      has_newer: true,
+    });
+
+    const { result, rerender } = renderHook<
+      ReturnType<typeof useConversationMessages>,
+      { conv: Conversation; target: number | null }
+    >(({ conv, target }) => useConversationMessages(conv, target), {
+      initialProps: { conv, target: 5 },
+    });
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages.map((message) => message.text)).toEqual([
+      'older-context',
+      'target-message',
+      'newer-context',
+    ]);
+    expect(mockGetMessages).not.toHaveBeenCalled();
+
+    rerender({ conv, target: null });
+
+    await waitFor(() =>
+      expect(result.current.messages.map((message) => message.text)).toEqual([
+        'older-context',
+        'target-message',
+        'newer-context',
+      ])
+    );
+    expect(mockGetMessages).not.toHaveBeenCalled();
+    expect(result.current.hasNewerMessages).toBe(true);
   });
 });

@@ -18,6 +18,7 @@ const TYPE_LABELS: Record<string, string> = {
   bot: 'Bot',
   webhook: 'Webhook',
   apprise: 'Apprise',
+  sqs: 'Amazon SQS',
 };
 
 const TYPE_OPTIONS = [
@@ -26,6 +27,7 @@ const TYPE_OPTIONS = [
   { value: 'bot', label: 'Bot' },
   { value: 'webhook', label: 'Webhook' },
   { value: 'apprise', label: 'Apprise' },
+  { value: 'sqs', label: 'Amazon SQS' },
 ];
 
 const DEFAULT_COMMUNITY_PACKET_TOPIC_TEMPLATE = 'meshcore/{IATA}/{PUBLIC_KEY}/packets';
@@ -60,41 +62,45 @@ function formatAppriseTargets(urls: string | undefined, maxLength = 80) {
   return `${joined.slice(0, maxLength - 3)}...`;
 }
 
+function formatSqsQueueSummary(config: Record<string, unknown>) {
+  const queueUrl = ((config.queue_url as string) || '').trim();
+  if (!queueUrl) return 'No queue configured';
+  return queueUrl;
+}
+
 function getDefaultIntegrationName(type: string, configs: FanoutConfig[]) {
   const label = TYPE_LABELS[type] || type;
   const nextIndex = configs.filter((cfg) => cfg.type === type).length + 1;
   return `${label} #${nextIndex}`;
 }
 
-const DEFAULT_BOT_CODE = `def bot(
-    sender_name: str | None,
-    sender_key: str | None,
-    message_text: str,
-    is_dm: bool,
-    channel_key: str | None,
-    channel_name: str | None,
-    sender_timestamp: int | None,
-    path: str | None,
-    is_outgoing: bool = False,
-) -> str | list[str] | None:
+const DEFAULT_BOT_CODE = `def bot(**kwargs) -> str | list[str] | None:
     """
     Process messages and optionally return a reply.
 
     Args:
-        sender_name: Display name of sender (may be None)
-        sender_key: 64-char hex public key (None for channel msgs)
-        message_text: The message content
-        is_dm: True for direct messages, False for channel
-        channel_key: 32-char hex key for channels, None for DMs
-        channel_name: Channel name with hash (e.g. "#bot"), None for DMs
-        sender_timestamp: Sender's timestamp (unix seconds, may be None)
-        path: Hex-encoded routing path (may be None)
-        is_outgoing: True if this is our own outgoing message
+        kwargs keys currently provided:
+            sender_name: Display name of sender (may be None)
+            sender_key: 64-char hex public key (None for channel msgs)
+            message_text: The message content
+            is_dm: True for direct messages, False for channel
+            channel_key: 32-char hex key for channels, None for DMs
+            channel_name: Channel name with hash (e.g. "#bot"), None for DMs
+            sender_timestamp: Sender's timestamp (unix seconds, may be None)
+            path: Hex-encoded routing path (may be None)
+            is_outgoing: True if this is our own outgoing message
+            path_bytes_per_hop: Bytes per hop in path (1, 2, or 3) when known
 
     Returns:
         None for no reply, a string for a single reply,
         or a list of strings to send multiple messages in order
     """
+    sender_name = kwargs.get("sender_name")
+    message_text = kwargs.get("message_text", "")
+    channel_name = kwargs.get("channel_name")
+    is_outgoing = kwargs.get("is_outgoing", False)
+    path_bytes_per_hop = kwargs.get("path_bytes_per_hop")
+
     # Don't reply to our own outgoing messages
     if is_outgoing:
         return None
@@ -998,6 +1004,111 @@ function WebhookConfigEditor({
   );
 }
 
+function SqsConfigEditor({
+  config,
+  scope,
+  onChange,
+  onScopeChange,
+}: {
+  config: Record<string, unknown>;
+  scope: Record<string, unknown>;
+  onChange: (config: Record<string, unknown>) => void;
+  onScopeChange: (scope: Record<string, unknown>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Send matched mesh events to an Amazon SQS queue for durable processing by workers, Lambdas,
+        or downstream automation.
+      </p>
+
+      <div className="rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-warning">
+        Outgoing messages and any selected raw packets will be delivered exactly as forwarded by the
+        fanout scope, including decrypted/plaintext message content.
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="fanout-sqs-queue-url">Queue URL</Label>
+        <Input
+          id="fanout-sqs-queue-url"
+          type="url"
+          placeholder="https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events"
+          value={(config.queue_url as string) || ''}
+          onChange={(e) => onChange({ ...config, queue_url: e.target.value })}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="fanout-sqs-region">Region (optional)</Label>
+          <Input
+            id="fanout-sqs-region"
+            type="text"
+            placeholder="us-east-1"
+            value={(config.region_name as string) || ''}
+            onChange={(e) => onChange({ ...config, region_name: e.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="fanout-sqs-endpoint">Endpoint URL (optional)</Label>
+          <Input
+            id="fanout-sqs-endpoint"
+            type="url"
+            placeholder="http://localhost:4566"
+            value={(config.endpoint_url as string) || ''}
+            onChange={(e) => onChange({ ...config, endpoint_url: e.target.value })}
+          />
+          <p className="text-xs text-muted-foreground">Useful for LocalStack or custom endpoints</p>
+        </div>
+      </div>
+
+      <Separator />
+
+      <div className="space-y-2">
+        <Label>Static Credentials (optional)</Label>
+        <p className="text-xs text-muted-foreground">
+          Leave blank to use the server&apos;s normal AWS credential chain.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="fanout-sqs-access-key">Access Key ID</Label>
+          <Input
+            id="fanout-sqs-access-key"
+            type="text"
+            value={(config.access_key_id as string) || ''}
+            onChange={(e) => onChange({ ...config, access_key_id: e.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="fanout-sqs-secret-key">Secret Access Key</Label>
+          <Input
+            id="fanout-sqs-secret-key"
+            type="password"
+            value={(config.secret_access_key as string) || ''}
+            onChange={(e) => onChange({ ...config, secret_access_key: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="fanout-sqs-session-token">Session Token (optional)</Label>
+        <Input
+          id="fanout-sqs-session-token"
+          type="password"
+          value={(config.session_token as string) || ''}
+          onChange={(e) => onChange({ ...config, session_token: e.target.value })}
+        />
+      </div>
+
+      <Separator />
+
+      <ScopeSelector scope={scope} onChange={onScopeChange} showRawPackets />
+    </div>
+  );
+}
+
 export function SettingsFanoutSection({
   health,
   onHealthRefresh,
@@ -1208,6 +1319,14 @@ export function SettingsFanoutSection({
         preserve_identity: true,
         include_path: true,
       },
+      sqs: {
+        queue_url: '',
+        region_name: '',
+        endpoint_url: '',
+        access_key_id: '',
+        secret_access_key: '',
+        session_token: '',
+      },
     };
     const defaultScopes: Record<string, Record<string, unknown>> = {
       mqtt_private: { messages: 'all', raw_packets: 'all' },
@@ -1215,6 +1334,7 @@ export function SettingsFanoutSection({
       bot: { messages: 'all', raw_packets: 'none' },
       webhook: { messages: 'all', raw_packets: 'none' },
       apprise: { messages: 'all', raw_packets: 'none' },
+      sqs: { messages: 'all', raw_packets: 'none' },
     };
     setAddMenuOpen(false);
     setEditingId(null);
@@ -1296,6 +1416,15 @@ export function SettingsFanoutSection({
           />
         )}
 
+        {detailType === 'sqs' && (
+          <SqsConfigEditor
+            config={editConfig}
+            scope={editScope}
+            onChange={setEditConfig}
+            onScopeChange={setEditScope}
+          />
+        )}
+
         <Separator />
 
         <div className="flex gap-2">
@@ -1328,7 +1457,8 @@ export function SettingsFanoutSection({
   return (
     <div className={cn('mx-auto w-full max-w-[800px] space-y-4', className)}>
       <div className="rounded-md border border-warning/50 bg-warning/10 px-4 py-3 text-sm text-warning">
-        Integrations are an experimental feature in open beta.
+        Integrations are an experimental feature in open beta, and allow you to fanout raw and
+        decrypted messages across multiple services for automation, analysis, or archiving.
       </div>
 
       {health?.bots_disabled && (
@@ -1516,6 +1646,17 @@ export function SettingsFanoutSection({
                               {formatAppriseTargets(
                                 (cfg.config as Record<string, unknown>).urls as string | undefined
                               )}
+                            </code>
+                          </div>
+                        </div>
+                      )}
+
+                      {cfg.type === 'sqs' && (
+                        <div className="space-y-1 border-t border-input px-3 py-2 text-xs text-muted-foreground">
+                          <div className="break-all">
+                            Queue:{' '}
+                            <code>
+                              {formatSqsQueueSummary(cfg.config as Record<string, unknown>)}
                             </code>
                           </div>
                         </div>

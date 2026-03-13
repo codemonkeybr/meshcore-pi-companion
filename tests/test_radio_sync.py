@@ -16,8 +16,11 @@ from app.radio_sync import (
     _message_poll_loop,
     _periodic_advert_loop,
     _periodic_sync_loop,
+    audit_channel_send_cache,
+    ensure_contact_on_radio,
     is_polling_paused,
     pause_polling,
+    sync_and_offload_all,
     sync_radio_time,
     sync_recent_contacts_to_radio,
 )
@@ -34,16 +37,26 @@ def reset_sync_state():
     """Reset polling pause state, sync timestamp, and radio_manager before/after each test."""
     import app.radio_sync as radio_sync
 
-    prev_mc = radio_manager._backend
+    prev_mc = radio_manager._meshcore
     prev_lock = radio_manager._operation_lock
+    prev_max_channels = radio_manager.max_channels
+    prev_connection_info = radio_manager._connection_info
+    prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
+    prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
+    prev_pending_channel_key_by_slot = radio_manager._pending_message_channel_key_by_slot.copy()
 
     radio_sync._polling_pause_count = 0
     radio_sync._last_contact_sync = 0.0
     yield
     radio_sync._polling_pause_count = 0
     radio_sync._last_contact_sync = 0.0
-    radio_manager._backend = prev_mc
+    radio_manager._meshcore = prev_mc
     radio_manager._operation_lock = prev_lock
+    radio_manager.max_channels = prev_max_channels
+    radio_manager._connection_info = prev_connection_info
+    radio_manager._channel_slot_by_key = prev_slot_by_key
+    radio_manager._channel_key_by_slot = prev_key_by_slot
+    radio_manager._pending_message_channel_key_by_slot = prev_pending_channel_key_by_slot
 
 
 KEY_A = "aa" * 32
@@ -153,14 +166,14 @@ class TestSyncRadioTime:
     async def test_returns_true_on_success(self):
         """sync_radio_time returns True when time is set successfully."""
         mock_mc = MagicMock()
-        mock_mc.set_time = AsyncMock()
+        mock_mc.commands.set_time = AsyncMock()
 
         result = await sync_radio_time(mock_mc)
 
         assert result is True
-        mock_mc.set_time.assert_called_once()
+        mock_mc.commands.set_time.assert_called_once()
         # Verify timestamp is reasonable (within last few seconds)
-        call_args = mock_mc.set_time.call_args[0][0]
+        call_args = mock_mc.commands.set_time.call_args[0][0]
         import time
 
         assert abs(call_args - int(time.time())) < 5
@@ -169,7 +182,7 @@ class TestSyncRadioTime:
     async def test_returns_false_on_exception(self):
         """sync_radio_time returns False and doesn't raise on error."""
         mock_mc = MagicMock()
-        mock_mc.set_time = AsyncMock(side_effect=Exception("Radio error"))
+        mock_mc.commands.set_time = AsyncMock(side_effect=Exception("Radio error"))
 
         result = await sync_radio_time(mock_mc)
 
@@ -180,93 +193,182 @@ class TestSyncRecentContactsToRadio:
     """Test the sync_recent_contacts_to_radio function."""
 
     @pytest.mark.asyncio
-    async def test_loads_contacts_not_on_radio(self, test_db):
-        """Contacts not on radio are added via add_contact."""
+    async def test_loads_favorite_contacts_not_on_radio(self, test_db):
+        """Favorite contacts not on radio are added via add_contact."""
         await _insert_contact(KEY_A, "Alice", last_contacted=2000)
         await _insert_contact(KEY_B, "Bob", last_contacted=1000)
+        await AppSettingsRepository.update(
+            favorites=[
+                Favorite(type="contact", id=KEY_A),
+                Favorite(type="contact", id=KEY_B),
+            ]
+        )
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 2
-        # Verify contacts are now marked as on_radio in DB
-        alice = await ContactRepository.get_by_key(KEY_A)
-        bob = await ContactRepository.get_by_key(KEY_B)
-        assert alice.on_radio is True
-        assert bob.on_radio is True
 
     @pytest.mark.asyncio
-    async def test_favorites_loaded_before_recent_contacts(self, test_db):
-        """Favorite contacts are loaded first, then recents until limit."""
+    async def test_fills_remaining_slots_with_recently_contacted_then_advertised(self, test_db):
+        """Fill order is favorites, then recent contacts, then recent adverts."""
         await _insert_contact(KEY_A, "Alice", last_contacted=100)
         await _insert_contact(KEY_B, "Bob", last_contacted=2000)
         await _insert_contact("cc" * 32, "Carol", last_contacted=1000)
+        await _insert_contact("dd" * 32, "Dave", last_advert=3000)
+        await _insert_contact("ee" * 32, "Eve", last_advert=2500)
 
-        # Set max_radio_contacts=2 and add KEY_A as favorite
         await AppSettingsRepository.update(
-            max_radio_contacts=2,
-            favorites=[Favorite(type="contact", id=KEY_A)],
+            max_radio_contacts=5, favorites=[Favorite(type="contact", id=KEY_A)]
         )
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
-        assert result["loaded"] == 2
-        # KEY_A (favorite) should be loaded first, then KEY_B (most recent)
-        loaded_keys = [call.args[0]["public_key"] for call in mock_mc.add_contact.call_args_list]
-        assert loaded_keys == [KEY_A, KEY_B]
+        assert result["loaded"] == 4
+        loaded_keys = [
+            call.args[0]["public_key"] for call in mock_mc.commands.add_contact.call_args_list
+        ]
+        assert loaded_keys == [KEY_A, KEY_B, "cc" * 32, "dd" * 32]
 
     @pytest.mark.asyncio
-    async def test_favorite_contact_not_loaded_twice_if_also_recent(self, test_db):
-        """A favorite contact that is also recent is loaded only once."""
+    async def test_favorites_can_exceed_non_favorite_refill_target(self, test_db):
+        """Favorites are reloaded even when they exceed the 80% background refill target."""
+        favorite_keys = ["aa" * 32, "bb" * 32, "cc" * 32, "dd" * 32]
+        for index, key in enumerate(favorite_keys):
+            await _insert_contact(key, f"Favorite{index}", last_contacted=2000 - index)
+
+        await AppSettingsRepository.update(
+            max_radio_contacts=4,
+            favorites=[Favorite(type="contact", id=key) for key in favorite_keys],
+        )
+
+        mock_mc = MagicMock()
+        mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
+        mock_result = MagicMock()
+        mock_result.type = EventType.OK
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+
+        radio_manager._meshcore = mock_mc
+        result = await sync_recent_contacts_to_radio()
+
+        assert result["loaded"] == 4
+        loaded_keys = [
+            call.args[0]["public_key"] for call in mock_mc.commands.add_contact.call_args_list
+        ]
+        assert loaded_keys == favorite_keys
+
+
+class TestSyncAndOffloadAll:
+    """Test session-local contact radio residency reset behavior."""
+
+    @pytest.mark.asyncio
+    async def test_clears_stale_contact_on_radio_flags_before_reload(self, test_db):
+        await _insert_contact(KEY_A, "Alice", on_radio=True)
+        await _insert_contact(KEY_B, "Bob", on_radio=True)
+
+        mock_mc = MagicMock()
+
+        with (
+            patch(
+                "app.radio_sync.sync_and_offload_contacts",
+                new=AsyncMock(return_value={"synced": 0, "removed": 0}),
+            ),
+            patch(
+                "app.radio_sync.sync_and_offload_channels",
+                new=AsyncMock(return_value={"synced": 0, "cleared": 0}),
+            ),
+            patch("app.radio_sync.ensure_default_channels", new=AsyncMock()),
+            patch(
+                "app.radio_sync.sync_recent_contacts_to_radio",
+                new=AsyncMock(return_value={"loaded": 0, "already_on_radio": 0, "failed": 0}),
+            ),
+        ):
+            await sync_and_offload_all(mock_mc)
+
+        alice = await ContactRepository.get_by_key(KEY_A)
+        bob = await ContactRepository.get_by_key(KEY_B)
+        assert alice is not None and alice.on_radio is False
+        assert bob is not None and bob.on_radio is False
+
+    @pytest.mark.asyncio
+    async def test_advert_fill_skips_repeaters(self, test_db):
+        """Recent advert fallback only considers non-repeaters."""
+        await _insert_contact(KEY_A, "Alice", last_advert=3000, contact_type=2)
+        await _insert_contact(KEY_B, "Bob", last_advert=2000, contact_type=1)
+
+        await AppSettingsRepository.update(max_radio_contacts=1, favorites=[])
+
+        mock_mc = MagicMock()
+        mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
+        mock_result = MagicMock()
+        mock_result.type = EventType.OK
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+
+        radio_manager._meshcore = mock_mc
+        result = await sync_recent_contacts_to_radio()
+
+        assert result["loaded"] == 1
+        payload = mock_mc.commands.add_contact.call_args.args[0]
+        assert payload["public_key"] == KEY_B
+
+    @pytest.mark.asyncio
+    async def test_duplicate_favorite_not_loaded_twice(self, test_db):
+        """Duplicate favorite entries still load the contact only once."""
         await _insert_contact(KEY_A, "Alice", last_contacted=2000)
         await _insert_contact(KEY_B, "Bob", last_contacted=1000)
 
         await AppSettingsRepository.update(
             max_radio_contacts=2,
-            favorites=[Favorite(type="contact", id=KEY_A)],
+            favorites=[
+                Favorite(type="contact", id=KEY_A),
+                Favorite(type="contact", id=KEY_A),
+            ],
         )
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 2
-        loaded_keys = [call.args[0]["public_key"] for call in mock_mc.add_contact.call_args_list]
+        loaded_keys = [
+            call.args[0]["public_key"] for call in mock_mc.commands.add_contact.call_args_list
+        ]
         assert loaded_keys == [KEY_A, KEY_B]
 
     @pytest.mark.asyncio
     async def test_skips_contacts_already_on_radio(self, test_db):
         """Contacts already on radio are counted but not re-added."""
-        await _insert_contact(KEY_A, "Alice", on_radio=True)
+        await _insert_contact(KEY_A, "Alice", on_radio=False)
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=MagicMock())  # Found
-        mock_mc.add_contact = AsyncMock()
+        mock_mc.commands.add_contact = AsyncMock()
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 0
         assert result["already_on_radio"] == 1
-        mock_mc.add_contact.assert_not_called()
+        mock_mc.commands.add_contact.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_throttled_when_called_quickly(self, test_db):
@@ -274,7 +376,7 @@ class TestSyncRecentContactsToRadio:
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
 
         # First call succeeds
         result1 = await sync_recent_contacts_to_radio()
@@ -290,7 +392,7 @@ class TestSyncRecentContactsToRadio:
         """force=True bypasses the throttle window."""
         mock_mc = MagicMock()
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
 
         # First call
         await sync_recent_contacts_to_radio()
@@ -304,7 +406,7 @@ class TestSyncRecentContactsToRadio:
         """Returns error when radio is not connected."""
         with patch("app.radio_sync.radio_manager") as mock_rm:
             mock_rm.is_connected = False
-            mock_rm.backend = None
+            mock_rm.meshcore = None
 
             result = await sync_recent_contacts_to_radio()
 
@@ -312,34 +414,19 @@ class TestSyncRecentContactsToRadio:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_marks_on_radio_when_found_but_not_flagged(self, test_db):
-        """Contact found on radio but not flagged gets set_on_radio(True)."""
-        await _insert_contact(KEY_A, "Alice", on_radio=False)
-
-        mock_mc = MagicMock()
-        mock_mc.get_contact_by_key_prefix = MagicMock(return_value=MagicMock())  # Found
-
-        radio_manager._backend = mock_mc
-        result = await sync_recent_contacts_to_radio()
-
-        assert result["already_on_radio"] == 1
-        # Should update the flag since contact.on_radio was False
-        contact = await ContactRepository.get_by_key(KEY_A)
-        assert contact.on_radio is True
-
-    @pytest.mark.asyncio
     async def test_handles_add_failure(self, test_db):
         """Failed add_contact increments the failed counter."""
         await _insert_contact(KEY_A, "Alice")
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.ERROR
         mock_result.payload = {"error": "Radio full"}
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 0
@@ -356,18 +443,19 @@ class TestSyncRecentContactsToRadio:
             last_path_len=2,
             out_path_hash_mode=1,
         )
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
-        payload = mock_mc.add_contact.call_args.args[0]
+        payload = mock_mc.commands.add_contact.call_args.args[0]
         assert payload["public_key"] == KEY_A
         assert payload["out_path"] == "aa00bb00"
         assert payload["out_path_len"] == 2
@@ -384,18 +472,19 @@ class TestSyncRecentContactsToRadio:
             last_path_len=-125,
             out_path_hash_mode=2,
         )
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
-        payload = mock_mc.add_contact.call_args.args[0]
+        payload = mock_mc.commands.add_contact.call_args.args[0]
         assert payload["out_path"] == "3f3f69de1c7b7e7662"
         assert payload["out_path_len"] == 3
         assert payload["out_path_hash_mode"] == 2
@@ -408,12 +497,13 @@ class TestSyncRecentContactsToRadio:
         so it passes mc directly to avoid deadlock (asyncio.Lock is not reentrant).
         """
         await _insert_contact(KEY_A, "Alice", last_contacted=2000)
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        mock_mc.add_contact = AsyncMock(return_value=mock_result)
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
         # Make radio_operation raise if called — it should NOT be called
         # when mc is provided
@@ -423,10 +513,10 @@ class TestSyncRecentContactsToRadio:
         with patch.object(
             radio_manager, "radio_operation", side_effect=radio_operation_should_not_be_called
         ):
-            result = await sync_recent_contacts_to_radio(be=mock_mc)
+            result = await sync_recent_contacts_to_radio(mc=mock_mc)
 
         assert result["loaded"] == 1
-        mock_mc.add_contact.assert_called_once()
+        mock_mc.commands.add_contact.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_mc_param_still_respects_throttle(self):
@@ -434,38 +524,59 @@ class TestSyncRecentContactsToRadio:
         mock_mc = MagicMock()
 
         # First call to set _last_contact_sync
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         await sync_recent_contacts_to_radio()
 
-        # Second call with be= but no force — should still be throttled
-        result = await sync_recent_contacts_to_radio(be=mock_mc)
+        # Second call with mc= but no force — should still be throttled
+        result = await sync_recent_contacts_to_radio(mc=mock_mc)
         assert result["throttled"] is True
         assert result["loaded"] == 0
 
     @pytest.mark.asyncio
-    async def test_uses_post_lock_backend_after_swap(self, test_db):
-        """If _backend is swapped between pre-check and lock acquisition,
+    async def test_uses_post_lock_meshcore_after_swap(self, test_db):
+        """If _meshcore is swapped between pre-check and lock acquisition,
         the function uses the new (post-lock) instance, not the stale one."""
         await _insert_contact(KEY_A, "Alice", last_contacted=2000)
+        await AppSettingsRepository.update(favorites=[Favorite(type="contact", id=KEY_A)])
 
         old_mc = MagicMock(name="old_mc")
         new_mc = MagicMock(name="new_mc")
         new_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
         mock_result = MagicMock()
         mock_result.type = EventType.OK
-        new_mc.add_contact = AsyncMock(return_value=mock_result)
+        new_mc.commands.add_contact = AsyncMock(return_value=mock_result)
 
         # Pre-check sees old_mc (truthy, passes is_connected guard)
-        radio_manager._backend = old_mc
-        # Simulate reconnect swapping _backend before lock acquisition
-        radio_manager._backend = new_mc
+        radio_manager._meshcore = old_mc
+        # Simulate reconnect swapping _meshcore before lock acquisition
+        radio_manager._meshcore = new_mc
 
         result = await sync_recent_contacts_to_radio()
 
         assert result["loaded"] == 1
         # new_mc was used, not old_mc
-        new_mc.add_contact.assert_called_once()
-        old_mc.add_contact.assert_not_called()
+        new_mc.commands.add_contact.assert_called_once()
+        old_mc.commands.add_contact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ensure_contact_on_radio_loads_single_contact_even_when_not_favorited(
+        self, test_db
+    ):
+        """Targeted sync loads one contact without needing it in favorites."""
+        await _insert_contact(KEY_A, "Alice", last_contacted=2000)
+
+        mock_mc = MagicMock()
+        mock_mc.get_contact_by_key_prefix = MagicMock(return_value=None)
+        mock_result = MagicMock()
+        mock_result.type = EventType.OK
+        mock_mc.commands.add_contact = AsyncMock(return_value=mock_result)
+
+        radio_manager._meshcore = mock_mc
+        result = await ensure_contact_on_radio(KEY_A, force=True)
+
+        assert result["loaded"] == 1
+        payload = mock_mc.commands.add_contact.call_args.args[0]
+        assert payload["public_key"] == KEY_A
 
 
 class TestSyncAndOffloadContacts:
@@ -489,8 +600,8 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(return_value=mock_remove_result)
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
         result = await sync_and_offload_contacts(mock_mc)
 
@@ -507,7 +618,7 @@ class TestSyncAndOffloadContacts:
 
     @pytest.mark.asyncio
     async def test_claims_prefix_messages_for_each_contact(self, test_db):
-        """claim_prefix_messages is called for each synced contact."""
+        """Prefix message claims still complete via scheduled reconciliation tasks."""
         from app.radio_sync import sync_and_offload_contacts
 
         # Pre-insert a message with a prefix key that matches KEY_A
@@ -529,15 +640,75 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(return_value=mock_remove_result)
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
-        await sync_and_offload_contacts(mock_mc)
+        created_tasks: list[asyncio.Task] = []
+        real_create_task = asyncio.create_task
+
+        def _capture_task(coro):
+            task = real_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        with patch("app.radio_sync.asyncio.create_task", side_effect=_capture_task):
+            await sync_and_offload_contacts(mock_mc)
+
+        await asyncio.gather(*created_tasks)
 
         # Verify the prefix message was claimed (promoted to full key)
         messages = await MessageRepository.get_all(conversation_key=KEY_A)
         assert len(messages) == 1
         assert messages[0].conversation_key == KEY_A.lower()
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_does_not_block_contact_removal(self, test_db):
+        """Slow reconciliation work is scheduled in background, not awaited inline."""
+        from app.radio_sync import sync_and_offload_contacts
+
+        contact_payload = {KEY_A: {"adv_name": "Alice", "type": 1, "flags": 0}}
+
+        mock_get_result = MagicMock()
+        mock_get_result.type = EventType.NEW_CONTACT
+        mock_get_result.payload = contact_payload
+
+        mock_remove_result = MagicMock()
+        mock_remove_result.type = EventType.OK
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
+
+        reconcile_started = asyncio.Event()
+        reconcile_release = asyncio.Event()
+        created_tasks: list[asyncio.Task] = []
+        real_create_task = asyncio.create_task
+
+        async def _slow_reconcile(*, public_key: str, contact_name: str | None, log):
+            del public_key, contact_name, log
+            reconcile_started.set()
+            await reconcile_release.wait()
+
+        def _capture_task(coro):
+            task = real_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        with (
+            patch("app.radio_sync.reconcile_contact_messages", side_effect=_slow_reconcile),
+            patch("app.radio_sync.asyncio.create_task", side_effect=_capture_task),
+        ):
+            result = await sync_and_offload_contacts(mock_mc)
+            await asyncio.sleep(0)
+
+        assert result["synced"] == 1
+        assert result["removed"] == 1
+        assert reconcile_started.is_set() is True
+        assert created_tasks and created_tasks[0].done() is False
+        mock_mc.commands.remove_contact.assert_awaited_once()
+
+        reconcile_release.set()
+        await asyncio.gather(*created_tasks)
 
     @pytest.mark.asyncio
     async def test_handles_remove_failure_gracefully(self, test_db):
@@ -561,9 +732,9 @@ class TestSyncAndOffloadContacts:
         mock_ok_result.type = EventType.OK
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
         # First remove fails, second succeeds
-        mock_mc.remove_contact = AsyncMock(side_effect=[mock_fail_result, mock_ok_result])
+        mock_mc.commands.remove_contact = AsyncMock(side_effect=[mock_fail_result, mock_ok_result])
 
         result = await sync_and_offload_contacts(mock_mc)
 
@@ -583,8 +754,8 @@ class TestSyncAndOffloadContacts:
         mock_get_result.payload = contact_payload
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(side_effect=Exception("Timeout"))
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(side_effect=Exception("Timeout"))
 
         result = await sync_and_offload_contacts(mock_mc)
 
@@ -601,7 +772,7 @@ class TestSyncAndOffloadContacts:
         mock_error_result.payload = {"error": "radio busy"}
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_error_result)
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_error_result)
 
         result = await sync_and_offload_contacts(mock_mc)
 
@@ -624,8 +795,8 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(return_value=mock_remove_result)
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
 
         await sync_and_offload_contacts(mock_mc)
 
@@ -635,10 +806,10 @@ class TestSyncAndOffloadContacts:
 
     @pytest.mark.asyncio
     async def test_evicts_removed_contacts_from_library_cache(self, test_db):
-        """Successfully removed contacts are evicted via evict_contact_from_cache.
+        """Successfully removed contacts are evicted from mc._contacts.
 
-        The backend's remove_contact() command does not update the
-        library's in-memory contact cache. If we don't evict manually,
+        The MeshCore library's remove_contact() command does not update the
+        library's in-memory _contacts cache. If we don't evict manually,
         sync_recent_contacts_to_radio() will find stale entries via
         get_contact_by_key_prefix() and skip re-adding contacts to the radio.
         """
@@ -657,23 +828,28 @@ class TestSyncAndOffloadContacts:
         mock_remove_result.type = EventType.OK
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(return_value=mock_remove_result)
-        mock_mc.evict_contact_from_cache = MagicMock()
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_remove_result)
+        # Seed the library's in-memory cache with the same contacts —
+        # simulating what happens after get_contacts() populates it.
+        mock_mc._contacts = {
+            KEY_A: {"public_key": KEY_A, "adv_name": "Alice"},
+            KEY_B: {"public_key": KEY_B, "adv_name": "Bob"},
+        }
 
         await sync_and_offload_contacts(mock_mc)
 
         # Both contacts should have been evicted from the library cache
-        assert mock_mc.evict_contact_from_cache.call_count == 2
-        mock_mc.evict_contact_from_cache.assert_any_call(KEY_A)
-        mock_mc.evict_contact_from_cache.assert_any_call(KEY_B)
+        assert KEY_A not in mock_mc._contacts
+        assert KEY_B not in mock_mc._contacts
+        assert mock_mc._contacts == {}
 
     @pytest.mark.asyncio
     async def test_failed_remove_does_not_evict_from_library_cache(self, test_db):
-        """Contacts that fail to remove are not evicted from the contact cache.
+        """Contacts that fail to remove from radio stay in mc._contacts.
 
-        We only call evict_contact_from_cache on successful removal — if the
-        radio still has the contact, the cache should reflect that.
+        We only evict from the cache on successful removal — if the radio
+        still has the contact, the cache should reflect that.
         """
         from app.radio_sync import sync_and_offload_contacts
 
@@ -690,14 +866,16 @@ class TestSyncAndOffloadContacts:
         mock_fail_result.payload = {"error": "busy"}
 
         mock_mc = MagicMock()
-        mock_mc.get_contacts = AsyncMock(return_value=mock_get_result)
-        mock_mc.remove_contact = AsyncMock(return_value=mock_fail_result)
-        mock_mc.evict_contact_from_cache = MagicMock()
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_get_result)
+        mock_mc.commands.remove_contact = AsyncMock(return_value=mock_fail_result)
+        mock_mc._contacts = {
+            KEY_A: {"public_key": KEY_A, "adv_name": "Alice"},
+        }
 
         await sync_and_offload_contacts(mock_mc)
 
         # Contact should still be in the cache since removal failed
-        mock_mc.evict_contact_from_cache.assert_not_called()
+        assert KEY_A in mock_mc._contacts
 
 
 class TestSyncAndOffloadChannels:
@@ -720,11 +898,11 @@ class TestSyncAndOffloadChannels:
         empty_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=[channel_result] + [empty_result] * 39)
+        mock_mc.commands.get_channel = AsyncMock(side_effect=[channel_result] + [empty_result] * 39)
 
         clear_result = MagicMock()
         clear_result.type = EventType.OK
-        mock_mc.set_channel = AsyncMock(return_value=clear_result)
+        mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
         result = await sync_and_offload_channels(mock_mc)
 
@@ -754,7 +932,9 @@ class TestSyncAndOffloadChannels:
         other_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=[empty_name_result] + [other_result] * 39)
+        mock_mc.commands.get_channel = AsyncMock(
+            side_effect=[empty_name_result] + [other_result] * 39
+        )
 
         result = await sync_and_offload_channels(mock_mc)
 
@@ -777,7 +957,9 @@ class TestSyncAndOffloadChannels:
         other_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=[zero_key_result] + [other_result] * 39)
+        mock_mc.commands.get_channel = AsyncMock(
+            side_effect=[zero_key_result] + [other_result] * 39
+        )
 
         result = await sync_and_offload_channels(mock_mc)
 
@@ -799,11 +981,11 @@ class TestSyncAndOffloadChannels:
         other_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=[channel_result] + [other_result] * 39)
+        mock_mc.commands.get_channel = AsyncMock(side_effect=[channel_result] + [other_result] * 39)
 
         clear_result = MagicMock()
         clear_result.type = EventType.OK
-        mock_mc.set_channel = AsyncMock(return_value=clear_result)
+        mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
         await sync_and_offload_channels(mock_mc)
 
@@ -827,15 +1009,15 @@ class TestSyncAndOffloadChannels:
         other_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=[channel_result] + [other_result] * 39)
+        mock_mc.commands.get_channel = AsyncMock(side_effect=[channel_result] + [other_result] * 39)
 
         clear_result = MagicMock()
         clear_result.type = EventType.OK
-        mock_mc.set_channel = AsyncMock(return_value=clear_result)
+        mock_mc.commands.set_channel = AsyncMock(return_value=clear_result)
 
         await sync_and_offload_channels(mock_mc)
 
-        mock_mc.set_channel.assert_called_once_with(
+        mock_mc.commands.set_channel.assert_called_once_with(
             channel_idx=0,
             channel_name="",
             channel_secret=bytes(16),
@@ -860,7 +1042,7 @@ class TestSyncAndOffloadChannels:
         other_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(side_effect=channel_results + [other_result] * 38)
+        mock_mc.commands.get_channel = AsyncMock(side_effect=channel_results + [other_result] * 38)
 
         fail_result = MagicMock()
         fail_result.type = EventType.ERROR
@@ -869,7 +1051,7 @@ class TestSyncAndOffloadChannels:
         ok_result = MagicMock()
         ok_result.type = EventType.OK
 
-        mock_mc.set_channel = AsyncMock(side_effect=[fail_result, ok_result])
+        mock_mc.commands.set_channel = AsyncMock(side_effect=[fail_result, ok_result])
 
         result = await sync_and_offload_channels(mock_mc)
 
@@ -878,20 +1060,152 @@ class TestSyncAndOffloadChannels:
 
     @pytest.mark.asyncio
     async def test_iterates_all_40_channel_slots(self):
-        """All 40 channel slots are checked."""
+        """All firmware-reported channel slots are checked."""
         from app.radio_sync import sync_and_offload_channels
 
         empty_result = MagicMock()
         empty_result.type = EventType.ERROR
 
         mock_mc = MagicMock()
-        mock_mc.get_channel = AsyncMock(return_value=empty_result)
+        mock_mc.commands.get_channel = AsyncMock(return_value=empty_result)
+        radio_manager.max_channels = 8
 
         result = await sync_and_offload_channels(mock_mc)
 
-        assert mock_mc.get_channel.call_count == 40
+        assert mock_mc.commands.get_channel.call_count == 8
         assert result["synced"] == 0
         assert result["cleared"] == 0
+
+    @pytest.mark.asyncio
+    async def test_channel_offload_resets_send_slot_cache(self):
+        """Clearing radio channels should invalidate session-local send-slot reuse state."""
+        from app.radio_sync import sync_and_offload_channels
+
+        empty_result = MagicMock()
+        empty_result.type = EventType.ERROR
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(return_value=empty_result)
+        radio_manager.max_channels = 2
+        radio_manager.note_channel_slot_loaded("AA" * 16, 0)
+
+        await sync_and_offload_channels(mock_mc)
+
+        assert radio_manager.get_cached_channel_slot("AA" * 16) is None
+
+    @pytest.mark.asyncio
+    async def test_remembers_channel_slot_for_pending_message_recovery(self, test_db):
+        """Offload snapshots slot-to-key mapping for the later startup drain."""
+        from app.radio_sync import sync_and_offload_channels
+
+        channel_key = "11" * 16
+        channel_result = MagicMock()
+        channel_result.type = EventType.CHANNEL_INFO
+        channel_result.payload = {
+            "channel_name": "#queued",
+            "channel_secret": bytes.fromhex(channel_key),
+        }
+
+        empty_result = MagicMock()
+        empty_result.type = EventType.ERROR
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(side_effect=[channel_result] + [empty_result] * 39)
+        mock_mc.commands.set_channel = AsyncMock(return_value=MagicMock(type=EventType.OK))
+
+        await sync_and_offload_channels(mock_mc)
+
+        assert radio_manager.get_pending_message_channel_key(0) == channel_key.upper()
+
+
+class TestPendingChannelMessageFallback:
+    """Queued CHANNEL_MSG_RECV events should be persisted instead of dropped."""
+
+    @pytest.mark.asyncio
+    async def test_drain_pending_messages_uses_snapshotted_slot_mapping_after_offload(
+        self, test_db
+    ):
+        """Startup drain can still store room traffic even after slots were cleared."""
+        from app.radio_sync import drain_pending_messages
+
+        channel_key = "22" * 16
+        await ChannelRepository.upsert(key=channel_key, name="#queued")
+        radio_manager.remember_pending_message_channel_slot(channel_key, 3)
+
+        channel_message = MagicMock()
+        channel_message.type = EventType.CHANNEL_MSG_RECV
+        channel_message.payload = {
+            "channel_idx": 3,
+            "text": "Alice: hello from queue",
+            "sender_timestamp": 1700000000,
+            "txt_type": 0,
+            "path": "aabb",
+            "path_len": 2,
+        }
+
+        no_more = MagicMock()
+        no_more.type = EventType.NO_MORE_MSGS
+        no_more.payload = {}
+
+        empty_slot = MagicMock()
+        empty_slot.type = EventType.ERROR
+        empty_slot.payload = {"error": "slot empty"}
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_msg = AsyncMock(side_effect=[channel_message, no_more])
+        mock_mc.commands.get_channel = AsyncMock(return_value=empty_slot)
+
+        with patch("app.radio_sync.broadcast_event") as mock_broadcast:
+            drained = await drain_pending_messages(mock_mc)
+
+        assert drained == 1
+        stored = await MessageRepository.get_all(msg_type="CHAN", conversation_key=channel_key)
+        assert len(stored) == 1
+        assert stored[0].text == "Alice: hello from queue"
+        assert stored[0].sender_name == "Alice"
+        assert stored[0].conversation_key == channel_key
+        assert stored[0].paths is not None
+        assert stored[0].paths[0].path == "aabb"
+
+        mock_broadcast.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_for_messages_stores_first_pending_channel_message(self, test_db):
+        """Single-pass polling stores the first queued channel message before draining."""
+        from app.radio_sync import poll_for_messages
+
+        channel_key = "33" * 16
+        channel_result = MagicMock()
+        channel_result.type = EventType.CHANNEL_INFO
+        channel_result.payload = {
+            "channel_name": "#poll",
+            "channel_secret": bytes.fromhex(channel_key),
+        }
+
+        channel_message = MagicMock()
+        channel_message.type = EventType.CHANNEL_MSG_RECV
+        channel_message.payload = {
+            "channel_idx": 1,
+            "text": "Bob: polled message",
+            "sender_timestamp": 1700000010,
+            "txt_type": 0,
+        }
+
+        no_more = MagicMock()
+        no_more.type = EventType.NO_MORE_MSGS
+        no_more.payload = {}
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_msg = AsyncMock(side_effect=[channel_message, no_more])
+        mock_mc.commands.get_channel = AsyncMock(return_value=channel_result)
+
+        with patch("app.radio_sync.broadcast_event"):
+            count = await poll_for_messages(mock_mc)
+
+        assert count == 1
+        stored = await MessageRepository.get_all(msg_type="CHAN", conversation_key=channel_key)
+        assert len(stored) == 1
+        assert stored[0].text == "Bob: polled message"
 
 
 class TestEnsureDefaultChannels:
@@ -985,22 +1299,22 @@ def _make_connected_manager() -> tuple[RadioManager, MagicMock]:
     mock_mc.is_connected = True
     mock_mc.stop_auto_message_fetching = AsyncMock()
     mock_mc.start_auto_message_fetching = AsyncMock()
-    rm._backend = mock_mc
+    rm._meshcore = mock_mc
     return rm, mock_mc
 
 
 def _disconnect_on_acquire(rm: RadioManager):
-    """Monkey-patch rm so _backend is set to None right after the lock is acquired.
+    """Monkey-patch rm so _meshcore is set to None right after the lock is acquired.
 
     This simulates the exact race: is_connected pre-check passes, but by the
-    time radio_operation() checks _backend post-lock, a reconnect has set it
+    time radio_operation() checks _meshcore post-lock, a reconnect has set it
     to None → RadioDisconnectedError.
     """
     original = rm._acquire_operation_lock
 
     async def _acquire_then_disconnect(name, *, blocking):
         await original(name, blocking=blocking)
-        rm._backend = None
+        rm._meshcore = None
 
     rm._acquire_operation_lock = _acquire_then_disconnect
 
@@ -1031,6 +1345,34 @@ def _sleep_controller(*, cancel_after: int = 2):
 
 class TestMessagePollLoopRaces:
     """Regression tests for disconnect/reconnect race paths in _message_poll_loop."""
+
+    @pytest.mark.asyncio
+    async def test_uses_hourly_audit_interval_when_fallback_disabled(self):
+        rm, _mc = _make_connected_manager()
+        mock_sleep, sleep_calls = _sleep_controller(cancel_after=1)
+
+        with (
+            patch("app.radio_sync.radio_manager", rm),
+            patch("app.radio_sync.settings.enable_message_poll_fallback", False),
+            patch("asyncio.sleep", side_effect=mock_sleep),
+        ):
+            await _message_poll_loop()
+
+        assert sleep_calls == [3600]
+
+    @pytest.mark.asyncio
+    async def test_uses_fast_poll_interval_when_fallback_enabled(self):
+        rm, _mc = _make_connected_manager()
+        mock_sleep, sleep_calls = _sleep_controller(cancel_after=1)
+
+        with (
+            patch("app.radio_sync.radio_manager", rm),
+            patch("app.radio_sync.settings.enable_message_poll_fallback", True),
+            patch("asyncio.sleep", side_effect=mock_sleep),
+        ):
+            await _message_poll_loop()
+
+        assert sleep_calls == [10]
 
     @pytest.mark.asyncio
     async def test_disconnect_race_between_precheck_and_lock(self):
@@ -1075,7 +1417,7 @@ class TestMessagePollLoopRaces:
     @pytest.mark.asyncio
     async def test_passes_lock_scoped_mc_not_stale_global(self):
         """The mc yielded by radio_operation() is forwarded to
-        poll_for_messages — not a stale radio_manager.backend read."""
+        poll_for_messages — not a stale radio_manager.meshcore read."""
         rm, mock_mc = _make_connected_manager()
         mock_sleep, _ = _sleep_controller(cancel_after=2)
 
@@ -1089,6 +1431,110 @@ class TestMessagePollLoopRaces:
 
         mock_poll.assert_called_once_with(mock_mc)
 
+    @pytest.mark.asyncio
+    async def test_hourly_audit_crows_loudly_when_it_finds_hidden_messages(self):
+        rm, mock_mc = _make_connected_manager()
+        mock_sleep, _ = _sleep_controller(cancel_after=2)
+
+        with (
+            patch("app.radio_sync.radio_manager", rm),
+            patch("app.radio_sync.settings.enable_message_poll_fallback", False),
+            patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("app.radio_sync.poll_for_messages", new_callable=AsyncMock, return_value=2),
+            patch("app.radio_sync.logger") as mock_logger,
+            patch("app.radio_sync.broadcast_error") as mock_broadcast_error,
+        ):
+            await _message_poll_loop()
+
+        mock_logger.error.assert_called_once()
+        mock_broadcast_error.assert_called_once_with(
+            "A periodic poll task has discovered radio inconsistencies.",
+            "Please check the logs for recommendations (search "
+            "'MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK').",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fast_poll_logs_missed_messages_without_error_toast(self):
+        rm, mock_mc = _make_connected_manager()
+        mock_sleep, _ = _sleep_controller(cancel_after=2)
+
+        with (
+            patch("app.radio_sync.radio_manager", rm),
+            patch("app.radio_sync.settings.enable_message_poll_fallback", True),
+            patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("app.radio_sync.poll_for_messages", new_callable=AsyncMock, return_value=2),
+            patch("app.radio_sync.logger") as mock_logger,
+            patch("app.radio_sync.broadcast_error") as mock_broadcast_error,
+        ):
+            await _message_poll_loop()
+
+        mock_logger.warning.assert_called_once()
+        mock_broadcast_error.assert_not_called()
+
+
+class TestChannelSendCacheAudit:
+    """Verify session-local channel-slot reuse state is audited against the radio."""
+
+    @pytest.mark.asyncio
+    async def test_audit_channel_send_cache_accepts_matching_radio_state(self, test_db):
+        chan_key = "ab" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#flightless")
+        radio_manager.note_channel_slot_loaded(chan_key, 0)
+
+        ok_result = MagicMock()
+        ok_result.type = EventType.CHANNEL_INFO
+        ok_result.payload = {
+            "channel_name": "#flightless",
+            "channel_secret": bytes.fromhex(chan_key),
+        }
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(return_value=ok_result)
+
+        with patch("app.radio_sync.broadcast_error") as mock_broadcast_error:
+            assert await audit_channel_send_cache(mock_mc) is True
+
+        mock_mc.commands.get_channel.assert_awaited_once_with(0)
+        mock_broadcast_error.assert_not_called()
+        assert radio_manager.get_cached_channel_slot(chan_key) == 0
+
+    @pytest.mark.asyncio
+    async def test_audit_channel_send_cache_resets_and_toasts_on_mismatch(self, test_db):
+        chan_key = "cd" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#flightless")
+        radio_manager.note_channel_slot_loaded(chan_key, 0)
+
+        mismatch_result = MagicMock()
+        mismatch_result.type = EventType.CHANNEL_INFO
+        mismatch_result.payload = {
+            "channel_name": "#elsewhere",
+            "channel_secret": bytes.fromhex("ef" * 16),
+        }
+
+        mock_mc = MagicMock()
+        mock_mc.commands.get_channel = AsyncMock(return_value=mismatch_result)
+
+        with (
+            patch("app.radio_sync.logger") as mock_logger,
+            patch("app.radio_sync.broadcast_error") as mock_broadcast_error,
+        ):
+            assert await audit_channel_send_cache(mock_mc) is False
+
+        mock_logger.error.assert_called_once()
+        mock_broadcast_error.assert_called_once()
+        assert radio_manager.get_cached_channel_slot(chan_key) is None
+
+    @pytest.mark.asyncio
+    async def test_audit_channel_send_cache_skips_when_reuse_forced_off(self, test_db):
+        chan_key = "ef" * 16
+        radio_manager.note_channel_slot_loaded(chan_key, 0)
+        mock_mc = MagicMock()
+
+        with patch("app.radio.settings.force_channel_slot_reconfigure", True):
+            assert await audit_channel_send_cache(mock_mc) is True
+
+        mock_mc.commands.get_channel.assert_not_called()
+
 
 class TestPeriodicAdvertLoopRaces:
     """Regression tests for disconnect/reconnect race paths in _periodic_advert_loop."""
@@ -1099,10 +1545,10 @@ class TestPeriodicAdvertLoopRaces:
         is caught by the outer except — loop survives and continues."""
         rm, _mc = _make_connected_manager()
         _disconnect_on_acquire(rm)
-        # Advert loop: sleep first, then work.  Sleep 1 (loop top) passes,
-        # work hits RadioDisconnectedError, error handler does sleep 2 (passes),
-        # next iteration sleep 3 cancels cleanly via except CancelledError.
-        mock_sleep, sleep_calls = _sleep_controller(cancel_after=3)
+        # Advert loop: sleep first, then work. Sleep 1 (loop top) passes,
+        # work hits RadioDisconnectedError, next iteration sleep 2 cancels
+        # cleanly via except CancelledError without an extra backoff sleep.
+        mock_sleep, sleep_calls = _sleep_controller(cancel_after=2)
 
         with (
             patch("app.radio_sync.radio_manager", rm),
@@ -1112,7 +1558,7 @@ class TestPeriodicAdvertLoopRaces:
             await _periodic_advert_loop()
 
         mock_advert.assert_not_called()
-        assert len(sleep_calls) == 3
+        assert len(sleep_calls) == 2
 
     @pytest.mark.asyncio
     async def test_busy_lock_skips_iteration(self):
@@ -1137,7 +1583,7 @@ class TestPeriodicAdvertLoopRaces:
     @pytest.mark.asyncio
     async def test_passes_lock_scoped_mc_not_stale_global(self):
         """The mc yielded by radio_operation() is forwarded to
-        send_advertisement — not a stale radio_manager.backend read."""
+        send_advertisement — not a stale radio_manager.meshcore read."""
         rm, mock_mc = _make_connected_manager()
         # Sleep 1 (loop top) passes through, work runs, sleep 2 cancels.
         mock_sleep, _ = _sleep_controller(cancel_after=2)
@@ -1156,6 +1602,36 @@ class TestPeriodicSyncLoopRaces:
     """Regression tests for disconnect/reconnect race paths in _periodic_sync_loop."""
 
     @pytest.mark.asyncio
+    async def test_should_run_full_periodic_sync_at_trigger_threshold(self, test_db):
+        """Occupancy at 95% of configured capacity triggers a full offload/reload."""
+        from app.radio_sync import should_run_full_periodic_sync
+
+        await AppSettingsRepository.update(max_radio_contacts=100)
+
+        mock_mc = MagicMock()
+        mock_result = MagicMock()
+        mock_result.type = EventType.NEW_CONTACT
+        mock_result.payload = {f"{i:064x}": {"adv_name": f"Node{i}"} for i in range(95)}
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
+
+        assert await should_run_full_periodic_sync(mock_mc) is True
+
+    @pytest.mark.asyncio
+    async def test_should_skip_full_periodic_sync_below_trigger_threshold(self, test_db):
+        """Occupancy below 95% of configured capacity does not trigger offload/reload."""
+        from app.radio_sync import should_run_full_periodic_sync
+
+        await AppSettingsRepository.update(max_radio_contacts=100)
+
+        mock_mc = MagicMock()
+        mock_result = MagicMock()
+        mock_result.type = EventType.NEW_CONTACT
+        mock_result.payload = {f"{i:064x}": {"adv_name": f"Node{i}"} for i in range(94)}
+        mock_mc.commands.get_contacts = AsyncMock(return_value=mock_result)
+
+        assert await should_run_full_periodic_sync(mock_mc) is False
+
+    @pytest.mark.asyncio
     async def test_disconnect_race_between_precheck_and_lock(self):
         """RadioDisconnectedError between is_connected and radio_operation()
         is caught by the outer except — loop survives and continues."""
@@ -1166,11 +1642,17 @@ class TestPeriodicSyncLoopRaces:
         with (
             patch("app.radio_sync.radio_manager", rm),
             patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("app.radio_sync.cleanup_expired_acks") as mock_cleanup,
+            patch(
+                "app.radio_sync.should_run_full_periodic_sync", new_callable=AsyncMock
+            ) as mock_check,
             patch("app.radio_sync.sync_and_offload_all", new_callable=AsyncMock) as mock_sync,
             patch("app.radio_sync.sync_radio_time", new_callable=AsyncMock) as mock_time,
         ):
             await _periodic_sync_loop()
 
+        mock_cleanup.assert_called_once()
+        mock_check.assert_not_called()
         mock_sync.assert_not_called()
         mock_time.assert_not_called()
         assert len(sleep_calls) == 2
@@ -1186,6 +1668,10 @@ class TestPeriodicSyncLoopRaces:
             with (
                 patch("app.radio_sync.radio_manager", rm),
                 patch("asyncio.sleep", side_effect=mock_sleep),
+                patch("app.radio_sync.cleanup_expired_acks") as mock_cleanup,
+                patch(
+                    "app.radio_sync.should_run_full_periodic_sync", new_callable=AsyncMock
+                ) as mock_check,
                 patch("app.radio_sync.sync_and_offload_all", new_callable=AsyncMock) as mock_sync,
                 patch("app.radio_sync.sync_radio_time", new_callable=AsyncMock) as mock_time,
             ):
@@ -1193,6 +1679,8 @@ class TestPeriodicSyncLoopRaces:
         finally:
             lock.release()
 
+        mock_cleanup.assert_called_once()
+        mock_check.assert_not_called()
         mock_sync.assert_not_called()
         mock_time.assert_not_called()
 
@@ -1200,17 +1688,48 @@ class TestPeriodicSyncLoopRaces:
     async def test_passes_lock_scoped_mc_not_stale_global(self):
         """The mc yielded by radio_operation() is forwarded to
         sync_and_offload_all and sync_radio_time — not a stale
-        radio_manager.backend read."""
+        radio_manager.meshcore read."""
         rm, mock_mc = _make_connected_manager()
         mock_sleep, _ = _sleep_controller(cancel_after=2)
 
         with (
             patch("app.radio_sync.radio_manager", rm),
             patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("app.radio_sync.cleanup_expired_acks") as mock_cleanup,
+            patch(
+                "app.radio_sync.should_run_full_periodic_sync",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
             patch("app.radio_sync.sync_and_offload_all", new_callable=AsyncMock) as mock_sync,
             patch("app.radio_sync.sync_radio_time", new_callable=AsyncMock) as mock_time,
         ):
             await _periodic_sync_loop()
 
+        mock_cleanup.assert_called_once()
         mock_sync.assert_called_once_with(mock_mc)
+        mock_time.assert_called_once_with(mock_mc)
+
+    @pytest.mark.asyncio
+    async def test_skips_full_sync_below_threshold_but_still_syncs_time(self):
+        """Periodic maintenance still does time sync when occupancy is below the trigger."""
+        rm, mock_mc = _make_connected_manager()
+        mock_sleep, _ = _sleep_controller(cancel_after=2)
+
+        with (
+            patch("app.radio_sync.radio_manager", rm),
+            patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("app.radio_sync.cleanup_expired_acks") as mock_cleanup,
+            patch(
+                "app.radio_sync.should_run_full_periodic_sync",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("app.radio_sync.sync_and_offload_all", new_callable=AsyncMock) as mock_sync,
+            patch("app.radio_sync.sync_radio_time", new_callable=AsyncMock) as mock_time,
+        ):
+            await _periodic_sync_loop()
+
+        mock_cleanup.assert_called_once()
+        mock_sync.assert_not_called()
         mock_time.assert_called_once_with(mock_mc)

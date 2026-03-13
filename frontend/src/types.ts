@@ -15,6 +15,7 @@ export interface RadioConfig {
   radio: RadioSettings;
   path_hash_mode: number;
   path_hash_mode_supported: boolean;
+  advert_location_source?: 'off' | 'current';
 }
 
 export interface RadioConfigUpdate {
@@ -24,6 +25,7 @@ export interface RadioConfigUpdate {
   tx_power?: number;
   radio?: RadioSettings;
   path_hash_mode?: number;
+  advert_location_source?: 'off' | 'current';
 }
 
 export interface FanoutStatusEntry {
@@ -36,6 +38,7 @@ export interface HealthStatus {
   status: string;
   radio_connected: boolean;
   radio_initializing: boolean;
+  radio_state?: 'connected' | 'initializing' | 'connecting' | 'disconnected' | 'paused';
   connection_info: string | null;
   database_size_mb: number;
   oldest_undecrypted_timestamp: number | null;
@@ -123,6 +126,41 @@ export interface ContactDetail {
   advert_paths: ContactAdvertPath[];
   advert_frequency: number | null;
   nearest_repeaters: NearestRepeater[];
+}
+
+export interface NameOnlyContactDetail {
+  name: string;
+  channel_message_count: number;
+  most_active_rooms: ContactActiveRoom[];
+}
+
+export interface ContactAnalyticsHourlyBucket {
+  bucket_start: number;
+  last_24h_count: number;
+  last_week_average: number;
+  all_time_average: number;
+}
+
+export interface ContactAnalyticsWeeklyBucket {
+  bucket_start: number;
+  message_count: number;
+}
+
+export interface ContactAnalytics {
+  lookup_type: 'contact' | 'name';
+  name: string;
+  contact: Contact | null;
+  name_first_seen_at: number | null;
+  name_history: ContactNameHistory[];
+  dm_message_count: number;
+  channel_message_count: number;
+  includes_direct_messages: boolean;
+  most_active_rooms: ContactActiveRoom[];
+  advert_paths: ContactAdvertPath[];
+  advert_frequency: number | null;
+  nearest_repeaters: NearestRepeater[];
+  hourly_activity: ContactAnalyticsHourlyBucket[];
+  weekly_activity: ContactAnalyticsWeeklyBucket[];
 }
 
 export interface Channel {
@@ -318,6 +356,13 @@ export interface RepeaterAclResponse {
   acl: AclEntry[];
 }
 
+export interface RepeaterNodeInfoResponse {
+  name: string | null;
+  lat: string | null;
+  lon: string | null;
+  clock_utc: string | null;
+}
+
 export interface RepeaterRadioSettingsResponse {
   firmware_version: string | null;
   radio: string | null;
@@ -325,10 +370,6 @@ export interface RepeaterRadioSettingsResponse {
   airtime_factor: string | null;
   repeat_enabled: string | null;
   flood_max: string | null;
-  name: string | null;
-  lat: string | null;
-  lon: string | null;
-  clock_utc: string | null;
 }
 
 export interface RepeaterAdvertIntervalsResponse {
@@ -353,6 +394,7 @@ export interface RepeaterLppTelemetryResponse {
 
 export type PaneName =
   | 'status'
+  | 'nodeInfo'
   | 'neighbors'
   | 'acl'
   | 'radioSettings'
@@ -364,6 +406,7 @@ export interface PaneState {
   loading: boolean;
   attempt: number;
   error: string | null;
+  fetched_at?: number | null;
 }
 
 export interface TraceResponse {
@@ -376,6 +419,7 @@ export interface UnreadCounts {
   counts: Record<string, number>;
   mentions: Record<string, boolean>;
   last_message_times: Record<string, number>;
+  last_read_ats: Record<string, number | null>;
 }
 
 interface BusyChannel {

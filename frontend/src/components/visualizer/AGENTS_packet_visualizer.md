@@ -12,24 +12,41 @@ The visualizer displays:
 
 ## Architecture
 
-### Data Layer (`useVisualizerData3D` hook)
+### Semantic Data Layer (`networkGraph/packetNetworkGraph.ts`)
 
-The custom hook manages all graph state and simulation logic:
+The packet-network module owns the canonical mesh representation and the visibility-aware projection logic:
 
 ```
-Packets → Parse → Aggregate by key → Observation window → Publish → Animate
+Packets → Parse → Canonical observations/adjacency → Projection by settings
 ```
 
 **Key responsibilities:**
 
-- Maintains node and link maps (`nodesRef`, `linksRef`)
+- Resolves packet source / repeater / destination nodes into a canonical path
+- Maintains canonical node, link, observation, and neighbor state independent of UI toggles
+- Applies ambiguous repeater heuristics and advert-path hints while building canonical data
+- Projects canonical paths into rendered links, including dashed bridges over hidden ambiguous runs
+- Exposes a reusable semantic surface for other consumers besides the 3D visualizer
+
+### Visualizer Data Hook (`components/visualizer/useVisualizerData3D.ts`)
+
+The hook manages render-specific state and animation timing on top of the shared packet-network data layer:
+
+```
+Canonical projection → Aggregate by key → Observation window → Publish → Animate
+```
+
+**Key responsibilities:**
+
+- Adapts semantic packet-network nodes/links into `GraphNode` / `GraphLink` render objects
 - Runs `d3-force-3d` simulation for 3D layout (`.numDimensions(3)`)
-- Processes incoming packets with deduplication
-- Aggregates packet repeats across multiple paths
+- Processes incoming packets with deduplication and feeds them into the semantic layer
+- Aggregates packet repeats across multiple projected paths
 - Manages particle queue and animation timing
 
 **State:**
 
+- `networkStateRef`: Canonical packet-network state (nodes, links, observations, neighbors)
 - `nodesRef`: Map of node ID → GraphNode
 - `linksRef`: Map of link key → GraphLink
 - `particlesRef`: Array of active Particle objects
@@ -39,6 +56,8 @@ Packets → Parse → Aggregate by key → Observation window → Publish → An
 
 ### Rendering Layer (Three.js)
 
+Scene creation, render-loop updates, raycasting hover, and click-to-pin interaction live in `components/visualizer/useVisualizer3DScene.ts`.
+
 - `THREE.WebGLRenderer` + `CSS2DRenderer` (text labels overlaid on 3D scene)
 - `OrbitControls` for camera interaction (orbit, pan, zoom)
 - `THREE.Mesh` with `SphereGeometry` per node + `CSS2DObject` labels
@@ -46,15 +65,22 @@ Packets → Parse → Aggregate by key → Observation window → Publish → An
 - `THREE.Points` with vertex colors for particles (persistent geometry + circular sprite texture)
 - `THREE.Raycaster` for hover/click detection on node spheres
 
-### Shared Utilities (`utils/visualizerUtils.ts`)
+### Shared Utilities
 
-Types, constants, and pure functions shared across the codebase:
+- `networkGraph/packetNetworkGraph.ts`
+  - Canonical packet-network types and replay/projection logic
+- `components/visualizer/shared.ts`
+  - Graph-specific types: `GraphNode`, `GraphLink`, `NodeMeshData`
+  - Shared rendering helpers: node colors, relative-time formatting, typed-array growth helpers
+- `utils/visualizerUtils.ts`
+  - Packet parsing, identity helpers, ambiguous repeater heuristics, constants shared across visualizer code
 
-- Types: `NodeType`, `PacketLabel`, `Particle`, `ObservedPath`, `PendingPacket`, `ParsedPacket`, `TrafficObservation`, `RepeaterTrafficData`, `RepeaterSplitAnalysis`
-- Constants: `COLORS`, `PARTICLE_COLOR_MAP`, `PARTICLE_SPEED`, `DEFAULT_OBSERVATION_WINDOW_SEC`, traffic thresholds, `PACKET_LEGEND_ITEMS`
-- Functions: `hashString` (from `utils/contactAvatar.ts`), `parsePacket`, `getPacketLabel`, `generatePacketKey`, `getLinkId`, `getNodeType`, `dedupeConsecutive`, `analyzeRepeaterTraffic`, `recordTrafficObservation`
+### UI Overlays
 
-`GraphNode` and `GraphLink` are defined locally in the component — they extend `SimulationNodeDatum3D` and `SimulationLinkDatum` from `d3-force-3d`.
+- `components/visualizer/VisualizerControls.tsx`
+  - Legends, settings toggles, repulsion/speed controls, reset/stretch actions
+- `components/visualizer/VisualizerTooltip.tsx`
+  - Hovered/pinned node metadata and neighbor list
 
 ### Type Declarations (`types/d3-force-3d.d.ts`)
 
@@ -68,8 +94,9 @@ When a new packet arrives from the WebSocket:
 
 ```typescript
 packets.forEach((packet) => {
-  if (processedRef.current.has(packet.id)) return; // Skip duplicates
-  processedRef.current.add(packet.id);
+  const observationKey = getRawPacketObservationKey(packet);
+  if (processedRef.current.has(observationKey)) return; // Skip duplicates
+  processedRef.current.add(observationKey);
 
   const parsed = parsePacket(packet.data);
   const key = generatePacketKey(parsed, packet);
@@ -189,6 +216,8 @@ When a winner is found, the ambiguous node gets a `probableIdentity` label (the 
 
 **Interaction with traffic splitting:** Advert-path hints run first. If a probable identity is found, the display name is set. Traffic splitting can still produce separate node IDs (`?XX:>YY`), but won't overwrite the advert-path display name.
 
+**Sibling collapse projection:** When an ambiguous repeater has a high-confidence likely identity and that likely repeater also appears as a definitely-known sibling connecting to the same next hop, the projection layer can collapse the ambiguous node into the known repeater. This is projection-only: canonical observations and canonical neighbor truth remain unchanged.
+
 **Toggle:** "Use repeater advert-path identity hints" checkbox (enabled by default, disabled when ambiguous repeaters are hidden).
 
 ### Traffic Pattern Splitting (Experimental)
@@ -301,40 +330,44 @@ function buildPath(parsed, packet, myPrefix): string[] {
 | Pan (right-drag)           | Pan the camera                              |
 | Scroll wheel               | Zoom in/out                                 |
 
-**Click-to-pin:** When a node is pinned, hovering other nodes does not change the highlight. The tooltip shows "Traffic exchanged with:" listing all connected neighbors with their possible names.
+**Click-to-pin:** When a node is pinned, hovering other nodes does not change the highlight. The tooltip shows "Traffic exchanged with:" using canonical packet-network adjacency, not rendered-link adjacency, so hidden repeaters still appear truthfully as hidden neighbors.
 
 ## Configuration Options
 
-| Option                     | Default | Description                                               |
-| -------------------------- | ------- | --------------------------------------------------------- |
-| Ambiguous repeaters        | On      | Show nodes when only partial prefix known                 |
-| Ambiguous sender/recipient | Off     | Show placeholder nodes for unknown senders                |
-| Advert-path identity hints | On      | Use stored advert paths to label ambiguous repeaters      |
-| Split by traffic pattern   | Off     | Split ambiguous repeaters by next-hop routing (see above) |
-| Observation window         | 15 sec  | Wait time for duplicate packets before animating (1-60s)  |
-| Let 'em drift              | On      | Continuous layout optimization                            |
-| Repulsion                  | 200     | Force strength (50-2500)                                  |
-| Packet speed               | 2x      | Particle animation speed multiplier (1x-5x)               |
-| Shuffle layout             | -       | Button to randomize node positions and reheat sim         |
-| Oooh Big Stretch!          | -       | Button to temporarily increase repulsion then relax       |
-| Clear & Reset              | -       | Button to clear all nodes, links, and packets             |
-| Hide UI                    | Off     | Hide legends and most controls for cleaner view           |
-| Full screen                | Off     | Hide the packet feed panel (desktop only)                 |
+| Option                     | Default | Description                                                 |
+| -------------------------- | ------- | ----------------------------------------------------------- |
+| Ambiguous repeaters        | On      | Show nodes when only partial prefix known                   |
+| Ambiguous sender/recipient | Off     | Show placeholder nodes for unknown senders                  |
+| Advert-path identity hints | On      | Use stored advert paths to label ambiguous repeaters        |
+| Collapse sibling repeaters | On      | Merge likely ambiguous repeater with known sibling repeater |
+| Split by traffic pattern   | Off     | Split ambiguous repeaters by next-hop routing (see above)   |
+| Observation window         | 15 sec  | Wait time for duplicate packets before animating (1-60s)    |
+| Let 'em drift              | On      | Continuous layout optimization                              |
+| Repulsion                  | 200     | Force strength (50-2500)                                    |
+| Packet speed               | 2x      | Particle animation speed multiplier (1x-5x)                 |
+| Shuffle layout             | -       | Button to randomize node positions and reheat sim           |
+| Oooh Big Stretch!          | -       | Button to temporarily increase repulsion then relax         |
+| Clear & Reset              | -       | Button to clear all nodes, links, and packets               |
+| Hide UI                    | Off     | Hide legends and most controls for cleaner view             |
+| Full screen                | Off     | Hide the packet feed panel (desktop only)                   |
 
 ## File Structure
 
 ```
 PacketVisualizer3D.tsx
 ├── TYPES (GraphNode extends SimulationNodeDatum3D, GraphLink)
-├── CONSTANTS (NODE_COLORS, NODE_LEGEND_ITEMS)
-├── DATA LAYER HOOK (useVisualizerData3D)
-│   ├── Refs (nodes, links, particles, simulation, pending, timers, trafficPatterns, stretchRaf)
-│   ├── d3-force-3d simulation initialization (.numDimensions(3))
-│   ├── Contact indexing (byPrefix12 / byName / byPrefix)
-│   ├── Node/link management (addNode, addLink, syncSimulation)
-│   ├── Path building (resolveNode, buildPath)
+├── SEMANTIC DATA LAYER (networkGraph/packetNetworkGraph.ts)
+│   ├── Contact/advert indexes
+│   ├── Canonical node/link/neighbor/observation state
+│   ├── Path building (resolveNode, buildCanonicalPathForPacket)
 │   ├── Traffic pattern analysis (for repeater disambiguation)
-│   └── Packet processing & publishing
+│   └── Projection (projectCanonicalPath, projectPacketNetwork)
+├── DATA HOOK (useVisualizerData3D)
+│   ├── Refs (network state, render nodes, links, particles, simulation, pending, timers, stretchRaf)
+│   ├── d3-force-3d simulation initialization (.numDimensions(3))
+│   ├── Semantic→render adaptation
+│   ├── Observation-window packet aggregation
+│   └── Particle publishing
 └── MAIN COMPONENT (PacketVisualizer3D)
     ├── Three.js scene setup (WebGLRenderer, CSS2DRenderer, OrbitControls)
     ├── Node mesh management (SphereGeometry + CSS2DObject labels)
@@ -348,6 +381,13 @@ utils/visualizerUtils.ts
 ├── Types (NodeType, PacketLabel, Particle, PendingPacket, ParsedPacket, etc.)
 ├── Constants (COLORS, PARTICLE_COLOR_MAP, PARTICLE_SPEED, PACKET_LEGEND_ITEMS)
 └── Functions (parsePacket, generatePacketKey, analyzeRepeaterTraffic, etc.)
+
+networkGraph/packetNetworkGraph.ts
+├── Types (PacketNetworkNode, PacketNetworkLink, PacketNetworkObservation, projection types)
+├── Context builders (contact and advert-path indexes)
+├── Canonical replay (ingestPacketIntoPacketNetwork)
+├── Projection helpers (projectCanonicalPath, projectPacketNetwork)
+└── State maintenance (clear, prune, neighbor snapshots)
 
 types/d3-force-3d.d.ts
 └── Type declarations for d3-force-3d (SimulationNodeDatum3D, Simulation3D, forces)

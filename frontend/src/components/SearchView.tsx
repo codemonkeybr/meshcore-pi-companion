@@ -19,6 +19,8 @@ interface SearchResult {
   sender_name: string | null;
 }
 
+const SEARCH_OPERATOR_RE = /(?<!\S)(user|channel):(?:"((?:[^"\\]|\\.)*)"|(\S+))/gi;
+
 export interface SearchNavigateTarget {
   id: number;
   type: 'PRIV' | 'CHAN';
@@ -26,10 +28,14 @@ export interface SearchNavigateTarget {
   conversation_name: string;
 }
 
-interface SearchViewProps {
+export interface SearchViewProps {
   contacts: Contact[];
   channels: Channel[];
   onNavigateToMessage: (target: SearchNavigateTarget) => void;
+  prefillRequest?: {
+    query: string;
+    nonce: number;
+  } | null;
 }
 
 function highlightMatch(text: string, query: string): React.ReactNode[] {
@@ -53,7 +59,34 @@ function highlightMatch(text: string, query: string): React.ReactNode[] {
   return parts;
 }
 
-export function SearchView({ contacts, channels, onNavigateToMessage }: SearchViewProps) {
+function getHighlightQuery(query: string): string {
+  const fragments: string[] = [];
+  let lastIndex = 0;
+  let foundOperator = false;
+
+  for (const match of query.matchAll(SEARCH_OPERATOR_RE)) {
+    foundOperator = true;
+    fragments.push(query.slice(lastIndex, match.index));
+    lastIndex = (match.index ?? 0) + match[0].length;
+  }
+
+  if (!foundOperator) {
+    return query;
+  }
+
+  fragments.push(query.slice(lastIndex));
+  return fragments
+    .map((fragment) => fragment.trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+export function SearchView({
+  contacts,
+  channels,
+  onNavigateToMessage,
+  prefillRequest = null,
+}: SearchViewProps) {
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -62,6 +95,7 @@ export function SearchView({ contacts, channels, onNavigateToMessage }: SearchVi
   const [offset, setOffset] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const highlightQuery = getHighlightQuery(debouncedQuery);
 
   // Debounce query
   useEffect(() => {
@@ -77,6 +111,23 @@ export function SearchView({ contacts, channels, onNavigateToMessage }: SearchVi
     setOffset(0);
     setHasMore(false);
   }, [debouncedQuery]);
+
+  useEffect(() => {
+    if (!prefillRequest) {
+      return;
+    }
+
+    const nextQuery = prefillRequest.query.trim();
+    setQuery(nextQuery);
+    setDebouncedQuery(nextQuery);
+    inputRef.current?.focus();
+  }, [prefillRequest]);
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // Fetch search results
   useEffect(() => {
@@ -193,7 +244,16 @@ export function SearchView({ contacts, channels, onNavigateToMessage }: SearchVi
       <div className="flex-1 overflow-y-auto">
         {!debouncedQuery && (
           <div className="p-8 text-center text-muted-foreground text-sm">
-            Type to search across all messages
+            <p>Type to search across all messages</p>
+            <p className="mt-2 text-xs">
+              Tip: use <code>user:</code> or <code>channel:</code> for keys or names, and wrap names
+              with spaces in them in quotes.
+            </p>
+            <p className="mt-2 text-xs">
+              Warning: User-key linkage for group messages is best-effort and based on correlation
+              at advertise time. It does not account for multiple users with the same name, and
+              should be considered unreliable.
+            </p>
           </div>
         )}
 
@@ -246,7 +306,7 @@ export function SearchView({ contacts, channels, onNavigateToMessage }: SearchVi
                   result.sender_name && result.text.startsWith(`${result.sender_name}: `)
                     ? result.text.slice(result.sender_name.length + 2)
                     : result.text,
-                  debouncedQuery
+                  highlightQuery
                 )}
               </div>
             </div>

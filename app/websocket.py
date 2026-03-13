@@ -1,11 +1,12 @@
 """WebSocket manager for real-time updates."""
 
 import asyncio
-import json
 import logging
 from typing import Any
 
 from fastapi import WebSocket
+
+from app.events import dump_ws_event
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class WebSocketManager:
         if not self.active_connections:
             return
 
-        message = json.dumps({"type": event_type, "data": data})
+        message = dump_ws_event(event_type, data)
 
         # Copy connection list under lock to avoid holding lock during I/O
         async with self._lock:
@@ -81,7 +82,7 @@ class WebSocketManager:
 
     async def send_personal(self, websocket: WebSocket, event_type: str, data: Any) -> None:
         """Send an event to a specific client."""
-        message = json.dumps({"type": event_type, "data": data})
+        message = dump_ws_event(event_type, data)
         try:
             await websocket.send_text(message)
         except Exception as e:

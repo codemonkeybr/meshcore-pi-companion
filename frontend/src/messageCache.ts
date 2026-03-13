@@ -138,6 +138,36 @@ export function remove(id: string): void {
   cache.delete(id);
 }
 
+/** Move cached conversation state to a new conversation id. */
+export function rename(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const oldEntry = cache.get(oldId);
+  if (!oldEntry) return;
+
+  const newEntry = cache.get(newId);
+  if (!newEntry) {
+    cache.delete(oldId);
+    cache.set(newId, oldEntry);
+    return;
+  }
+
+  const mergedMessages = [...newEntry.messages];
+  const seenIds = new Set(mergedMessages.map((message) => message.id));
+  for (const message of oldEntry.messages) {
+    if (!seenIds.has(message.id)) {
+      mergedMessages.push(message);
+      seenIds.add(message.id);
+    }
+  }
+
+  cache.delete(oldId);
+  cache.set(newId, {
+    messages: mergedMessages,
+    seenContent: new Set([...newEntry.seenContent, ...oldEntry.seenContent]),
+    hasOlderMessages: newEntry.hasOlderMessages || oldEntry.hasOlderMessages,
+  });
+}
+
 /** Clear the entire cache. */
 export function clear(): void {
   cache.clear();

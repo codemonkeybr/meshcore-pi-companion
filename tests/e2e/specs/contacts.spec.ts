@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { syncContacts, getContacts, type Contact } from '../helpers/api';
+import { getContacts, type Contact } from '../helpers/api';
 
 /** Escape special regex characters in a string. */
 function escapeRegex(s: string): string {
@@ -12,10 +12,6 @@ function findChatContact(contacts: Contact[]): Contact | undefined {
 }
 
 test.describe('Contacts sidebar & info pane', () => {
-  test.beforeAll(async () => {
-    await syncContacts();
-  });
-
   test('contacts appear in sidebar and clicking opens conversation', async ({ page }) => {
     const contacts = await getContacts();
     const named = findChatContact(contacts);

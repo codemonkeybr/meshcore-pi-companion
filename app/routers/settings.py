@@ -19,7 +19,8 @@ class AppSettingsUpdate(BaseModel):
         ge=1,
         le=1000,
         description=(
-            "Maximum contacts to keep on radio (favorites first, then recent non-repeaters)"
+            "Configured radio contact capacity used for maintenance thresholds and "
+            "background refill behavior"
         ),
     )
     auto_decrypt_dm_on_advert: bool | None = Field(
@@ -132,7 +133,7 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
 
         # Apply flood scope to radio immediately if changed
         if flood_scope_changed:
-            from app.radio import radio_manager
+            from app.services.radio_runtime import radio_runtime as radio_manager
 
             if radio_manager.is_connected:
                 try:
@@ -161,12 +162,12 @@ async def toggle_favorite(request: FavoriteRequest) -> AppSettings:
         logger.info("Adding favorite: %s %s", request.type, request.id[:12])
         result = await AppSettingsRepository.add_favorite(request.type, request.id)
 
-    # When a contact favorite changes, sync the radio so the contact is
-    # loaded/unloaded immediately rather than waiting for the next advert.
-    if request.type == "contact":
-        from app.radio_sync import sync_recent_contacts_to_radio
+    # When a contact is newly favorited, load just that contact to the radio
+    # immediately so DM ACK support does not wait for the next maintenance cycle.
+    if request.type == "contact" and not is_favorited:
+        from app.radio_sync import ensure_contact_on_radio
 
-        asyncio.create_task(sync_recent_contacts_to_radio(force=True))
+        asyncio.create_task(ensure_contact_on_radio(request.id, force=True))
 
     return result
 

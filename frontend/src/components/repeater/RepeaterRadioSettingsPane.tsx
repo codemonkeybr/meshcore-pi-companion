@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { Separator } from '../ui/separator';
 import {
@@ -6,7 +5,6 @@ import {
   RefreshIcon,
   NotFetched,
   KvRow,
-  formatClockDrift,
   formatAdvertInterval,
 } from './repeaterPaneShared';
 import type {
@@ -14,6 +12,35 @@ import type {
   RepeaterAdvertIntervalsResponse,
   PaneState,
 } from '../../types';
+
+function formatRadioTuple(radio: string | null): { display: string; raw: string | null } {
+  if (radio == null) {
+    return { display: '—', raw: null };
+  }
+
+  const trimmed = radio.trim();
+  const parts = trimmed.split(',').map((part) => part.trim());
+  if (parts.length !== 4) {
+    return { display: trimmed || '—', raw: trimmed || null };
+  }
+
+  const [freqRaw, bwRaw, sfRaw, crRaw] = parts;
+  const freq = Number.parseFloat(freqRaw);
+  const bw = Number.parseFloat(bwRaw);
+  const sf = Number.parseInt(sfRaw, 10);
+  const cr = Number.parseInt(crRaw, 10);
+
+  if (![freq, bw, sf, cr].every(Number.isFinite)) {
+    return { display: trimmed || '—', raw: trimmed || null };
+  }
+
+  const formattedFreq = Number(freq.toFixed(3)).toString();
+  const formattedBw = Number(bw.toFixed(3)).toString();
+  return {
+    display: `${formattedFreq} MHz, BW ${formattedBw} kHz, SF${sf}, CR${cr}`,
+    raw: trimmed,
+  };
+}
 
 export function RadioSettingsPane({
   data,
@@ -32,10 +59,7 @@ export function RadioSettingsPane({
   advertState: PaneState;
   onRefreshAdvert: () => void;
 }) {
-  const clockDrift = useMemo(() => {
-    if (!data?.clock_utc) return null;
-    return formatClockDrift(data.clock_utc);
-  }, [data?.clock_utc]);
+  const formattedRadio = formatRadioTuple(data?.radio ?? null);
 
   return (
     <RepeaterPane title="Radio Settings" state={state} onRefresh={onRefresh} disabled={disabled}>
@@ -44,36 +68,14 @@ export function RadioSettingsPane({
       ) : (
         <div>
           <KvRow label="Firmware" value={data.firmware_version ?? '—'} />
-          <KvRow label="Radio" value={data.radio ?? '—'} />
+          <KvRow
+            label="Radio"
+            value={<span title={formattedRadio.raw ?? undefined}>{formattedRadio.display}</span>}
+          />
           <KvRow label="TX Power" value={data.tx_power != null ? `${data.tx_power} dBm` : '—'} />
           <KvRow label="Airtime Factor" value={data.airtime_factor ?? '—'} />
           <KvRow label="Repeat Mode" value={data.repeat_enabled ?? '—'} />
           <KvRow label="Max Flood Hops" value={data.flood_max ?? '—'} />
-          <Separator className="my-1" />
-          <KvRow label="Name" value={data.name ?? '—'} />
-          <KvRow
-            label="Lat / Lon"
-            value={
-              data.lat != null || data.lon != null ? `${data.lat ?? '—'}, ${data.lon ?? '—'}` : '—'
-            }
-          />
-          <Separator className="my-1" />
-          <div className="flex justify-between text-sm py-0.5">
-            <span className="text-muted-foreground">Clock (UTC)</span>
-            <span>
-              {data.clock_utc ?? '—'}
-              {clockDrift && (
-                <span
-                  className={cn(
-                    'ml-2 text-xs',
-                    clockDrift.isLarge ? 'text-destructive' : 'text-muted-foreground'
-                  )}
-                >
-                  (drift: {clockDrift.text})
-                </span>
-              )}
-            </span>
-          </div>
         </div>
       )}
       {/* Advert Intervals sub-section */}

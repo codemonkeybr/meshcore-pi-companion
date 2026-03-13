@@ -244,7 +244,7 @@ def _build_radio_info() -> str:
     Matches the reference format: ``"freq,bw,sf,cr"`` (comma-separated raw
     values).  Falls back to ``"0,0,0,0"`` when unavailable.
     """
-    from app.radio import radio_manager
+    from app.services.radio_runtime import radio_runtime as radio_manager
 
     try:
         if radio_manager.backend and radio_manager.backend.self_info:
@@ -329,7 +329,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
     def _build_client_kwargs(self, settings: object) -> dict[str, Any]:
         s: CommunityMqttSettings = settings  # type: ignore[assignment]
         from app.keystore import get_private_key, get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         private_key = get_private_key()
         public_key = get_public_key()
@@ -401,7 +401,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         if self._cached_device_info is not None:
             return self._cached_device_info
 
-        from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
+        from app.radio import RadioDisconnectedError, RadioOperationBusyError
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         fallback = {"model": "unknown", "firmware_version": "unknown"}
         try:
@@ -448,7 +449,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         ) < _STATS_MIN_CACHE_SECS and self._cached_stats is not None:
             return self._cached_stats
 
-        from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
+        from app.radio import RadioDisconnectedError, RadioOperationBusyError
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         try:
             async with radio_manager.radio_operation("community_stats_fetch", blocking=False) as mc:
@@ -489,7 +491,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
     ) -> None:
         """Build and publish the enriched retained status message."""
         from app.keystore import get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         public_key = get_public_key()
         if public_key is None:

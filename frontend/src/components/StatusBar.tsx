@@ -1,9 +1,10 @@
-import { useState } from 'react';
-import { Menu } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Menu, Moon, Sun } from 'lucide-react';
 import type { HealthStatus, RadioConfig } from '../types';
 import { api } from '../api';
 import { toast } from './ui/sonner';
 import { handleKeyboardActivate } from '../utils/a11y';
+import { applyTheme, getSavedTheme, THEME_CHANGE_EVENT } from '../utils/theme';
 import { cn } from '@/lib/utils';
 
 interface StatusBarProps {
@@ -21,14 +22,38 @@ export function StatusBar({
   onSettingsClick,
   onMenuClick,
 }: StatusBarProps) {
+  const radioState =
+    health?.radio_state ??
+    (health?.radio_initializing
+      ? 'initializing'
+      : health?.radio_connected
+        ? 'connected'
+        : 'disconnected');
   const connected = health?.radio_connected ?? false;
-  const initializing = health?.radio_initializing ?? false;
-  const statusLabel = initializing
-    ? 'Radio Initializing'
-    : connected
-      ? 'Radio OK'
-      : 'Radio Disconnected';
+  const statusLabel =
+    radioState === 'paused'
+      ? 'Radio Paused'
+      : radioState === 'connecting'
+        ? 'Radio Connecting'
+        : radioState === 'initializing'
+          ? 'Radio Initializing'
+          : connected
+            ? 'Radio OK'
+            : 'Radio Disconnected';
   const [reconnecting, setReconnecting] = useState(false);
+  const [currentTheme, setCurrentTheme] = useState(getSavedTheme);
+
+  useEffect(() => {
+    const handleThemeChange = (event: Event) => {
+      const themeId = (event as CustomEvent<string>).detail;
+      setCurrentTheme(typeof themeId === 'string' && themeId ? themeId : getSavedTheme());
+    };
+
+    window.addEventListener(THEME_CHANGE_EVENT, handleThemeChange as EventListener);
+    return () => {
+      window.removeEventListener(THEME_CHANGE_EVENT, handleThemeChange as EventListener);
+    };
+  }, []);
 
   const handleReconnect = async () => {
     setReconnecting(true);
@@ -46,22 +71,28 @@ export function StatusBar({
     }
   };
 
+  const handleThemeToggle = () => {
+    const nextTheme = currentTheme === 'light' ? 'original' : 'light';
+    applyTheme(nextTheme);
+    setCurrentTheme(nextTheme);
+  };
+
   return (
     <header className="flex items-center gap-3 px-4 py-2.5 bg-card border-b border-border text-xs">
       {/* Mobile menu button - only visible on small screens */}
       {onMenuClick && (
         <button
           onClick={onMenuClick}
-          className="md:hidden p-1 bg-transparent border-none text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+          className="md:hidden p-0.5 bg-transparent border-none text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
           aria-label="Open menu"
         >
-          <Menu className="h-5 w-5" />
+          <Menu className="h-4 w-4" />
         </button>
       )}
 
       <h1 className="text-base font-semibold tracking-tight mr-auto text-foreground flex items-center gap-1.5">
         <svg
-          className="h-5 w-5 shrink-0 text-white"
+          className="h-4 w-4 shrink-0 text-white"
           viewBox="0 0 512 512"
           fill="currentColor"
           aria-hidden="true"
@@ -77,7 +108,7 @@ export function StatusBar({
         <div
           className={cn(
             'w-2 h-2 rounded-full transition-colors',
-            initializing
+            radioState === 'initializing' || radioState === 'connecting'
               ? 'bg-warning'
               : connected
                 ? 'bg-status-connected shadow-[0_0_6px_hsl(var(--status-connected)/0.5)]'
@@ -108,13 +139,13 @@ export function StatusBar({
         </div>
       )}
 
-      {!connected && !initializing && (
+      {(radioState === 'disconnected' || radioState === 'paused') && (
         <button
           onClick={handleReconnect}
           disabled={reconnecting}
           className="px-3 py-1 bg-warning/10 border border-warning/20 text-warning rounded-md text-xs cursor-pointer hover:bg-warning/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          {reconnecting ? 'Reconnecting...' : 'Reconnect'}
+          {reconnecting ? 'Reconnecting...' : radioState === 'paused' ? 'Connect' : 'Reconnect'}
         </button>
       )}
       <button
@@ -127,6 +158,18 @@ export function StatusBar({
         )}
       >
         {settingsMode ? 'Back to Chat' : 'Settings'}
+      </button>
+      <button
+        onClick={handleThemeToggle}
+        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+        title={currentTheme === 'light' ? 'Switch to classic theme' : 'Switch to light theme'}
+        aria-label={currentTheme === 'light' ? 'Switch to classic theme' : 'Switch to light theme'}
+      >
+        {currentTheme === 'light' ? (
+          <Moon className="h-4 w-4" aria-hidden="true" />
+        ) : (
+          <Sun className="h-4 w-4" aria-hidden="true" />
+        )}
       </button>
     </header>
   );

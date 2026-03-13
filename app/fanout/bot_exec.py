@@ -15,6 +15,7 @@ import inspect
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
@@ -39,6 +40,102 @@ _bot_send_lock = asyncio.Lock()
 _last_bot_send_time: float = 0.0
 
 
+@dataclass(frozen=True)
+class BotCallPlan:
+    """How to call a validated bot() function."""
+
+    call_style: str
+    keyword_args: tuple[str, ...] = ()
+
+
+def _analyze_bot_signature(bot_func_or_sig) -> BotCallPlan:
+    """Validate bot() signature and return a supported call plan."""
+    try:
+        sig = (
+            bot_func_or_sig
+            if isinstance(bot_func_or_sig, inspect.Signature)
+            else inspect.signature(bot_func_or_sig)
+        )
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Bot function signature could not be inspected") from exc
+
+    params = sig.parameters
+    param_values = tuple(params.values())
+    positional_params = [
+        p
+        for p in param_values
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in param_values)
+    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in param_values)
+    explicit_optional_names = tuple(
+        name for name in ("is_outgoing", "path_bytes_per_hop") if name in params
+    )
+    unsupported_required_kwonly = [
+        p.name
+        for p in param_values
+        if p.kind == inspect.Parameter.KEYWORD_ONLY
+        and p.default is inspect.Parameter.empty
+        and p.name not in {"is_outgoing", "path_bytes_per_hop"}
+    ]
+    if unsupported_required_kwonly:
+        raise ValueError(
+            "Bot function signature is not supported. Unsupported required keyword-only "
+            "parameters: " + ", ".join(unsupported_required_kwonly)
+        )
+
+    positional_capacity = len(positional_params)
+    base_args = [object()] * 8
+    base_keyword_args: dict[str, object] = {
+        "sender_name": object(),
+        "sender_key": object(),
+        "message_text": object(),
+        "is_dm": object(),
+        "channel_key": object(),
+        "channel_name": object(),
+        "sender_timestamp": object(),
+        "path": object(),
+    }
+    candidate_specs: list[tuple[str, list[object], dict[str, object]]] = []
+    keyword_args = dict(base_keyword_args)
+    if has_kwargs or "is_outgoing" in params:
+        keyword_args["is_outgoing"] = False
+    if has_kwargs or "path_bytes_per_hop" in params:
+        keyword_args["path_bytes_per_hop"] = 1
+    candidate_specs.append(("keyword", [], keyword_args))
+
+    if not has_kwargs and explicit_optional_names:
+        kwargs: dict[str, object] = {}
+        if has_kwargs or "is_outgoing" in params:
+            kwargs["is_outgoing"] = False
+        if has_kwargs or "path_bytes_per_hop" in params:
+            kwargs["path_bytes_per_hop"] = 1
+        candidate_specs.append(("mixed_keyword", base_args, kwargs))
+
+    if has_varargs or positional_capacity >= 10:
+        candidate_specs.append(("positional_10", base_args + [False, 1], {}))
+    if has_varargs or positional_capacity >= 9:
+        candidate_specs.append(("positional_9", base_args + [False], {}))
+    if has_varargs or positional_capacity >= 8:
+        candidate_specs.append(("legacy", base_args, {}))
+
+    for call_style, args, kwargs in candidate_specs:
+        try:
+            sig.bind(*args, **kwargs)
+        except TypeError:
+            continue
+        if call_style in {"keyword", "mixed_keyword"}:
+            return BotCallPlan(call_style="keyword", keyword_args=tuple(kwargs.keys()))
+        return BotCallPlan(call_style=call_style)
+
+    raise ValueError(
+        "Bot function signature is not supported. Use the default bot template as a reference. "
+        "Supported trailing parameters are: path; path + is_outgoing; "
+        "path + path_bytes_per_hop; path + is_outgoing + path_bytes_per_hop; "
+        "or use **kwargs for forward compatibility."
+    )
+
+
 def execute_bot_code(
     code: str,
     sender_name: str | None,
@@ -50,17 +147,19 @@ def execute_bot_code(
     sender_timestamp: int | None,
     path: str | None,
     is_outgoing: bool = False,
+    path_bytes_per_hop: int | None = None,
 ) -> str | list[str] | None:
     """
     Execute user-provided bot code with message context.
 
     The code should define a function:
-    `bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path, is_outgoing)`
+    `bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path, is_outgoing, path_bytes_per_hop)`
+    or use named parameters / `**kwargs`.
     that returns either None (no response), a string (single response message),
     or a list of strings (multiple messages sent in order).
 
-    Legacy bot functions with 8 parameters (without is_outgoing) are detected
-    via inspect and called without the new parameter for backward compatibility.
+    Legacy bot functions with older signatures are detected via inspect and
+    called without the newer parameters for backward compatibility.
 
     Args:
         code: Python code defining the bot function
@@ -73,6 +172,7 @@ def execute_bot_code(
         sender_timestamp: Sender's timestamp from the message (may be None)
         path: Hex-encoded routing path (may be None)
         is_outgoing: True if this is our own outgoing message
+        path_bytes_per_hop: Number of bytes per routing hop (1, 2, or 3), if known
 
     Returns:
         Response string, list of strings, or None.
@@ -100,30 +200,28 @@ def execute_bot_code(
         return None
 
     bot_func = namespace["bot"]
-
-    # Detect whether the bot function accepts is_outgoing (new 9-param signature)
-    # or uses the legacy 8-param signature, for backward compatibility.
-    # Three cases: explicit is_outgoing param or 9+ params (positional),
-    # **kwargs (pass as keyword), or legacy 8-param (omit).
-    call_style = "legacy"  # "positional", "keyword", or "legacy"
     try:
-        sig = inspect.signature(bot_func)
-        params = sig.parameters
-        non_variadic = [
-            p
-            for p in params.values()
-            if p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        ]
-        if "is_outgoing" in params or len(non_variadic) >= 9:
-            call_style = "positional"
-        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-            call_style = "keyword"
-    except (ValueError, TypeError):
-        pass
+        call_plan = _analyze_bot_signature(bot_func)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return None
 
     try:
         # Call the bot function with appropriate signature
-        if call_style == "positional":
+        if call_plan.call_style == "positional_10":
+            result = bot_func(
+                sender_name,
+                sender_key,
+                message_text,
+                is_dm,
+                channel_key,
+                channel_name,
+                sender_timestamp,
+                path,
+                is_outgoing,
+                path_bytes_per_hop,
+            )
+        elif call_plan.call_style == "positional_9":
             result = bot_func(
                 sender_name,
                 sender_key,
@@ -135,18 +233,29 @@ def execute_bot_code(
                 path,
                 is_outgoing,
             )
-        elif call_style == "keyword":
-            result = bot_func(
-                sender_name,
-                sender_key,
-                message_text,
-                is_dm,
-                channel_key,
-                channel_name,
-                sender_timestamp,
-                path,
-                is_outgoing=is_outgoing,
-            )
+        elif call_plan.call_style == "keyword":
+            keyword_args: dict[str, Any] = {}
+            if "sender_name" in call_plan.keyword_args:
+                keyword_args["sender_name"] = sender_name
+            if "sender_key" in call_plan.keyword_args:
+                keyword_args["sender_key"] = sender_key
+            if "message_text" in call_plan.keyword_args:
+                keyword_args["message_text"] = message_text
+            if "is_dm" in call_plan.keyword_args:
+                keyword_args["is_dm"] = is_dm
+            if "channel_key" in call_plan.keyword_args:
+                keyword_args["channel_key"] = channel_key
+            if "channel_name" in call_plan.keyword_args:
+                keyword_args["channel_name"] = channel_name
+            if "sender_timestamp" in call_plan.keyword_args:
+                keyword_args["sender_timestamp"] = sender_timestamp
+            if "path" in call_plan.keyword_args:
+                keyword_args["path"] = path
+            if "is_outgoing" in call_plan.keyword_args:
+                keyword_args["is_outgoing"] = is_outgoing
+            if "path_bytes_per_hop" in call_plan.keyword_args:
+                keyword_args["path_bytes_per_hop"] = path_bytes_per_hop
+            result = bot_func(**keyword_args)
         else:
             result = bot_func(
                 sender_name,

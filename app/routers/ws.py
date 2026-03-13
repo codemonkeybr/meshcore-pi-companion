@@ -4,8 +4,8 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.radio import radio_manager
 from app.routers.health import build_health_data
+from app.services.radio_runtime import radio_runtime as radio_manager
 from app.websocket import ws_manager
 
 logger = logging.getLogger(__name__)

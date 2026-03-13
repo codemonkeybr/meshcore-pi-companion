@@ -86,14 +86,19 @@ export function resolveChannelFromHashToken(token: string, channels: Channel[]):
 export function resolveContactFromHashToken(token: string, contacts: Contact[]): Contact | null {
   const normalizedToken = token.trim();
   if (!normalizedToken) return null;
+  const lowerToken = normalizedToken.toLowerCase();
 
   // Preferred path: stable identity by full public key.
-  const byKey = contacts.find((c) => c.public_key.toLowerCase() === normalizedToken.toLowerCase());
+  const byKey = contacts.find((c) => c.public_key.toLowerCase() === lowerToken);
   if (byKey) return byKey;
 
   // Backward compatibility for legacy name/prefix-based hashes.
   return (
-    contacts.find((c) => getContactDisplayName(c.name, c.public_key) === normalizedToken) || null
+    contacts.find(
+      (c) =>
+        getContactDisplayName(c.name, c.public_key, c.last_advert) === normalizedToken ||
+        c.public_key.toLowerCase().startsWith(lowerToken)
+    ) || null
   );
 }
 

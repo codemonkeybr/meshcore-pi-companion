@@ -25,7 +25,7 @@ _BACKOFF_MIN = 5
 
 def _broadcast_health() -> None:
     """Push updated health (including MQTT status) to all WS clients."""
-    from app.radio import radio_manager
+    from app.services.radio_runtime import radio_runtime as radio_manager
     from app.websocket import broadcast_health
 
     broadcast_health(radio_manager.is_connected, radio_manager.connection_info)

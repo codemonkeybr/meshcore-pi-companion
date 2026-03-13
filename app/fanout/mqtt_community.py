@@ -109,7 +109,7 @@ async def _publish_community_packet(
     """Format and publish a raw packet to the community broker."""
     try:
         from app.keystore import get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         public_key = get_public_key()
         if public_key is None:

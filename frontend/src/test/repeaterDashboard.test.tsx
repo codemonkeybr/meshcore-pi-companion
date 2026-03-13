@@ -13,6 +13,7 @@ const mockHook: {
   loginError: null,
   paneData: {
     status: null,
+    nodeInfo: null,
     neighbors: null,
     acl: null,
     radioSettings: null,
@@ -23,6 +24,7 @@ const mockHook: {
   },
   paneStates: {
     status: { loading: false, attempt: 0, error: null },
+    nodeInfo: { loading: false, attempt: 0, error: null },
     neighbors: { loading: false, attempt: 0, error: null },
     acl: { loading: false, attempt: 0, error: null },
     radioSettings: { loading: false, attempt: 0, error: null },
@@ -38,7 +40,8 @@ const mockHook: {
   refreshPane: vi.fn(),
   loadAll: vi.fn(),
   sendConsoleCommand: vi.fn(),
-  sendAdvert: vi.fn(),
+  sendZeroHopAdvert: vi.fn(),
+  sendFloodAdvert: vi.fn(),
   rebootRepeater: vi.fn(),
   syncClock: vi.fn(),
 };
@@ -62,6 +65,7 @@ vi.mock('react-leaflet', () => ({
   TileLayer: () => null,
   CircleMarker: () => null,
   Popup: () => null,
+  Polyline: () => null,
 }));
 
 const REPEATER_KEY = 'aa'.repeat(32);
@@ -98,10 +102,14 @@ const defaultProps = {
   conversation,
   contacts,
   favorites,
+  notificationsSupported: true,
+  notificationsEnabled: false,
+  notificationsPermission: 'granted' as const,
   radioLat: null,
   radioLon: null,
   radioName: null,
   onTrace: vi.fn(),
+  onToggleNotifications: vi.fn(),
   onToggleFavorite: vi.fn(),
   onDeleteContact: vi.fn(),
 };
@@ -115,6 +123,7 @@ describe('RepeaterDashboard', () => {
     mockHook.loginError = null;
     mockHook.paneData = {
       status: null,
+      nodeInfo: null,
       neighbors: null,
       acl: null,
       radioSettings: null,
@@ -125,6 +134,7 @@ describe('RepeaterDashboard', () => {
     };
     mockHook.paneStates = {
       status: { loading: false, attempt: 0, error: null },
+      nodeInfo: { loading: false, attempt: 0, error: null },
       neighbors: { loading: false, attempt: 0, error: null },
       acl: { loading: false, attempt: 0, error: null },
       radioSettings: { loading: false, attempt: 0, error: null },
@@ -152,6 +162,7 @@ describe('RepeaterDashboard', () => {
     render(<RepeaterDashboard {...defaultProps} />);
 
     expect(screen.getByText('Telemetry')).toBeInTheDocument();
+    expect(screen.getByText('Node Info')).toBeInTheDocument();
     expect(screen.getByText('Neighbors')).toBeInTheDocument();
     expect(screen.getByText('ACL')).toBeInTheDocument();
     expect(screen.getByText('Radio Settings')).toBeInTheDocument();
@@ -189,6 +200,21 @@ describe('RepeaterDashboard', () => {
     expect(mockHook.loadAll).toHaveBeenCalledTimes(1);
   });
 
+  it('shows enabled notification state and toggles when clicked', () => {
+    render(
+      <RepeaterDashboard
+        {...defaultProps}
+        notificationsEnabled
+        onToggleNotifications={defaultProps.onToggleNotifications}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Notifications On'));
+
+    expect(screen.getByText('Notifications On')).toBeInTheDocument();
+    expect(defaultProps.onToggleNotifications).toHaveBeenCalledTimes(1);
+  });
+
   it('shows login error when present', () => {
     mockHook.loginError = 'Invalid password';
 
@@ -204,6 +230,102 @@ describe('RepeaterDashboard', () => {
     render(<RepeaterDashboard {...defaultProps} />);
 
     expect(screen.getByText('Timeout')).toBeInTheDocument();
+  });
+
+  it('shows GPS unavailable message for neighbors when repeater coords are missing', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneData.neighbors = {
+      neighbors: [
+        { pubkey_prefix: 'bbbbbbbbbbbb', name: 'Neighbor', snr: 7.2, last_heard_seconds: 9 },
+      ],
+    };
+    mockHook.paneData.nodeInfo = {
+      name: 'TestRepeater',
+      lat: '0',
+      lon: '0',
+      clock_utc: null,
+    };
+    mockHook.paneStates.neighbors = {
+      loading: false,
+      attempt: 1,
+      error: null,
+      fetched_at: Date.now(),
+    };
+    mockHook.paneStates.nodeInfo = {
+      loading: false,
+      attempt: 1,
+      error: null,
+      fetched_at: Date.now(),
+    };
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    expect(
+      screen.getByText(
+        'GPS info failed to fetch; map and distance data not available. This may be due to missing or zero-zero GPS data on the repeater, or due to transient fetch failure. Try refreshing.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Dist')).not.toBeInTheDocument();
+  });
+
+  it('shows neighbor distance when repeater radio settings include valid coords', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneData.neighbors = {
+      neighbors: [
+        { pubkey_prefix: 'bbbbbbbbbbbb', name: 'Neighbor', snr: 7.2, last_heard_seconds: 9 },
+      ],
+    };
+    mockHook.paneData.nodeInfo = {
+      name: 'TestRepeater',
+      lat: '-31.9500',
+      lon: '115.8600',
+      clock_utc: null,
+    };
+    mockHook.paneStates.neighbors = {
+      loading: false,
+      attempt: 1,
+      error: null,
+      fetched_at: Date.now(),
+    };
+    mockHook.paneStates.nodeInfo = {
+      loading: false,
+      attempt: 1,
+      error: null,
+      fetched_at: Date.now(),
+    };
+
+    const contactsWithNeighbor = [
+      ...contacts,
+      {
+        public_key: 'bbbbbbbbbbbb0000000000000000000000000000000000000000000000000000',
+        name: 'Neighbor',
+        type: 1,
+        flags: 0,
+        last_path: null,
+        last_path_len: 0,
+        out_path_hash_mode: 0,
+        route_override_path: null,
+        route_override_len: null,
+        route_override_hash_mode: null,
+        last_advert: null,
+        lat: -31.94,
+        lon: 115.87,
+        last_seen: null,
+        on_radio: false,
+        last_contacted: null,
+        last_read_at: null,
+        first_seen: null,
+      },
+    ];
+
+    render(<RepeaterDashboard {...defaultProps} contacts={contactsWithNeighbor} />);
+
+    expect(screen.getByText('Dist')).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'GPS info failed to fetch; map and distance data not available. This may be due to missing or zero-zero GPS data on the repeater, or due to transient fetch failure. Try refreshing.'
+      )
+    ).not.toBeInTheDocument();
   });
 
   it('shows fetching state with attempt counter', () => {
@@ -244,12 +366,45 @@ describe('RepeaterDashboard', () => {
     expect(screen.getByText('7.5 dB')).toBeInTheDocument();
   });
 
+  it('formats the radio tuple and preserves the raw tuple in a tooltip', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneData.radioSettings = {
+      firmware_version: 'v1.0',
+      radio: '910.5250244,62.5,7,5',
+      tx_power: '20',
+      airtime_factor: '0',
+      repeat_enabled: '1',
+      flood_max: '3',
+    };
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    const formatted = screen.getByText('910.525 MHz, BW 62.5 kHz, SF7, CR5');
+    expect(formatted).toBeInTheDocument();
+    expect(formatted).toHaveAttribute('title', '910.5250244,62.5,7,5');
+  });
+
+  it('shows fetched time and relative age when pane data has been loaded', () => {
+    mockHook.loggedIn = true;
+    mockHook.paneStates.status = {
+      loading: false,
+      attempt: 1,
+      error: null,
+      fetched_at: Date.now(),
+    };
+
+    render(<RepeaterDashboard {...defaultProps} />);
+
+    expect(screen.getByText(/Fetched .*Just now/)).toBeInTheDocument();
+  });
+
   it('renders action buttons', () => {
     mockHook.loggedIn = true;
 
     render(<RepeaterDashboard {...defaultProps} />);
 
-    expect(screen.getByText('Send Advert')).toBeInTheDocument();
+    expect(screen.getByText('Zero Hop Advert')).toBeInTheDocument();
+    expect(screen.getByText('Flood Advert')).toBeInTheDocument();
     expect(screen.getByText('Sync Clock')).toBeInTheDocument();
     expect(screen.getByText('Reboot')).toBeInTheDocument();
   });

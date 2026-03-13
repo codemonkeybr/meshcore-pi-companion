@@ -21,7 +21,7 @@ test.describe('Channel messaging in #flightless', () => {
     await input.fill(testMessage);
 
     // Send it
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     // Verify message appears in the message list
     await expect(page.getByText(testMessage)).toBeVisible({ timeout: 15_000 });
@@ -35,7 +35,7 @@ test.describe('Channel messaging in #flightless', () => {
     const testMessage = `ack-test-${Date.now()}`;
     const input = page.getByPlaceholder(/type a message|message #flightless/i);
     await input.fill(testMessage);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     // Wait for the message to appear
     const messageEl = page.getByText(testMessage);
@@ -56,7 +56,7 @@ test.describe('Channel messaging in #flightless', () => {
     const testMessage = `resend-test-${Date.now()}`;
     const input = page.getByPlaceholder(/type a message|message #flightless/i);
     await input.fill(testMessage);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     const messageEl = page.getByText(testMessage).first();
     await expect(messageEl).toBeVisible({ timeout: 15_000 });

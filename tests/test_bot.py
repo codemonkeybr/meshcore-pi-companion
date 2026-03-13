@@ -312,6 +312,91 @@ def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name,
         )
         assert result == "outgoing=True"
 
+    def test_new_10_param_bot_receives_path_bytes_per_hop(self):
+        """Bots that declare path_bytes_per_hop receive it positionally."""
+        code = """
+def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path, is_outgoing, path_bytes_per_hop):
+    return f"bytes={path_bytes_per_hop}"
+"""
+        result = execute_bot_code(
+            code=code,
+            sender_name="Alice",
+            sender_key="abc123",
+            message_text="Hi",
+            is_dm=True,
+            channel_key=None,
+            channel_name=None,
+            sender_timestamp=None,
+            path="aabb",
+            path_bytes_per_hop=2,
+        )
+        assert result == "bytes=2"
+
+    def test_9_param_bot_with_path_bytes_only_receives_it(self):
+        """Bots may opt into path_bytes_per_hop without also declaring is_outgoing."""
+        code = """
+def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path, path_bytes_per_hop):
+    return f"bytes={path_bytes_per_hop}"
+"""
+        result = execute_bot_code(
+            code=code,
+            sender_name="Alice",
+            sender_key="abc123",
+            message_text="Hi",
+            is_dm=True,
+            channel_key=None,
+            channel_name=None,
+            sender_timestamp=None,
+            path="aabb",
+            is_outgoing=True,
+            path_bytes_per_hop=2,
+        )
+        assert result == "bytes=2"
+
+    def test_legacy_bot_with_kwargs_receives_path_bytes_per_hop(self):
+        """Bots using **kwargs receive the new path_bytes_per_hop field."""
+        code = """
+def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path, **kwargs):
+    return f"bytes={kwargs.get('path_bytes_per_hop', 'missing')}"
+"""
+        result = execute_bot_code(
+            code=code,
+            sender_name="Alice",
+            sender_key="abc123",
+            message_text="Hi",
+            is_dm=True,
+            channel_key=None,
+            channel_name=None,
+            sender_timestamp=None,
+            path="aabb",
+            path_bytes_per_hop=2,
+        )
+        assert result == "bytes=2"
+
+    def test_pure_kwargs_bot_receives_core_fields_and_optional_extras(self):
+        """Pure **kwargs bots are first-class and receive the full payload by keyword."""
+        code = """
+def bot(**kwargs):
+    return (
+        f"{kwargs.get('sender_name')}|{kwargs.get('message_text')}|"
+        f"{kwargs.get('is_outgoing')}|{kwargs.get('path_bytes_per_hop')}"
+    )
+"""
+        result = execute_bot_code(
+            code=code,
+            sender_name="Alice",
+            sender_key="abc123",
+            message_text="Hi",
+            is_dm=True,
+            channel_key=None,
+            channel_name=None,
+            sender_timestamp=None,
+            path="aabb",
+            is_outgoing=True,
+            path_bytes_per_hop=2,
+        )
+        assert result == "Alice|Hi|True|2"
+
     def test_channel_message_with_none_sender_key(self):
         """Channel messages correctly pass None for sender_key."""
         code = """
@@ -419,7 +504,20 @@ class TestBotCodeValidation:
         from app.routers.fanout import _validate_bot_config
 
         # Should not raise
-        _validate_bot_config({"code": "def bot(): return 'hello'"})
+        _validate_bot_config(
+            {
+                "code": (
+                    "def bot(sender_name, sender_key, message_text, is_dm, channel_key, "
+                    "channel_name, sender_timestamp, path):\n    return 'hello'"
+                )
+            }
+        )
+
+    def test_pure_kwargs_code_passes(self):
+        """Pure **kwargs bots are valid."""
+        from app.routers.fanout import _validate_bot_config
+
+        _validate_bot_config({"code": "def bot(**kwargs):\n    return kwargs.get('message_text')"})
 
     def test_syntax_error_raises(self):
         """Syntax error in code raises HTTPException."""
@@ -455,6 +553,38 @@ class TestBotCodeValidation:
             _validate_bot_config({})
 
         assert exc_info.value.status_code == 400
+
+    def test_missing_bot_function_raises(self):
+        """Code must define a callable bot() function."""
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_bot_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_bot_config({"code": "def helper():\n    return 'hello'"})
+
+        assert exc_info.value.status_code == 400
+        assert "callable bot() function" in exc_info.value.detail
+
+    def test_unsupported_signature_raises(self):
+        """Unsupported bot signatures are rejected with guidance."""
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_bot_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_bot_config(
+                {
+                    "code": (
+                        "def bot(sender_name, sender_key, message_text, is_dm, channel_key, "
+                        "channel_name, sender_timestamp, path, *, extra_required):\n"
+                        "    return extra_required"
+                    )
+                }
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "signature is not supported" in exc_info.value.detail.lower()
 
 
 class TestBotMessageRateLimiting:

@@ -8,11 +8,11 @@ Backend server + browser interface for MeshCore mesh radio networks. Connect you
 * Monitor unlimited contacts and channels (radio limits don't apply -- packets are decrypted server-side)
 * Access your radio remotely over your network or VPN
 * Search for hashtag room names for channels you don't have keys for yet
-* Forward packets to MQTT brokers (private: decrypted messages and/or raw packets; community aggregators like LetsMesh.net: raw packets only)
-* Use the more recent 1.14 firmwares which support multibyte pathing in all traffic and display systems within the app
+* Forward packets to MQTT, LetsMesh, MeshRank, SQS, Apprise, etc.
+* Use the more recent 1.14 firmwares which support multibyte pathing
 * Visualize the mesh as a map or node set, view repeater stats, and more!
 
-**Warning:** This app has no auth, and is for trusted environments only. _Do not put this on an untrusted network, or open it to the public._ The bots can execute arbitrary Python code which means anyone on your network can, too. To completely disable the bot system, start the server with `MESHCORE_DISABLE_BOTS=true` — this prevents all bot execution and blocks bot configuration changes via the API. If you need access control, consider using a reverse proxy like Nginx, or extending FastAPI; access control and user management are outside the scope of this app.
+**Warning:** This app is for trusted environments only. _Do not put this on an untrusted network, or open it to the public._ You can optionally set `MESHCORE_BASIC_AUTH_USERNAME` and `MESHCORE_BASIC_AUTH_PASSWORD` for app-wide HTTP Basic auth, but that is only a coarse gate and must be paired with HTTPS. The bots can execute arbitrary Python code which means anyone who gets access to the app can, too. To completely disable the bot system, start the server with `MESHCORE_DISABLE_BOTS=true` — this prevents all bot execution and blocks bot configuration changes via the API. If you need stronger access control, consider using a reverse proxy like Nginx, or extending FastAPI; full access control and user management are outside the scope of this app.
 
 ![Screenshot of the application's web interface](app_screenshot.png)
 
@@ -77,7 +77,7 @@ cd Remote-Terminal-for-MeshCore
 uv sync
 
 # Build frontend
-cd frontend && npm install && npm run build && cd ..
+cd frontend && npm ci && npm run build && cd ..
 
 # Run server
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -202,7 +202,7 @@ uv run uvicorn app.main:app --reload
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev      # Dev server at http://localhost:5173 (proxies API to :8000)
 npm run build    # Production build to dist/
 ```
@@ -252,8 +252,28 @@ npm run build                        # build the frontend
 | `MESHCORE_LOG_LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR |
 | `MESHCORE_DATABASE_PATH` | data/meshcore.db | SQLite database path |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config) |
+| `MESHCORE_BASIC_AUTH_USERNAME` | | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
+| `MESHCORE_BASIC_AUTH_PASSWORD` | | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
 
 Only one transport may be active at a time (serial, TCP, BLE, or SPI). SPI is selected when the config file exists; no env vars are required for SPI beyond an optional `MESHCORE_CONFIG_FILE` override.
+
+If you enable Basic Auth, protect the app with HTTPS. HTTP Basic credentials are not safe on plain HTTP.
+
+### Remediation Environment Variables
+
+These are intended for diagnosing or working around radios that behave oddly.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK` | false | Run aggressive 10-second `get_msg()` fallback polling instead of the default hourly sanity check |
+| `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE` | false | Disable channel-slot reuse and force `set_channel(...)` before every channel send |
+
+By default the app relies on radio events plus MeshCore auto-fetch for incoming messages, and also runs a low-frequency hourly audit poll. That audit checks both:
+
+- whether messages were left on the radio without reaching the app through event subscription
+- whether the app's channel-slot expectations still match the radio's actual channel listing
+
+If the audit finds a mismatch, you'll see an error in the application UI and your logs. If you see that warning, or if messages on the radio never show up in the app, try `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true` to switch that task into a more aggressive 10-second safety net. If room sends appear to be using the wrong channel slot or another client is changing slots underneath this app, try `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true` to force the radio to validate the channel slot is valid before sending (will delay sending by ~500ms).
 
 ## Additional Setup
 
@@ -308,7 +328,7 @@ sudo -u remoteterm uv sync
 
 # Build frontend (required for the backend to serve the web UI)
 cd /opt/remoteterm/frontend
-sudo -u remoteterm npm install
+sudo -u remoteterm npm ci
 sudo -u remoteterm npm run build
 
 # Install and start service

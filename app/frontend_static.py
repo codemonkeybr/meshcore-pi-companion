@@ -7,6 +7,32 @@ from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
+INDEX_CACHE_CONTROL = "no-store"
+ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+STATIC_FILE_CACHE_CONTROL = "public, max-age=3600"
+
+
+class CacheControlStaticFiles(StaticFiles):
+    """StaticFiles variant that adds a fixed Cache-Control header."""
+
+    def __init__(self, *args, cache_control: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cache_control = cache_control
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = self.cache_control
+        return response
+
+
+def _file_response(path: Path, *, cache_control: str) -> FileResponse:
+    return FileResponse(path, headers={"Cache-Control": cache_control})
+
+
+def _is_index_file(path: Path, index_file: Path) -> bool:
+    """Return True when the requested file is the SPA shell index.html."""
+    return path == index_file
+
 
 def _resolve_request_origin(request: Request) -> str:
     """Resolve the external origin, honoring common reverse-proxy headers."""
@@ -57,7 +83,11 @@ def register_frontend_static_routes(app: FastAPI, frontend_dir: Path) -> bool:
         return False
 
     if assets_dir.exists() and assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        app.mount(
+            "/assets",
+            CacheControlStaticFiles(directory=assets_dir, cache_control=ASSET_CACHE_CONTROL),
+            name="assets",
+        )
     else:
         logger.warning(
             "Frontend assets directory missing at %s; /assets files will not be served",
@@ -67,7 +97,7 @@ def register_frontend_static_routes(app: FastAPI, frontend_dir: Path) -> bool:
     @app.get("/")
     async def serve_index():
         """Serve the frontend index.html."""
-        return FileResponse(index_file)
+        return _file_response(index_file, cache_control=INDEX_CACHE_CONTROL)
 
     @app.get("/site.webmanifest")
     async def serve_webmanifest(request: Request):
@@ -114,9 +144,14 @@ def register_frontend_static_routes(app: FastAPI, frontend_dir: Path) -> bool:
             raise HTTPException(status_code=404, detail="Not found") from None
 
         if file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
+            cache_control = (
+                INDEX_CACHE_CONTROL
+                if _is_index_file(file_path, index_file)
+                else STATIC_FILE_CACHE_CONTROL
+            )
+            return _file_response(file_path, cache_control=cache_control)
 
-        return FileResponse(index_file)
+        return _file_response(index_file, cache_control=INDEX_CACHE_CONTROL)
 
     logger.info("Serving frontend from %s", frontend_dir)
     return True
@@ -129,7 +164,5 @@ def register_frontend_missing_fallback(app: FastAPI) -> None:
     async def frontend_not_built():
         return JSONResponse(
             status_code=404,
-            content={
-                "detail": "Frontend not built. Run: cd frontend && npm install && npm run build"
-            },
+            content={"detail": "Frontend not built. Run: cd frontend && npm ci && npm run build"},
         )

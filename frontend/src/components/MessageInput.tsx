@@ -150,7 +150,7 @@ export const MessageInput = forwardRef<MessageInputHandle, MessageInputProps>(fu
 
   return (
     <form
-      className="px-4 py-2.5 border-t border-border flex flex-col gap-1"
+      className="message-input-shell px-4 py-2.5 border-t border-border flex flex-col gap-1"
       onSubmit={handleSubmit}
       autoComplete="off"
     >

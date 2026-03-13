@@ -42,6 +42,22 @@ export function setLastMessageTime(key: string, timestamp: number): Conversation
 }
 
 /**
+ * Move conversation timing state to a new key, preserving the most recent timestamp.
+ */
+export function renameConversationTimeKey(oldKey: string, newKey: string): ConversationTimes {
+  if (oldKey === newKey) return { ...lastMessageTimesCache };
+
+  const oldTimestamp = lastMessageTimesCache[oldKey];
+  const newTimestamp = lastMessageTimesCache[newKey];
+  if (oldTimestamp !== undefined) {
+    lastMessageTimesCache[newKey] =
+      newTimestamp === undefined ? oldTimestamp : Math.max(newTimestamp, oldTimestamp);
+    delete lastMessageTimesCache[oldKey];
+  }
+  return { ...lastMessageTimesCache };
+}
+
+/**
  * Generate a state tracking key for message times.
  *
  * This is NOT the same as Message.conversation_key (the database field).

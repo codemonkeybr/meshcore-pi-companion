@@ -1,10 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { Channel, HealthStatus, Contact, Message, MessagePath, RawPacket } from './types';
-
-interface WebSocketMessage {
-  type: string;
-  data: unknown;
-}
+import { parseWsEvent } from './wsEvents';
 
 interface ErrorEvent {
   message: string;
@@ -16,10 +12,11 @@ interface SuccessEvent {
   details?: string;
 }
 
-interface UseWebSocketOptions {
+export interface UseWebSocketOptions {
   onHealth?: (health: HealthStatus) => void;
   onMessage?: (message: Message) => void;
   onContact?: (contact: Contact) => void;
+  onContactResolved?: (previousPublicKey: string, contact: Contact) => void;
   onContactDeleted?: (publicKey: string) => void;
   onChannel?: (channel: Channel) => void;
   onChannelDeleted?: (key: string) => void;
@@ -92,7 +89,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
 
     ws.onmessage = (event) => {
       try {
-        const msg: WebSocketMessage = JSON.parse(event.data);
+        const msg = parseWsEvent(event.data);
         // Access handlers through ref to always use current versions
         const handlers = optionsRef.current;
 
@@ -106,6 +103,14 @@ export function useWebSocket(options: UseWebSocketOptions) {
           case 'contact':
             handlers.onContact?.(msg.data as Contact);
             break;
+          case 'contact_resolved': {
+            const resolved = msg.data as {
+              previous_public_key: string;
+              contact: Contact;
+            };
+            handlers.onContactResolved?.(resolved.previous_public_key, resolved.contact);
+            break;
+          }
           case 'channel':
             handlers.onChannel?.(msg.data as Channel);
             break;
@@ -136,8 +141,8 @@ export function useWebSocket(options: UseWebSocketOptions) {
           case 'pong':
             // Heartbeat response, ignore
             break;
-          default:
-            console.warn('Unknown WebSocket message type:', msg.type);
+          case 'unknown':
+            console.warn('Unknown WebSocket message type:', msg.rawType);
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);

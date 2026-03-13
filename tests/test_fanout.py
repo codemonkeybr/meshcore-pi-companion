@@ -1,7 +1,7 @@
 """Tests for fanout bus: manager, scope matching, repository, and modules."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -568,6 +568,151 @@ class TestWebhookValidation:
         )
         assert scope["raw_packets"] == "none"
         assert scope["messages"] == {"channels": ["ch1"], "contacts": "none"}
+
+
+# ---------------------------------------------------------------------------
+# SQS module unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestSqsModule:
+    @pytest.mark.asyncio
+    async def test_status_disconnected_when_no_queue_url(self):
+        from app.fanout.sqs import SqsModule
+
+        with patch("app.fanout.sqs.boto3.client", return_value=MagicMock()):
+            mod = SqsModule("test", {"queue_url": ""})
+            await mod.start()
+            assert mod.status == "disconnected"
+            await mod.stop()
+
+    @pytest.mark.asyncio
+    async def test_status_connected_with_queue_url(self):
+        from app.fanout.sqs import SqsModule
+
+        with patch("app.fanout.sqs.boto3.client", return_value=MagicMock()) as mock_client:
+            mod = SqsModule(
+                "test",
+                {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events"},
+            )
+            await mod.start()
+            assert mod.status == "connected"
+            mock_client.assert_called_once_with("sqs", region_name="us-east-1")
+            await mod.stop()
+
+    @pytest.mark.asyncio
+    async def test_explicit_region_overrides_queue_url_inference(self):
+        from app.fanout.sqs import SqsModule
+
+        with patch("app.fanout.sqs.boto3.client", return_value=MagicMock()) as mock_client:
+            mod = SqsModule(
+                "test",
+                {
+                    "queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events",
+                    "region_name": "us-west-2",
+                },
+            )
+            await mod.start()
+            mock_client.assert_called_once_with("sqs", region_name="us-west-2")
+            await mod.stop()
+
+    @pytest.mark.asyncio
+    async def test_custom_queue_url_does_not_infer_region(self):
+        from app.fanout.sqs import SqsModule
+
+        with patch("app.fanout.sqs.boto3.client", return_value=MagicMock()) as mock_client:
+            mod = SqsModule(
+                "test",
+                {"queue_url": "https://localhost:4566/000000000000/mesh-events"},
+            )
+            await mod.start()
+            mock_client.assert_called_once_with("sqs")
+            await mod.stop()
+
+    @pytest.mark.asyncio
+    async def test_sends_message_payload(self):
+        from app.fanout.sqs import SqsModule
+
+        mock_client = MagicMock()
+        with patch("app.fanout.sqs.boto3.client", return_value=mock_client):
+            mod = SqsModule(
+                "test",
+                {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events"},
+            )
+            await mod.start()
+            await mod.on_message(
+                {"id": 42, "type": "PRIV", "conversation_key": "pk1", "text": "hi"}
+            )
+
+        mock_client.send_message.assert_called_once()
+        kwargs = mock_client.send_message.call_args.kwargs
+        assert kwargs["QueueUrl"].endswith("/mesh-events")
+        assert kwargs["MessageAttributes"]["event_type"]["StringValue"] == "message"
+        assert '"event_type":"message"' in kwargs["MessageBody"]
+        assert '"text":"hi"' in kwargs["MessageBody"]
+
+    @pytest.mark.asyncio
+    async def test_fifo_queue_adds_group_and_dedup_ids(self):
+        from app.fanout.sqs import SqsModule
+
+        mock_client = MagicMock()
+        with patch("app.fanout.sqs.boto3.client", return_value=mock_client):
+            mod = SqsModule(
+                "test",
+                {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events.fifo"},
+            )
+            await mod.start()
+            await mod.on_raw({"observation_id": "obs-123", "id": 7, "raw": "abcd"})
+
+        kwargs = mock_client.send_message.call_args.kwargs
+        assert kwargs["MessageGroupId"] == "raw-packets"
+        assert kwargs["MessageDeduplicationId"] == "raw-obs-123"
+
+
+# ---------------------------------------------------------------------------
+# SQS router validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestSqsValidation:
+    def test_validate_sqs_config_requires_queue_url(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_sqs_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_sqs_config({"queue_url": ""})
+        assert exc_info.value.status_code == 400
+        assert "queue_url is required" in exc_info.value.detail
+
+    def test_validate_sqs_config_requires_static_keypair_together(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_sqs_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_sqs_config(
+                {
+                    "queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events",
+                    "access_key_id": "AKIA...",
+                }
+            )
+        assert exc_info.value.status_code == 400
+        assert "must be set together" in exc_info.value.detail
+
+    def test_validate_sqs_config_accepts_minimal_valid_config(self):
+        from app.routers.fanout import _validate_sqs_config
+
+        _validate_sqs_config(
+            {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events"}
+        )
+
+    def test_enforce_scope_sqs_preserves_raw_packets_setting(self):
+        from app.routers.fanout import _enforce_scope
+
+        scope = _enforce_scope("sqs", {"messages": "all", "raw_packets": "all"})
+        assert scope["messages"] == "all"
+        assert scope["raw_packets"] == "all"
 
 
 # ---------------------------------------------------------------------------

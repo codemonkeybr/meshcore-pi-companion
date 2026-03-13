@@ -70,6 +70,10 @@ describe('SearchView', () => {
     mockGetMessages.mockResolvedValue([]);
     render(<SearchView {...defaultProps} />);
     expect(screen.getByText('Type to search across all messages')).toBeInTheDocument();
+    expect(screen.getByText(/Tip: use/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/User-key linkage for group messages is best-effort/i)
+    ).toBeInTheDocument();
   });
 
   it('focuses input on mount', () => {
@@ -245,5 +249,69 @@ describe('SearchView', () => {
     await typeAndWaitForResults('dm');
 
     expect(screen.getByText('Bob')).toBeInTheDocument();
+  });
+
+  it('passes raw operator queries to the API and highlights only free text', async () => {
+    mockGetMessages.mockResolvedValue([createSearchResult({ text: 'hello world' })]);
+
+    render(<SearchView {...defaultProps} />);
+
+    await typeAndWaitForResults('user:Alice hello');
+
+    expect(mockGetMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ q: 'user:Alice hello' }),
+      expect.any(AbortSignal)
+    );
+    expect(screen.getByText('hello', { selector: 'mark' })).toBeInTheDocument();
+    expect(screen.queryByText('user:Alice', { selector: 'mark' })).not.toBeInTheDocument();
+  });
+
+  it('runs a prefilled search immediately', async () => {
+    mockGetMessages.mockResolvedValue([createSearchResult({ text: 'prefilled result' })]);
+
+    render(
+      <SearchView {...defaultProps} prefillRequest={{ query: 'user:"Alice Smith"', nonce: 1 }} />
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByLabelText('Search messages')).toHaveValue('user:"Alice Smith"');
+    expect(mockGetMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ q: 'user:"Alice Smith"' }),
+      expect.any(AbortSignal)
+    );
+  });
+
+  it('aborts the load-more request on unmount', async () => {
+    const pageResults = Array.from({ length: 50 }, (_, i) =>
+      createSearchResult({ id: i + 1, text: `result ${i}` })
+    );
+    let resolveLoadMore: ((value: Message[]) => void) | null = null;
+    mockGetMessages.mockResolvedValueOnce(pageResults).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          resolveLoadMore = resolve;
+        })
+    );
+
+    const { unmount } = render(<SearchView {...defaultProps} />);
+
+    await typeAndWaitForResults('result');
+    fireEvent.click(screen.getByText('Load more results'));
+
+    const loadMoreSignal = mockGetMessages.mock.calls[1]?.[1] as AbortSignal | undefined;
+    expect(loadMoreSignal).toBeInstanceOf(AbortSignal);
+    expect(loadMoreSignal?.aborted).toBe(false);
+
+    unmount();
+
+    expect(loadMoreSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveLoadMore?.([createSearchResult({ id: 99, text: 'late result' })]);
+      await Promise.resolve();
+    });
   });
 });

@@ -5,10 +5,12 @@ Uses httpx.AsyncClient or direct function calls with real in-memory SQLite.
 """
 
 import hashlib
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from app.radio import radio_manager
 from app.repository import (
@@ -22,11 +24,28 @@ from app.repository import (
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._backend
+    prev = radio_manager._meshcore
     prev_lock = radio_manager._operation_lock
+    prev_max_channels = radio_manager.max_channels
+    prev_connection_info = radio_manager._connection_info
+    prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
+    prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
     yield
-    radio_manager._backend = prev
+    radio_manager._meshcore = prev
     radio_manager._operation_lock = prev_lock
+    radio_manager.max_channels = prev_max_channels
+    radio_manager._connection_info = prev_connection_info
+    radio_manager._channel_slot_by_key = prev_slot_by_key
+    radio_manager._channel_key_by_slot = prev_key_by_slot
+
+
+def _patch_require_connected(mc=None, *, detail="Radio not connected"):
+    if mc is None:
+        return patch(
+            "app.dependencies.radio_manager.require_connected",
+            side_effect=HTTPException(status_code=503, detail=detail),
+        )
+    return patch("app.dependencies.radio_manager.require_connected", return_value=mc)
 
 
 async def _insert_contact(public_key, name="Alice", **overrides):
@@ -91,6 +110,133 @@ class TestHealthEndpoint:
             assert data["connection_info"] is None
 
 
+class TestDebugEndpoint:
+    """Test the debug support snapshot endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_support_snapshot_returns_logs_and_live_radio_audits(self, test_db, client):
+        """Debug snapshot should include recent logs plus live radio/contact/channel state."""
+        from meshcore import EventType
+
+        from app.config import clear_recent_log_lines
+        from app.routers.debug import DebugApplicationInfo
+
+        clear_recent_log_lines()
+
+        contact_key = "ab" * 32
+        channel_key = "CD" * 16
+        await _insert_contact(contact_key, "Alice", last_contacted=1700000000)
+        await ChannelRepository.upsert(key=channel_key, name="#flightless", on_radio=False)
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Alice: hello",
+            received_at=1700000001,
+            conversation_key=channel_key,
+            sender_timestamp=1700000001,
+        )
+
+        radio_manager.max_channels = 2
+        radio_manager.path_hash_mode = 1
+        radio_manager.path_hash_mode_supported = True
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+        radio_manager.note_channel_slot_loaded(channel_key, 0)
+
+        mock_mc = MagicMock()
+        mock_mc.self_info = {"name": "TestNode", "radio_freq": 910.525}
+        mock_mc.stop_auto_message_fetching = AsyncMock()
+        mock_mc.start_auto_message_fetching = AsyncMock()
+        mock_mc.commands.send_device_query = AsyncMock(
+            return_value=MagicMock(type=EventType.DEVICE_INFO, payload={"max_channels": 2})
+        )
+        mock_mc.commands.get_stats_core = AsyncMock(
+            return_value=MagicMock(type=EventType.STATS_CORE, payload={"heap_free": 1234})
+        )
+        mock_mc.commands.get_stats_radio = AsyncMock(
+            return_value=MagicMock(type=EventType.STATS_RADIO, payload={"tx_good": 9})
+        )
+        mock_mc.commands.get_contacts = AsyncMock(
+            return_value=MagicMock(
+                type=EventType.OK,
+                payload={contact_key: {"adv_name": "Alice"}},
+            )
+        )
+
+        def _channel_event(slot: int) -> MagicMock:
+            if slot == 0:
+                return MagicMock(
+                    type=EventType.CHANNEL_INFO,
+                    payload={
+                        "channel_name": "#flightless",
+                        "channel_secret": bytes.fromhex(channel_key),
+                    },
+                )
+            return MagicMock(type=EventType.OK, payload={})
+
+        mock_mc.commands.get_channel = AsyncMock(side_effect=_channel_event)
+        radio_manager._meshcore = mock_mc
+
+        logging.getLogger("tests.debug").warning("support snapshot marker")
+
+        with patch(
+            "app.routers.debug._build_application_info",
+            return_value=DebugApplicationInfo(
+                version="3.2.0",
+                commit_hash="deadbeef",
+                git_branch="main",
+                git_dirty=False,
+                python_version="3.12.0",
+            ),
+        ):
+            response = await client.get("/api/debug")
+
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["application"]["commit_hash"] == "deadbeef"
+        assert payload["runtime"]["channel_slot_reuse_enabled"] is True
+        assert payload["runtime"]["channels_with_incoming_messages"] == 1
+        assert any("support snapshot marker" in line for line in payload["logs"])
+
+        radio_probe = payload["radio_probe"]
+        assert radio_probe["performed"] is True
+        assert radio_probe["device_info"] == {"max_channels": 2}
+        assert radio_probe["stats_core"] == {"heap_free": 1234}
+        assert radio_probe["stats_radio"] == {"tx_good": 9}
+        assert radio_probe["contacts"]["expected_and_found"] == 1
+        assert radio_probe["contacts"]["expected_but_not_found"] == []
+        assert radio_probe["contacts"]["found_but_not_expected"] == []
+        assert radio_probe["channels"]["matched_slots"] == 2
+        assert radio_probe["channels"]["wrong_slots"] == []
+
+    @pytest.mark.asyncio
+    async def test_support_snapshot_returns_runtime_when_disconnected(self, test_db, client):
+        """Debug snapshot should still return logs and runtime state when radio is disconnected."""
+        from app.config import clear_recent_log_lines
+        from app.routers.debug import DebugApplicationInfo
+
+        clear_recent_log_lines()
+        radio_manager._meshcore = None
+        radio_manager._connection_info = None
+
+        with patch(
+            "app.routers.debug._build_application_info",
+            return_value=DebugApplicationInfo(
+                version="3.2.0",
+                commit_hash="deadbeef",
+                git_branch="main",
+                git_dirty=False,
+                python_version="3.12.0",
+            ),
+        ):
+            response = await client.get("/api/debug")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["radio_probe"]["performed"] is False
+        assert payload["radio_probe"]["errors"] == ["Radio not connected"]
+        assert payload["runtime"]["channels_with_incoming_messages"] == 0
+
+
 class TestRadioDisconnectedHandler:
     """Test that RadioDisconnectedError maps to 503."""
 
@@ -100,12 +246,9 @@ class TestRadioDisconnectedHandler:
         pub_key = "ab" * 32
         await _insert_contact(pub_key, "Alice")
 
-        # require_connected() passes, but _backend is None when radio_operation() checks
-        radio_manager._backend = None
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = True
-            mock_rm.backend = MagicMock()
-
+        # require_connected() passes, but _meshcore is None when radio_operation() checks
+        radio_manager._meshcore = None
+        with _patch_require_connected(MagicMock()):
             response = await client.post(
                 "/api/messages/direct", json={"destination": pub_key, "text": "Hi"}
             )
@@ -120,10 +263,7 @@ class TestMessagesEndpoint:
     @pytest.mark.asyncio
     async def test_send_direct_message_requires_connection(self, test_db, client):
         """Sending message when disconnected returns 503."""
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = False
-            mock_rm.backend = None
-
+        with _patch_require_connected():
             response = await client.post(
                 "/api/messages/direct", json={"destination": "abc123", "text": "Hello"}
             )
@@ -134,10 +274,7 @@ class TestMessagesEndpoint:
     @pytest.mark.asyncio
     async def test_send_channel_message_requires_connection(self, test_db, client):
         """Sending channel message when disconnected returns 503."""
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = False
-            mock_rm.backend = None
-
+        with _patch_require_connected():
             response = await client.post(
                 "/api/messages/channel",
                 json={"channel_key": "0123456789ABCDEF0123456789ABCDEF", "text": "Hello"},
@@ -155,17 +292,18 @@ class TestMessagesEndpoint:
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix.return_value = {"public_key": pub_key}
-        mock_mc.add_contact = AsyncMock(return_value=MagicMock(type=EventType.OK, payload={}))
-        mock_mc.send_msg = AsyncMock(return_value=MagicMock(type=EventType.MSG_SENT, payload={}))
+        mock_mc.commands.add_contact = AsyncMock(
+            return_value=MagicMock(type=EventType.OK, payload={})
+        )
+        mock_mc.commands.send_msg = AsyncMock(
+            return_value=MagicMock(type=EventType.MSG_SENT, payload={})
+        )
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         with (
-            patch("app.dependencies.radio_manager") as mock_rm,
+            _patch_require_connected(mock_mc),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
         ):
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
             response = await client.post(
                 "/api/messages/direct",
                 json={"destination": pub_key, "text": "Hello"},
@@ -193,18 +331,14 @@ class TestMessagesEndpoint:
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "TestNode"}
         ok_result = MagicMock(type=EventType.MSG_SENT, payload={})
-        mock_mc.set_channel = AsyncMock(return_value=ok_result)
-        mock_mc.send_chan_msg = AsyncMock(return_value=ok_result)
+        mock_mc.commands.set_channel = AsyncMock(return_value=ok_result)
+        mock_mc.commands.send_chan_msg = AsyncMock(return_value=ok_result)
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         with (
-            patch("app.dependencies.radio_manager") as mock_rm,
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            _patch_require_connected(mock_mc),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
         ):
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
             response = await client.post(
                 "/api/messages/channel",
                 json={"channel_key": chan_key, "text": "Hello room"},
@@ -222,10 +356,7 @@ class TestMessagesEndpoint:
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix.return_value = None
 
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
+        with _patch_require_connected(mock_mc):
             response = await client.post(
                 "/api/messages/direct", json={"destination": "nonexistent", "text": "Hello"}
             )
@@ -244,20 +375,18 @@ class TestMessagesEndpoint:
 
         mock_mc = MagicMock()
         mock_mc.get_contact_by_key_prefix.return_value = {"public_key": pub_key}
-        mock_mc.add_contact = AsyncMock(
+        mock_mc.commands.add_contact = AsyncMock(
             return_value=MagicMock(type=MagicMock(name="OK"), payload={})
         )
-        mock_mc.send_msg = AsyncMock(
+        mock_mc.commands.send_msg = AsyncMock(
             return_value=MagicMock(type=MagicMock(name="OK"), payload={"expected_ack": b"\x00\x01"})
         )
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         with (
-            patch("app.dependencies.radio_manager") as mock_rm,
+            _patch_require_connected(mock_mc),
             patch("app.routers.messages.MessageRepository") as mock_msg_repo,
         ):
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
             # Simulate duplicate - create returns None
             mock_msg_repo.create = AsyncMock(return_value=None)
 
@@ -281,20 +410,18 @@ class TestMessagesEndpoint:
         await ChannelRepository.upsert(key=chan_key, name="test")
 
         mock_mc = MagicMock()
-        mock_mc.send_chan_msg = AsyncMock(
+        mock_mc.commands.send_chan_msg = AsyncMock(
             return_value=MagicMock(type=MagicMock(name="OK"), payload={})
         )
-        mock_mc.set_channel = AsyncMock(
+        mock_mc.commands.set_channel = AsyncMock(
             return_value=MagicMock(type=MagicMock(name="OK"), payload={})
         )
 
-        radio_manager._backend = mock_mc
+        radio_manager._meshcore = mock_mc
         with (
-            patch("app.dependencies.radio_manager") as mock_rm,
+            _patch_require_connected(mock_mc),
             patch("app.routers.messages.MessageRepository") as mock_msg_repo,
         ):
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
             # Simulate duplicate - create returns None
             mock_msg_repo.create = AsyncMock(return_value=None)
 
@@ -311,10 +438,7 @@ class TestMessagesEndpoint:
     @pytest.mark.asyncio
     async def test_resend_channel_message_requires_connection(self, test_db, client):
         """Resend endpoint returns 503 when radio is disconnected."""
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = False
-            mock_rm.backend = None
-
+        with _patch_require_connected():
             response = await client.post("/api/messages/channel/1/resend")
 
             assert response.status_code == 503
@@ -340,27 +464,27 @@ class TestMessagesEndpoint:
 
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "TestNode"}
-        mock_mc.set_channel = AsyncMock(return_value=MagicMock(type=EventType.OK, payload={}))
-        mock_mc.send_chan_msg = AsyncMock(
+        mock_mc.commands = MagicMock()
+        mock_mc.commands.set_channel = AsyncMock(
+            return_value=MagicMock(type=EventType.OK, payload={})
+        )
+        mock_mc.commands.send_chan_msg = AsyncMock(
             return_value=MagicMock(type=EventType.MSG_SENT, payload={})
         )
 
-        radio_manager._backend = mock_mc
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
+        radio_manager._meshcore = mock_mc
+        with _patch_require_connected(mock_mc):
             response = await client.post(f"/api/messages/channel/{msg_id}/resend")
 
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "message_id": msg_id}
 
-        set_kwargs = mock_mc.set_channel.await_args.kwargs
+        set_kwargs = mock_mc.commands.set_channel.await_args.kwargs
         assert set_kwargs["channel_idx"] == 0
         assert set_kwargs["channel_name"] == "#resend"
         assert set_kwargs["channel_secret"] == bytes.fromhex(chan_key)
 
-        send_kwargs = mock_mc.send_chan_msg.await_args.kwargs
+        send_kwargs = mock_mc.commands.send_chan_msg.await_args.kwargs
         assert send_kwargs["chan"] == 0
         assert send_kwargs["msg"] == "hello world"
         assert send_kwargs["timestamp"] == sent_at.to_bytes(4, "little")
@@ -383,38 +507,34 @@ class TestMessagesEndpoint:
 
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "TestNode"}
-        mock_mc.set_channel = AsyncMock()
-        mock_mc.send_chan_msg = AsyncMock()
+        mock_mc.commands = MagicMock()
+        mock_mc.commands.set_channel = AsyncMock()
+        mock_mc.commands.send_chan_msg = AsyncMock()
 
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
+        with _patch_require_connected(mock_mc):
             response = await client.post(f"/api/messages/channel/{msg_id}/resend")
 
         assert response.status_code == 400
         assert "expired" in response.json()["detail"].lower()
-        assert mock_mc.set_channel.await_count == 0
-        assert mock_mc.send_chan_msg.await_count == 0
+        assert mock_mc.commands.set_channel.await_count == 0
+        assert mock_mc.commands.send_chan_msg.await_count == 0
 
     @pytest.mark.asyncio
     async def test_resend_channel_message_returns_404_for_missing(self, test_db, client):
         """Resend endpoint returns 404 for nonexistent message ID."""
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "TestNode"}
-        mock_mc.set_channel = AsyncMock()
-        mock_mc.send_chan_msg = AsyncMock()
+        mock_mc.commands = MagicMock()
+        mock_mc.commands.set_channel = AsyncMock()
+        mock_mc.commands.send_chan_msg = AsyncMock()
 
-        with patch("app.dependencies.radio_manager") as mock_rm:
-            mock_rm.is_connected = True
-            mock_rm.backend = mock_mc
-
+        with _patch_require_connected(mock_mc):
             response = await client.post("/api/messages/channel/999999/resend")
 
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
-        assert mock_mc.set_channel.await_count == 0
-        assert mock_mc.send_chan_msg.await_count == 0
+        assert mock_mc.commands.set_channel.await_count == 0
+        assert mock_mc.commands.send_chan_msg.await_count == 0
 
 
 class TestChannelsEndpoint:
@@ -598,6 +718,8 @@ class TestReadStateEndpoints:
         # Last message times should include all conversations
         assert result["last_message_times"][f"channel-{chan_key}"] == 1003
         assert result["last_message_times"][f"contact-{contact_key}"] == 1005
+        assert result["last_read_ats"][f"channel-{chan_key}"] == 1000
+        assert result["last_read_ats"][f"contact-{contact_key}"] == 1000
 
     @pytest.mark.asyncio
     async def test_get_unreads_no_name_skips_mentions(self, test_db):
@@ -634,17 +756,18 @@ class TestReadStateEndpoints:
             sender_timestamp=1001,
         )
 
-        # Mock radio_manager.backend to return a name
+        # Mock radio_manager.meshcore to return a name
         mock_mc = MagicMock()
         mock_mc.self_info = {"name": "RadioUser"}
         with patch("app.routers.read_state.radio_manager") as mock_rm:
-            mock_rm.backend = mock_mc
+            mock_rm.meshcore = mock_mc
             response = await client.get("/api/read-state/unreads")
 
         assert response.status_code == 200
         data = response.json()
         assert data["counts"][f"channel-{chan_key}"] == 1
         assert data["mentions"][f"channel-{chan_key}"] is True
+        assert data["last_read_ats"][f"channel-{chan_key}"] == 0
 
     @pytest.mark.asyncio
     async def test_unreads_endpoint_no_radio_skips_mentions(self, test_db, client):
@@ -661,15 +784,16 @@ class TestReadStateEndpoints:
             sender_timestamp=1001,
         )
 
-        # Mock radio_manager.backend as None (disconnected)
+        # Mock radio_manager.meshcore as None (disconnected)
         with patch("app.routers.read_state.radio_manager") as mock_rm:
-            mock_rm.backend = None
+            mock_rm.meshcore = None
             response = await client.get("/api/read-state/unreads")
 
         assert response.status_code == 200
         data = response.json()
         assert data["counts"][f"channel-{chan_key}"] == 1
         assert len(data["mentions"]) == 0
+        assert data["last_read_ats"][f"channel-{chan_key}"] == 0
 
     @pytest.mark.asyncio
     async def test_unreads_reset_after_mark_read(self, test_db):

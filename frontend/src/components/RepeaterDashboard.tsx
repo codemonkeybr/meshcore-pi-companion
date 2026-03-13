@@ -1,5 +1,7 @@
 import { toast } from './ui/sonner';
 import { Button } from './ui/button';
+import { Bell, Star, Trash2 } from 'lucide-react';
+import { DirectTraceIcon } from './DirectTraceIcon';
 import { RepeaterLogin } from './RepeaterLogin';
 import { useRepeaterDashboard } from '../hooks/useRepeaterDashboard';
 import { isFavorite } from '../utils/favorites';
@@ -9,6 +11,7 @@ import type { Contact, Conversation, Favorite } from '../types';
 import { TelemetryPane } from './repeater/RepeaterTelemetryPane';
 import { NeighborsPane } from './repeater/RepeaterNeighborsPane';
 import { AclPane } from './repeater/RepeaterAclPane';
+import { NodeInfoPane } from './repeater/RepeaterNodeInfoPane';
 import { RadioSettingsPane } from './repeater/RepeaterRadioSettingsPane';
 import { LppTelemetryPane } from './repeater/RepeaterLppTelemetryPane';
 import { OwnerInfoPane } from './repeater/RepeaterOwnerInfoPane';
@@ -24,10 +27,14 @@ interface RepeaterDashboardProps {
   conversation: Conversation;
   contacts: Contact[];
   favorites: Favorite[];
+  notificationsSupported: boolean;
+  notificationsEnabled: boolean;
+  notificationsPermission: NotificationPermission | 'unsupported';
   radioLat: number | null;
   radioLon: number | null;
   radioName: string | null;
   onTrace: () => void;
+  onToggleNotifications: () => void;
   onToggleFavorite: (type: 'channel' | 'contact', id: string) => void;
   onDeleteContact: (publicKey: string) => void;
 }
@@ -36,10 +43,14 @@ export function RepeaterDashboard({
   conversation,
   contacts,
   favorites,
+  notificationsSupported,
+  notificationsEnabled,
+  notificationsPermission,
   radioLat,
   radioLon,
-  radioName,
+  radioName: _radioName,
   onTrace,
+  onToggleNotifications,
   onToggleFavorite,
   onDeleteContact,
 }: RepeaterDashboardProps) {
@@ -56,7 +67,8 @@ export function RepeaterDashboard({
     refreshPane,
     loadAll,
     sendConsoleCommand,
-    sendAdvert,
+    sendZeroHopAdvert,
+    sendFloodAdvert,
     rebootRepeater,
     syncClock,
   } = useRepeaterDashboard(conversation);
@@ -70,23 +82,33 @@ export function RepeaterDashboard({
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Header */}
-      <header className="flex justify-between items-center px-4 py-2.5 border-b border-border gap-2">
-        <span className="flex flex-wrap items-baseline gap-x-2 min-w-0 flex-1">
-          <span className="flex-shrink-0 font-semibold text-base">{conversation.name}</span>
-          <span
-            className="font-normal text-[11px] text-muted-foreground font-mono truncate cursor-pointer hover:text-primary transition-colors"
-            role="button"
-            tabIndex={0}
-            onKeyDown={handleKeyboardActivate}
-            onClick={() => {
-              navigator.clipboard.writeText(conversation.id);
-              toast.success('Contact key copied!');
-            }}
-            title="Click to copy"
-          >
-            {conversation.id}
+      <header className="flex justify-between items-start px-4 py-2.5 border-b border-border gap-2">
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="flex min-w-0 flex-1 items-baseline gap-2">
+              <span className="min-w-0 flex-shrink truncate font-semibold text-base">
+                {conversation.name}
+              </span>
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground transition-colors hover:text-primary"
+                role="button"
+                tabIndex={0}
+                onKeyDown={handleKeyboardActivate}
+                onClick={() => {
+                  navigator.clipboard.writeText(conversation.id);
+                  toast.success('Contact key copied!');
+                }}
+                title="Click to copy"
+              >
+                {conversation.id}
+              </span>
+            </span>
+            {contact && (
+              <span className="min-w-0 flex-none text-[11px] text-muted-foreground max-sm:basis-full">
+                <ContactStatusInfo contact={contact} ourLat={radioLat} ourLon={radioLon} />
+              </span>
+            )}
           </span>
-          {contact && <ContactStatusInfo contact={contact} ourLat={radioLat} ourLon={radioLon} />}
         </span>
         <div className="flex items-center gap-0.5 flex-shrink-0">
           {loggedIn && (
@@ -95,38 +117,71 @@ export function RepeaterDashboard({
               size="sm"
               onClick={loadAll}
               disabled={anyLoading}
-              className="text-xs border-success text-success hover:bg-success/10 hover:text-success"
+              className="h-7 px-2 text-[11px] leading-none border-success text-success hover:bg-success/10 hover:text-success sm:h-8 sm:px-3 sm:text-xs"
             >
               {anyLoading ? 'Loading...' : 'Load All'}
             </Button>
           )}
           <button
-            className="p-1.5 rounded hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="p-1 rounded hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={onTrace}
             title="Direct Trace"
             aria-label="Direct Trace"
           >
-            <span aria-hidden="true">&#x1F6CE;</span>
+            <DirectTraceIcon className="h-4 w-4 text-muted-foreground" />
           </button>
+          {notificationsSupported && (
+            <button
+              className="flex items-center gap-1 rounded px-1 py-1 hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={onToggleNotifications}
+              title={
+                notificationsEnabled
+                  ? 'Disable desktop notifications for this conversation'
+                  : notificationsPermission === 'denied'
+                    ? 'Notifications blocked by the browser'
+                    : 'Enable desktop notifications for this conversation'
+              }
+              aria-label={
+                notificationsEnabled
+                  ? 'Disable notifications for this conversation'
+                  : 'Enable notifications for this conversation'
+              }
+            >
+              <Bell
+                className={`h-4 w-4 ${notificationsEnabled ? 'text-status-connected' : 'text-muted-foreground'}`}
+                fill={notificationsEnabled ? 'currentColor' : 'none'}
+                aria-hidden="true"
+              />
+              {notificationsEnabled && (
+                <span className="hidden md:inline text-[11px] font-medium text-status-connected">
+                  Notifications On
+                </span>
+              )}
+            </button>
+          )}
           <button
-            className="p-1.5 rounded hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="p-1 rounded hover:bg-accent text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onToggleFavorite('contact', conversation.id)}
-            title={isFav ? 'Remove from favorites' : 'Add to favorites'}
+            title={
+              isFav
+                ? 'Remove from favorites. Favorite contacts stay loaded on the radio for ACK support.'
+                : 'Add to favorites. Favorite contacts stay loaded on the radio for ACK support.'
+            }
             aria-label={isFav ? 'Remove from favorites' : 'Add to favorites'}
           >
             {isFav ? (
-              <span className="text-favorite">&#9733;</span>
+              <Star className="h-4 w-4 fill-current text-favorite" aria-hidden="true" />
             ) : (
-              <span className="text-muted-foreground">&#9734;</span>
+              <Star className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             )}
           </button>
           <button
-            className="p-1.5 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onDeleteContact(conversation.id)}
             title="Delete"
             aria-label="Delete"
           >
-            <span aria-hidden="true">&#128465;</span>
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
       </header>
@@ -143,9 +198,15 @@ export function RepeaterDashboard({
           />
         ) : (
           <div className="space-y-4">
-            {/* Top row: Telemetry + Radio Settings | Neighbors (with expanding map) */}
+            {/* Top row: Telemetry + Radio Settings | Node Info + Neighbors */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="flex flex-col gap-4">
+                <NodeInfoPane
+                  data={paneData.nodeInfo}
+                  state={paneStates.nodeInfo}
+                  onRefresh={() => refreshPane('nodeInfo')}
+                  disabled={anyLoading}
+                />
                 <TelemetryPane
                   data={paneData.status}
                   state={paneStates.status}
@@ -168,16 +229,18 @@ export function RepeaterDashboard({
                   disabled={anyLoading}
                 />
               </div>
-              <NeighborsPane
-                data={paneData.neighbors}
-                state={paneStates.neighbors}
-                onRefresh={() => refreshPane('neighbors')}
-                disabled={anyLoading}
-                contacts={contacts}
-                radioLat={radioLat}
-                radioLon={radioLon}
-                radioName={radioName}
-              />
+              <div className="flex flex-col gap-4">
+                <NeighborsPane
+                  data={paneData.neighbors}
+                  state={paneStates.neighbors}
+                  onRefresh={() => refreshPane('neighbors')}
+                  disabled={anyLoading}
+                  contacts={contacts}
+                  nodeInfo={paneData.nodeInfo}
+                  nodeInfoState={paneStates.nodeInfo}
+                  repeaterName={conversation.name}
+                />
+              </div>
             </div>
 
             {/* Remaining panes: ACL | Owner Info + Actions */}
@@ -196,7 +259,8 @@ export function RepeaterDashboard({
                   disabled={anyLoading}
                 />
                 <ActionsPane
-                  onSendAdvert={sendAdvert}
+                  onSendZeroHopAdvert={sendZeroHopAdvert}
+                  onSendFloodAdvert={sendFloodAdvert}
                   onSyncClock={syncClock}
                   onReboot={rebootRepeater}
                   consoleLoading={consoleLoading}

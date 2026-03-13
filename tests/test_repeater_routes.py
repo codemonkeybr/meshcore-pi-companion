@@ -18,6 +18,7 @@ from app.routers.repeaters import (
     repeater_login,
     repeater_lpp_telemetry,
     repeater_neighbors,
+    repeater_node_info,
     repeater_owner_info,
     repeater_radio_settings,
     repeater_status,
@@ -843,7 +844,7 @@ class TestRepeaterRadioSettings:
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
 
-        # Build responses for all 10 commands
+        # Build responses for all 6 commands
         responses = [
             "v2.1.0",  # ver
             "915.0,250,7,5",  # get radio
@@ -851,10 +852,6 @@ class TestRepeaterRadioSettings:
             "0",  # get af
             "1",  # get repeat
             "3",  # get flood.max
-            "MyRepeater",  # get name
-            "40.7128",  # get lat
-            "-74.0060",  # get lon
-            "2025-02-25 14:30:00",  # clock
         ]
         get_msg_results = [
             _radio_result(
@@ -878,10 +875,6 @@ class TestRepeaterRadioSettings:
         assert response.airtime_factor == "0"
         assert response.repeat_enabled == "1"
         assert response.flood_max == "3"
-        assert response.name == "MyRepeater"
-        assert response.lat == "40.7128"
-        assert response.lon == "-74.0060"
-        assert response.clock_utc == "2025-02-25 14:30:00"
 
     @pytest.mark.asyncio
     async def test_partial_failure(self, test_db):
@@ -898,7 +891,7 @@ class TestRepeaterRadioSettings:
 
         # Provide clock ticks: first command succeeds quickly, others expire
         clock_ticks = [0.0, 0.1]  # First fetch succeeds
-        for i in range(9):
+        for i in range(5):
             base = 100.0 * (i + 1)
             clock_ticks.extend([base, base + 5.0, base + 11.0])
 
@@ -925,6 +918,70 @@ class TestRepeaterRadioSettings:
             with pytest.raises(HTTPException) as exc:
                 await repeater_radio_settings(KEY_A)
         assert exc.value.status_code == 400
+
+
+class TestRepeaterNodeInfo:
+    @pytest.mark.asyncio
+    async def test_full_success(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        responses = [
+            "MyRepeater",  # get name
+            "40.7128",  # get lat
+            "-74.0060",  # get lon
+            "2025-02-25 14:30:00",  # clock
+        ]
+        get_msg_results = [
+            _radio_result(
+                EventType.CONTACT_MSG_RECV,
+                {"pubkey_prefix": KEY_A[:12], "text": text, "txt_type": 1},
+            )
+            for text in responses
+        ]
+        mc.commands.get_msg = AsyncMock(side_effect=get_msg_results)
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=_advancing_clock()),
+        ):
+            response = await repeater_node_info(KEY_A)
+
+        assert response.name == "MyRepeater"
+        assert response.lat == "40.7128"
+        assert response.lon == "-74.0060"
+        assert response.clock_utc == "2025-02-25 14:30:00"
+
+    @pytest.mark.asyncio
+    async def test_partial_failure(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        first_response = _radio_result(
+            EventType.CONTACT_MSG_RECV,
+            {"pubkey_prefix": KEY_A[:12], "text": "MyRepeater", "txt_type": 1},
+        )
+        no_msgs = _radio_result(EventType.NO_MORE_MSGS)
+        mc.commands.get_msg = AsyncMock(side_effect=[first_response] + [no_msgs] * 50)
+
+        clock_ticks = [0.0, 0.1]
+        for i in range(3):
+            base = 100.0 * (i + 1)
+            clock_ticks.extend([base, base + 5.0, base + 11.0])
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(_MONOTONIC, side_effect=clock_ticks),
+            patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = await repeater_node_info(KEY_A)
+
+        assert response.name == "MyRepeater"
+        assert response.lat is None
+        assert response.lon is None
+        assert response.clock_utc is None
 
 
 class TestRepeaterAdvertIntervals:

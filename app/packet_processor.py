@@ -29,96 +29,32 @@ from app.decoder import (
 )
 from app.keystore import get_private_key, get_public_key, has_private_key
 from app.models import (
-    CONTACT_TYPE_REPEATER,
-    Message,
-    MessagePath,
+    Contact,
+    ContactUpsert,
     RawPacketBroadcast,
     RawPacketDecryptedInfo,
 )
 from app.repository import (
     ChannelRepository,
     ContactAdvertPathRepository,
-    ContactNameHistoryRepository,
     ContactRepository,
-    MessageRepository,
     RawPacketRepository,
+)
+from app.services.contact_reconciliation import (
+    promote_prefix_contacts_for_contact,
+    record_contact_name_and_reconcile,
+)
+from app.services.messages import (
+    create_dm_message_from_decrypted as _create_dm_message_from_decrypted,
+)
+from app.services.messages import (
+    create_message_from_decrypted as _create_message_from_decrypted,
 )
 from app.websocket import broadcast_error, broadcast_event
 
 logger = logging.getLogger(__name__)
 
 _raw_observation_counter = count(1)
-
-
-async def _handle_duplicate_message(
-    packet_id: int,
-    msg_type: str,
-    conversation_key: str,
-    text: str,
-    sender_timestamp: int,
-    path: str | None,
-    received: int,
-    path_len: int | None = None,
-) -> None:
-    """Handle a duplicate message by updating paths/acks on the existing record.
-
-    Called when MessageRepository.create returns None (INSERT OR IGNORE hit a duplicate).
-    Looks up the existing message, adds the new path, increments ack count for outgoing
-    messages, and broadcasts the update to clients.
-    """
-    existing_msg = await MessageRepository.get_by_content(
-        msg_type=msg_type,
-        conversation_key=conversation_key,
-        text=text,
-        sender_timestamp=sender_timestamp,
-    )
-    if not existing_msg:
-        label = "message" if msg_type == "CHAN" else "DM"
-        logger.warning(
-            "Duplicate %s for %s but couldn't find existing",
-            label,
-            conversation_key[:12],
-        )
-        return
-
-    logger.debug(
-        "Duplicate %s for %s (msg_id=%d, outgoing=%s) - adding path",
-        msg_type,
-        conversation_key[:12],
-        existing_msg.id,
-        existing_msg.outgoing,
-    )
-
-    # Add path if provided
-    if path is not None:
-        paths = await MessageRepository.add_path(existing_msg.id, path, received, path_len)
-    else:
-        # Get current paths for broadcast
-        paths = existing_msg.paths or []
-
-    # Increment ack count for outgoing messages (echo confirmation)
-    if existing_msg.outgoing:
-        ack_count = await MessageRepository.increment_ack_count(existing_msg.id)
-    else:
-        ack_count = existing_msg.acked
-
-    # Only broadcast when something actually changed:
-    # - outgoing: ack count was incremented
-    # - path provided: a new path entry was appended
-    # The path=None case happens for direct-delivery DMs (0-hop, no routing bytes).
-    # A non-outgoing duplicate with no new path changes nothing in the DB, so skip.
-    if existing_msg.outgoing or path is not None:
-        broadcast_event(
-            "message_acked",
-            {
-                "message_id": existing_msg.id,
-                "ack_count": ack_count,
-                "paths": [p.model_dump() for p in paths] if paths else [],
-            },
-        )
-
-    # Mark this packet as decrypted
-    await RawPacketRepository.mark_decrypted(packet_id, existing_msg.id)
 
 
 async def create_message_from_decrypted(
@@ -133,94 +69,20 @@ async def create_message_from_decrypted(
     channel_name: str | None = None,
     realtime: bool = True,
 ) -> int | None:
-    """Create a message record from decrypted channel packet content.
-
-    This is the shared logic for storing decrypted channel messages,
-    used by both real-time packet processing and historical decryption.
-
-    Args:
-        packet_id: ID of the raw packet being processed
-        channel_key: Hex string channel key
-        channel_name: Channel name (e.g. "#general"), for bot context
-        sender: Sender name (will be prefixed to message) or None
-        message_text: The decrypted message content
-        timestamp: Sender timestamp from the packet
-        received_at: When the packet was received (defaults to now)
-        path: Hex-encoded routing path
-        realtime: If False, skip fanout dispatch (used for historical decryption)
-
-    Returns the message ID if created, None if duplicate.
-    """
-    received = received_at or int(time.time())
-
-    # Format the message text with sender prefix if present
-    text = f"{sender}: {message_text}" if sender else message_text
-
-    # Normalize channel key to uppercase for consistency
-    channel_key_normalized = channel_key.upper()
-
-    # Resolve sender_key: look up contact by exact name match
-    resolved_sender_key: str | None = None
-    if sender:
-        candidates = await ContactRepository.get_by_name(sender)
-        if len(candidates) == 1:
-            resolved_sender_key = candidates[0].public_key
-
-    # Try to create message - INSERT OR IGNORE handles duplicates atomically
-    msg_id = await MessageRepository.create(
-        msg_type="CHAN",
-        text=text,
-        conversation_key=channel_key_normalized,
-        sender_timestamp=timestamp,
-        received_at=received,
+    """Store a decrypted channel message via the shared message service."""
+    return await _create_message_from_decrypted(
+        packet_id=packet_id,
+        channel_key=channel_key,
+        sender=sender,
+        message_text=message_text,
+        timestamp=timestamp,
+        received_at=received_at,
         path=path,
         path_len=path_len,
-        sender_name=sender,
-        sender_key=resolved_sender_key,
-    )
-
-    if msg_id is None:
-        # Duplicate message detected - this happens when:
-        # 1. Our own outgoing message echoes back (flood routing)
-        # 2. Same message arrives via multiple paths before first is committed
-        # In either case, add the path to the existing message.
-        await _handle_duplicate_message(
-            packet_id, "CHAN", channel_key_normalized, text, timestamp, path, received, path_len
-        )
-        return None
-
-    logger.info("Stored channel message %d for channel %s", msg_id, channel_key_normalized[:8])
-
-    # Mark the raw packet as decrypted
-    await RawPacketRepository.mark_decrypted(packet_id, msg_id)
-
-    # Build paths array for broadcast
-    # Use "is not None" to include empty string (direct/0-hop messages)
-    paths = (
-        [MessagePath(path=path or "", received_at=received, path_len=path_len)]
-        if path is not None
-        else None
-    )
-
-    # Broadcast new message to connected clients (and fanout modules when realtime)
-    broadcast_event(
-        "message",
-        Message(
-            id=msg_id,
-            type="CHAN",
-            conversation_key=channel_key_normalized,
-            text=text,
-            sender_timestamp=timestamp,
-            received_at=received,
-            paths=paths,
-            sender_name=sender,
-            sender_key=resolved_sender_key,
-            channel_name=channel_name,
-        ).model_dump(),
+        channel_name=channel_name,
         realtime=realtime,
+        broadcast_fn=broadcast_event,
     )
-
-    return msg_id
 
 
 async def create_dm_message_from_decrypted(
@@ -234,110 +96,19 @@ async def create_dm_message_from_decrypted(
     outgoing: bool = False,
     realtime: bool = True,
 ) -> int | None:
-    """Create a message record from decrypted direct message packet content.
-
-    This is the shared logic for storing decrypted direct messages,
-    used by both real-time packet processing and historical decryption.
-
-    Args:
-        packet_id: ID of the raw packet being processed
-        decrypted: DecryptedDirectMessage from decoder
-        their_public_key: The contact's full 64-char public key (conversation_key)
-        our_public_key: Our public key (to determine direction), or None
-        received_at: When the packet was received (defaults to now)
-        path: Hex-encoded routing path
-        outgoing: Whether this is an outgoing message (we sent it)
-        realtime: If False, skip fanout dispatch (used for historical decryption)
-
-    Returns the message ID if created, None if duplicate.
-    """
-    # Check if sender is a repeater - repeaters only send CLI responses, not chat messages.
-    # CLI responses are handled by the command endpoint, not stored in chat history.
-    contact = await ContactRepository.get_by_key(their_public_key)
-    if contact and contact.type == CONTACT_TYPE_REPEATER:
-        logger.debug(
-            "Skipping message from repeater %s (CLI responses not stored): %s",
-            their_public_key[:12],
-            (decrypted.message or "")[:50],
-        )
-        return None
-
-    received = received_at or int(time.time())
-
-    # conversation_key is always the other party's public key
-    conversation_key = their_public_key.lower()
-
-    # Resolve sender name for incoming messages (used for name-based blocking)
-    sender_name = contact.name if contact and not outgoing else None
-
-    # Try to create message - INSERT OR IGNORE handles duplicates atomically
-    msg_id = await MessageRepository.create(
-        msg_type="PRIV",
-        text=decrypted.message,
-        conversation_key=conversation_key,
-        sender_timestamp=decrypted.timestamp,
-        received_at=received,
+    """Store a decrypted direct message via the shared message service."""
+    return await _create_dm_message_from_decrypted(
+        packet_id=packet_id,
+        decrypted=decrypted,
+        their_public_key=their_public_key,
+        our_public_key=our_public_key,
+        received_at=received_at,
         path=path,
         path_len=path_len,
         outgoing=outgoing,
-        sender_key=conversation_key if not outgoing else None,
-        sender_name=sender_name,
-    )
-
-    if msg_id is None:
-        # Duplicate message detected
-        await _handle_duplicate_message(
-            packet_id,
-            "PRIV",
-            conversation_key,
-            decrypted.message,
-            decrypted.timestamp,
-            path,
-            received,
-            path_len,
-        )
-        return None
-
-    logger.info(
-        "Stored direct message %d for contact %s (outgoing=%s)",
-        msg_id,
-        conversation_key[:12],
-        outgoing,
-    )
-
-    # Mark the raw packet as decrypted
-    await RawPacketRepository.mark_decrypted(packet_id, msg_id)
-
-    # Build paths array for broadcast
-    paths = (
-        [MessagePath(path=path or "", received_at=received, path_len=path_len)]
-        if path is not None
-        else None
-    )
-
-    # Broadcast new message to connected clients (and fanout modules when realtime)
-    sender_name = contact.name if contact and not outgoing else None
-    broadcast_event(
-        "message",
-        Message(
-            id=msg_id,
-            type="PRIV",
-            conversation_key=conversation_key,
-            text=decrypted.message,
-            sender_timestamp=decrypted.timestamp,
-            received_at=received,
-            paths=paths,
-            outgoing=outgoing,
-            sender_name=sender_name,
-            sender_key=conversation_key if not outgoing else None,
-        ).model_dump(),
         realtime=realtime,
+        broadcast_fn=broadcast_event,
     )
-
-    # Update contact's last_contacted timestamp (for sorting)
-    await ContactRepository.update_last_contacted(conversation_key, received)
-
-    return msg_id
 
 
 async def run_historical_dm_decryption(
@@ -646,7 +417,6 @@ async def _process_advertisement(
     Process an advertisement packet.
 
     Extracts contact info and updates the database/broadcasts to clients.
-    For non-repeater contacts, triggers sync of recent contacts to radio for DM ACK support.
     """
     # Parse packet to get path info if not already provided
     if packet_info is None:
@@ -722,54 +492,50 @@ async def _process_advertisement(
         hop_count=new_path_len,
     )
 
-    # Record name history
-    if advert.name:
-        await ContactNameHistoryRepository.record_name(
-            public_key=advert.public_key.lower(),
-            name=advert.name,
-            timestamp=timestamp,
-        )
+    contact_upsert = ContactUpsert(
+        public_key=advert.public_key.lower(),
+        name=advert.name,
+        type=contact_type,
+        lat=advert.lat,
+        lon=advert.lon,
+        last_advert=advert.timestamp if advert.timestamp > 0 else timestamp,
+        last_seen=timestamp,
+        last_path=path_hex,
+        last_path_len=path_len,
+        out_path_hash_mode=out_path_hash_mode,
+        first_seen=timestamp,  # COALESCE in upsert preserves existing value
+    )
 
-    contact_data = {
-        "public_key": advert.public_key.lower(),
-        "name": advert.name,
-        "type": contact_type,
-        "lat": advert.lat,
-        "lon": advert.lon,
-        "last_advert": advert.timestamp if advert.timestamp > 0 else timestamp,
-        "last_seen": timestamp,
-        "last_path": path_hex,
-        "last_path_len": path_len,
-        "out_path_hash_mode": out_path_hash_mode,
-        "first_seen": timestamp,  # COALESCE in upsert preserves existing value
-    }
-
-    await ContactRepository.upsert(contact_data)
-    claimed = await MessageRepository.claim_prefix_messages(advert.public_key.lower())
-    if claimed > 0:
-        logger.info(
-            "Claimed %d prefix DM message(s) for contact %s",
-            claimed,
-            advert.public_key[:12],
-        )
-    if advert.name:
-        backfilled = await MessageRepository.backfill_channel_sender_key(
-            advert.public_key, advert.name
-        )
-        if backfilled > 0:
-            logger.info(
-                "Backfilled sender_key on %d channel message(s) for %s",
-                backfilled,
-                advert.name,
-            )
+    await ContactRepository.upsert(contact_upsert)
+    promoted_keys = await promote_prefix_contacts_for_contact(
+        public_key=advert.public_key,
+        log=logger,
+    )
+    await record_contact_name_and_reconcile(
+        public_key=advert.public_key,
+        contact_name=advert.name,
+        timestamp=timestamp,
+        log=logger,
+    )
 
     # Read back from DB so the broadcast includes all fields (last_contacted,
     # last_read_at, flags, on_radio, etc.) matching the REST Contact shape exactly.
     db_contact = await ContactRepository.get_by_key(advert.public_key.lower())
     if db_contact:
         broadcast_event("contact", db_contact.model_dump())
+        for old_key in promoted_keys:
+            broadcast_event(
+                "contact_resolved",
+                {
+                    "previous_public_key": old_key,
+                    "contact": db_contact.model_dump(),
+                },
+            )
     else:
-        broadcast_event("contact", contact_data)
+        broadcast_event(
+            "contact",
+            Contact(**contact_upsert.model_dump(exclude_none=True)).model_dump(),
+        )
 
     # For new contacts, optionally attempt to decrypt any historical DMs we may have stored
     # This is controlled by the auto_decrypt_dm_on_advert setting
@@ -779,14 +545,6 @@ async def _process_advertisement(
         settings = await AppSettingsRepository.get()
         if settings.auto_decrypt_dm_on_advert:
             await start_historical_dm_decryption(None, advert.public_key.lower(), advert.name)
-
-    # If this is not a repeater, trigger recent contacts sync to radio
-    # This ensures we can auto-ACK DMs from recent contacts
-    if contact_type != CONTACT_TYPE_REPEATER:
-        # Import here to avoid circular import
-        from app.radio_sync import sync_recent_contacts_to_radio
-
-        asyncio.create_task(sync_recent_contacts_to_radio())
 
 
 async def _process_direct_message(

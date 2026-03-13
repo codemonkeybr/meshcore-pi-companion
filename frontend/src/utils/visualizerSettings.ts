@@ -4,6 +4,7 @@ export interface VisualizerSettings {
   showAmbiguousPaths: boolean;
   showAmbiguousNodes: boolean;
   useAdvertPathHints: boolean;
+  collapseLikelyKnownSiblingRepeaters: boolean;
   splitAmbiguousByTraffic: boolean;
   chargeStrength: number;
   observationWindowSec: number;
@@ -20,6 +21,7 @@ export const VISUALIZER_DEFAULTS: VisualizerSettings = {
   showAmbiguousPaths: true,
   showAmbiguousNodes: false,
   useAdvertPathHints: true,
+  collapseLikelyKnownSiblingRepeaters: true,
   splitAmbiguousByTraffic: true,
   chargeStrength: -200,
   observationWindowSec: 15,
@@ -50,6 +52,10 @@ export function getVisualizerSettings(): VisualizerSettings {
         typeof parsed.useAdvertPathHints === 'boolean'
           ? parsed.useAdvertPathHints
           : VISUALIZER_DEFAULTS.useAdvertPathHints,
+      collapseLikelyKnownSiblingRepeaters:
+        typeof parsed.collapseLikelyKnownSiblingRepeaters === 'boolean'
+          ? parsed.collapseLikelyKnownSiblingRepeaters
+          : VISUALIZER_DEFAULTS.collapseLikelyKnownSiblingRepeaters,
       splitAmbiguousByTraffic:
         typeof parsed.splitAmbiguousByTraffic === 'boolean'
           ? parsed.splitAmbiguousByTraffic

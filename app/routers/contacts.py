@@ -8,17 +8,16 @@ from app.dependencies import require_connected
 from app.models import (
     Contact,
     ContactActiveRoom,
-    ContactAdvertPath,
     ContactAdvertPathSummary,
-    ContactDetail,
+    ContactAnalytics,
     ContactRoutingOverrideRequest,
+    ContactUpsert,
     CreateContactRequest,
     NearestRepeater,
     TraceResponse,
 )
 from app.packet_processor import start_historical_dm_decryption
 from app.path_utils import parse_explicit_hop_route
-from app.radio import radio_manager
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     ContactAdvertPathRepository,
@@ -26,6 +25,11 @@ from app.repository import (
     ContactRepository,
     MessageRepository,
 )
+from app.services.contact_reconciliation import (
+    promote_prefix_contacts_for_contact,
+    reconcile_contact_messages,
+)
+from app.services.radio_runtime import radio_runtime as radio_manager
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +66,8 @@ async def _ensure_on_radio(mc, contact: Contact) -> None:
 
 
 async def _best_effort_push_contact_to_radio(contact: Contact, operation_name: str) -> None:
-    """Push the current effective route to the radio when the contact is already loaded."""
-    if not radio_manager.is_connected or not contact.on_radio:
+    """Best-effort push the current effective route to the radio when connected."""
+    if not radio_manager.is_connected:
         return
 
     try:
@@ -89,6 +93,115 @@ async def _broadcast_contact_update(contact: Contact) -> None:
     broadcast_event("contact", contact.model_dump())
 
 
+async def _broadcast_contact_resolution(previous_public_keys: list[str], contact: Contact) -> None:
+    from app.websocket import broadcast_event
+
+    for old_key in previous_public_keys:
+        broadcast_event(
+            "contact_resolved",
+            {
+                "previous_public_key": old_key,
+                "contact": contact.model_dump(),
+            },
+        )
+
+
+async def _build_keyed_contact_analytics(contact: Contact) -> ContactAnalytics:
+    name_history = await ContactNameHistoryRepository.get_history(contact.public_key)
+    dm_count = await MessageRepository.count_dm_messages(contact.public_key)
+    chan_count = await MessageRepository.count_channel_messages_by_sender(contact.public_key)
+    active_rooms_raw = await MessageRepository.get_most_active_rooms(contact.public_key)
+    advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key)
+    hourly_activity, weekly_activity = await MessageRepository.get_contact_activity_series(
+        contact.public_key
+    )
+
+    most_active_rooms = [
+        ContactActiveRoom(channel_key=key, channel_name=name, message_count=count)
+        for key, name, count in active_rooms_raw
+    ]
+
+    advert_frequency: float | None = None
+    if advert_paths:
+        total_observations = sum(p.heard_count for p in advert_paths)
+        earliest = min(p.first_seen for p in advert_paths)
+        latest = max(p.last_seen for p in advert_paths)
+        span_hours = (latest - earliest) / 3600.0
+        if span_hours > 0:
+            advert_frequency = round(total_observations / span_hours, 2)
+
+    first_hop_stats: dict[str, dict] = {}
+    for p in advert_paths:
+        prefix = p.next_hop
+        if prefix:
+            if prefix not in first_hop_stats:
+                first_hop_stats[prefix] = {
+                    "heard_count": 0,
+                    "path_len": p.path_len,
+                    "last_seen": p.last_seen,
+                }
+            first_hop_stats[prefix]["heard_count"] += p.heard_count
+            first_hop_stats[prefix]["last_seen"] = max(
+                first_hop_stats[prefix]["last_seen"], p.last_seen
+            )
+
+    resolved_contacts = await ContactRepository.resolve_prefixes(list(first_hop_stats.keys()))
+
+    nearest_repeaters: list[NearestRepeater] = []
+    for prefix, stats in first_hop_stats.items():
+        resolved = resolved_contacts.get(prefix)
+        nearest_repeaters.append(
+            NearestRepeater(
+                public_key=resolved.public_key if resolved else prefix,
+                name=resolved.name if resolved else None,
+                path_len=stats["path_len"],
+                last_seen=stats["last_seen"],
+                heard_count=stats["heard_count"],
+            )
+        )
+
+    nearest_repeaters.sort(key=lambda r: r.heard_count, reverse=True)
+
+    return ContactAnalytics(
+        lookup_type="contact",
+        name=contact.name or contact.public_key[:12],
+        contact=contact,
+        name_history=name_history,
+        dm_message_count=dm_count,
+        channel_message_count=chan_count,
+        includes_direct_messages=True,
+        most_active_rooms=most_active_rooms,
+        advert_paths=advert_paths,
+        advert_frequency=advert_frequency,
+        nearest_repeaters=nearest_repeaters,
+        hourly_activity=hourly_activity,
+        weekly_activity=weekly_activity,
+    )
+
+
+async def _build_name_only_contact_analytics(name: str) -> ContactAnalytics:
+    chan_count = await MessageRepository.count_channel_messages_by_sender_name(name)
+    name_first_seen_at = await MessageRepository.get_first_channel_message_by_sender_name(name)
+    active_rooms_raw = await MessageRepository.get_most_active_rooms_by_sender_name(name)
+    hourly_activity, weekly_activity = await MessageRepository.get_sender_name_activity_series(name)
+
+    most_active_rooms = [
+        ContactActiveRoom(channel_key=key, channel_name=room_name, message_count=count)
+        for key, room_name, count in active_rooms_raw
+    ]
+
+    return ContactAnalytics(
+        lookup_type="name",
+        name=name,
+        name_first_seen_at=name_first_seen_at,
+        channel_message_count=chan_count,
+        includes_direct_messages=False,
+        most_active_rooms=most_active_rooms,
+        hourly_activity=hourly_activity,
+        weekly_activity=weekly_activity,
+    )
+
+
 @router.get("", response_model=list[Contact])
 async def list_contacts(
     limit: int = Query(default=100, ge=1, le=1000),
@@ -112,6 +225,26 @@ async def list_repeater_advert_paths(
     )
 
 
+@router.get("/analytics", response_model=ContactAnalytics)
+async def get_contact_analytics(
+    public_key: str | None = Query(default=None),
+    name: str | None = Query(default=None, min_length=1, max_length=200),
+) -> ContactAnalytics:
+    """Get unified contact analytics for either a keyed contact or a sender name."""
+    if bool(public_key) == bool(name):
+        raise HTTPException(status_code=400, detail="Specify exactly one of public_key or name")
+
+    if public_key:
+        contact = await _resolve_contact_or_404(public_key)
+        return await _build_keyed_contact_analytics(contact)
+
+    assert name is not None
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="name is required")
+    return await _build_name_only_contact_analytics(normalized_name)
+
+
 @router.post("", response_model=Contact)
 async def create_contact(
     request: CreateContactRequest, background_tasks: BackgroundTasks
@@ -132,26 +265,20 @@ async def create_contact(
     if existing:
         # Update name if provided
         if request.name:
-            await ContactRepository.upsert(
-                {
-                    "public_key": existing.public_key,
-                    "name": request.name,
-                    "type": existing.type,
-                    "flags": existing.flags,
-                    "last_path": existing.last_path,
-                    "last_path_len": existing.last_path_len,
-                    "out_path_hash_mode": existing.out_path_hash_mode,
-                    "last_advert": existing.last_advert,
-                    "lat": existing.lat,
-                    "lon": existing.lon,
-                    "last_seen": existing.last_seen,
-                    "on_radio": existing.on_radio,
-                    "last_contacted": existing.last_contacted,
-                }
-            )
+            await ContactRepository.upsert(existing.to_upsert(name=request.name))
             refreshed = await ContactRepository.get_by_key(request.public_key)
             if refreshed is not None:
                 existing = refreshed
+
+        promoted_keys = await promote_prefix_contacts_for_contact(
+            public_key=request.public_key,
+            log=logger,
+        )
+        if promoted_keys:
+            refreshed = await ContactRepository.get_by_key(request.public_key)
+            if refreshed is not None:
+                existing = refreshed
+                await _broadcast_contact_resolution(promoted_keys, existing)
 
         # Trigger historical decryption if requested (even for existing contacts)
         if request.try_historical:
@@ -159,46 +286,40 @@ async def create_contact(
                 background_tasks, request.public_key, request.name or existing.name
             )
 
+        await _broadcast_contact_update(existing)
         return existing
 
     # Create new contact
     lower_key = request.public_key.lower()
-    contact_data = {
-        "public_key": lower_key,
-        "name": request.name,
-        "type": 0,  # Unknown
-        "flags": 0,
-        "last_path": None,
-        "last_path_len": -1,
-        "out_path_hash_mode": -1,
-        "last_advert": None,
-        "lat": None,
-        "lon": None,
-        "last_seen": None,
-        "on_radio": False,
-        "last_contacted": None,
-    }
-    await ContactRepository.upsert(contact_data)
+    contact_upsert = ContactUpsert(
+        public_key=lower_key,
+        name=request.name,
+        out_path_hash_mode=-1,
+        on_radio=False,
+    )
+    await ContactRepository.upsert(contact_upsert)
     logger.info("Created contact %s", lower_key[:12])
+    promoted_keys = await promote_prefix_contacts_for_contact(
+        public_key=lower_key,
+        log=logger,
+    )
 
-    # Promote any prefix-stored messages to this full key
-    claimed = await MessageRepository.claim_prefix_messages(lower_key)
-    if claimed > 0:
-        logger.info("Claimed %d prefix messages for contact %s", claimed, lower_key[:12])
-
-    # Backfill sender_key on channel messages that match this contact's name
-    if request.name:
-        backfilled = await MessageRepository.backfill_channel_sender_key(lower_key, request.name)
-        if backfilled > 0:
-            logger.info(
-                "Backfilled sender_key on %d channel message(s) for %s", backfilled, request.name
-            )
+    await reconcile_contact_messages(
+        public_key=lower_key,
+        contact_name=request.name,
+        log=logger,
+    )
 
     # Trigger historical decryption if requested
     if request.try_historical:
         await start_historical_dm_decryption(background_tasks, lower_key, request.name)
 
-    return Contact(**contact_data)
+    stored = await ContactRepository.get_by_key(lower_key)
+    if stored is None:
+        raise HTTPException(status_code=500, detail="Contact was created but could not be reloaded")
+    await _broadcast_contact_update(stored)
+    await _broadcast_contact_resolution(promoted_keys, stored)
+    return stored
 
 
 @router.get("/{public_key}/detail", response_model=ContactDetail)

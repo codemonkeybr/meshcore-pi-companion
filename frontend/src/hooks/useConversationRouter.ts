@@ -151,7 +151,7 @@ export function useConversationRouter({
         setActiveConversationState({
           type: 'contact',
           id: contact.public_key,
-          name: getContactDisplayName(contact.name, contact.public_key),
+          name: getContactDisplayName(contact.name, contact.public_key, contact.last_advert),
         });
         hasSetDefaultConversation.current = true;
         return;
@@ -179,7 +179,7 @@ export function useConversationRouter({
         setActiveConversationState({
           type: 'contact',
           id: contact.public_key,
-          name: getContactDisplayName(contact.name, contact.public_key),
+          name: getContactDisplayName(contact.name, contact.public_key, contact.last_advert),
         });
         hasSetDefaultConversation.current = true;
         return;

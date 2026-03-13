@@ -6,13 +6,13 @@ import time
 from fastapi import APIRouter
 
 from app.models import UnreadCounts
-from app.radio import radio_manager
 from app.repository import (
     AppSettingsRepository,
     ChannelRepository,
     ContactRepository,
     MessageRepository,
 )
+from app.services.radio_runtime import radio_runtime as radio_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/read-state", tags=["read-state"])

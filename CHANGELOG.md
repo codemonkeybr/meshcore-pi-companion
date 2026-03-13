@@ -1,3 +1,63 @@
+## [3.2.0] - 2026-03-12
+
+Feature: Improve ambiguous-sender DM handling and visibility
+Feature: Allow for toggling of node GPS broadcast
+Feature: Add path width to bot and move example to full kwargs
+Feature: Improve node map color contrast
+Bugfix: More accurate tracking of contact data
+Bugfix: Misc. frontend performance and bugfixes
+Misc: Clearer warnings on user-key linkage
+Misc: Documentation improvements
+
+## [3.1.1] - 2026-03-11
+
+Feature: Add basic auth
+Feature: SQS fanout
+Feature: Enrich contact info pane
+Feature: Search operators for node and channel
+Feature: Pause radio connection attempts from Radio settings
+Feature: New themes! What a great use of time!
+Feature: Github workflows runs for validation
+Bugfix: More consistent log format with times
+Bugfix: Patch meshcore_py bluetooth eager reconnection out during pauses
+
+## [3.1.0] - 2026-03-11
+
+Feature: Add basic auth
+Feature: SQS fanout
+Feature: Enrich contact info pane
+Feature: Search operators for node and channel
+Feature: Pause radio connection attempts from Radio settings
+Feature: New themes! What a great use of time!
+Feature: Github workflows runs for validation
+Bugfix: More consistent log format with times
+Bugfix: Patch meshcore_py bluetooth eager reconnection out during pauses
+
+## [3.0.0] - 2026-03-10
+
+Feature: Custom regions per-channel
+Feature: Add custom contact pathing
+Feature: Corrupt packets are more clear that they're corrupt
+Feature: Better, faster patterns around background fetching with explicit opt-in for recurring sync if the app detects you need it
+Feature: More consistent icons
+Feature: Add per-channel local notifications
+Feature: New themes
+Feature: Massive codebase refactor and overhaul
+Bugfix: Fix packet parsing for trace packets
+Bugfix: Refetch channels on reconnect
+Bugfix: Load All on repeater pane on mobile doesn't etend into lower text
+Bugfix: Timestamps in logs
+Bugfix: Correct wrong clock sync command
+Misc: Improve bot error bubble up
+Misc: Update to non-lib-included meshcore-decoder version
+Misc: Revise refactors to be more LLM friendly
+Misc: Fix script executability
+Misc: Better logging format with timestamp
+Misc: Repeater advert buttons separate flood and one-hop
+Misc: Preserve repeater pane on navigation away
+Misc: Clearer iconography and coloring for status bar buttons
+Misc: Search bar to top bar
+
 ## [2.7.9] - 2026-03-08
 
 Bugfix: Don't obscure new integration dropdown on session boundary

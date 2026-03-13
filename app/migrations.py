@@ -778,7 +778,7 @@ async def _migrate_009_create_app_settings_table(conn: aiosqlite.Connection) -> 
     Create app_settings table for persistent application preferences.
 
     This table stores:
-    - max_radio_contacts: Max non-repeater contacts to keep on radio for DM ACKs
+    - max_radio_contacts: Configured radio contact capacity baseline for maintenance thresholds
     - favorites: JSON array of favorite conversations [{type, id}, ...]
     - auto_decrypt_dm_on_advert: Whether to attempt historical DM decryption on new contact
     - sidebar_sort_order: 'recent' or 'alpha' for sidebar sorting

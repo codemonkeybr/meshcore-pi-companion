@@ -310,3 +310,82 @@ class TestUnreadCountsBlockFiltering:
         result = await MessageRepository.get_unread_counts()
         assert result["counts"][f"contact-{blocked_key}"] == 1
         assert result["counts"][f"channel-{chan_key}"] == 1
+
+    @pytest.mark.asyncio
+    async def test_last_message_times_exclude_blocked_key_conversations(self, test_db):
+        """Blocked incoming key traffic should not reseed recent-sort timestamps."""
+        blocked_key = "aa" * 32
+        normal_key = "bb" * 32
+        chan_key = "CC" * 16
+
+        await ContactRepository.upsert({"public_key": blocked_key, "name": "Blocked"})
+        await ContactRepository.upsert({"public_key": normal_key, "name": "Normal"})
+        await ChannelRepository.upsert(key=chan_key, name="#test")
+
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="blocked dm",
+            received_at=1000,
+            conversation_key=blocked_key,
+            sender_timestamp=1000,
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="normal dm",
+            received_at=1001,
+            conversation_key=normal_key,
+            sender_timestamp=1001,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Blocked: spam",
+            received_at=1002,
+            conversation_key=chan_key,
+            sender_timestamp=1002,
+            sender_name="Blocked",
+            sender_key=blocked_key,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Normal: hello",
+            received_at=1003,
+            conversation_key=chan_key,
+            sender_timestamp=1003,
+            sender_name="Normal",
+            sender_key=normal_key,
+        )
+
+        result = await MessageRepository.get_unread_counts(blocked_keys=[blocked_key])
+
+        assert f"contact-{blocked_key}" not in result["last_message_times"]
+        assert result["last_message_times"][f"contact-{normal_key}"] == 1001
+        assert result["last_message_times"][f"channel-{chan_key}"] == 1003
+
+    @pytest.mark.asyncio
+    async def test_last_message_times_exclude_blocked_name_channel_msgs(self, test_db):
+        """Blocked incoming names should not win the channel's recent timestamp."""
+        chan_key = "DD" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#test2")
+
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Spammer: buy stuff",
+            received_at=2000,
+            conversation_key=chan_key,
+            sender_timestamp=2000,
+            sender_name="Spammer",
+            sender_key="ee" * 32,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Friend: hello",
+            received_at=1999,
+            conversation_key=chan_key,
+            sender_timestamp=1999,
+            sender_name="Friend",
+            sender_key="ff" * 32,
+        )
+
+        result = await MessageRepository.get_unread_counts(blocked_names=["Spammer"])
+
+        assert result["last_message_times"][f"channel-{chan_key}"] == 1999
