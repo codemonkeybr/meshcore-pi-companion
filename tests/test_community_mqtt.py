@@ -90,13 +90,13 @@ class TestBase64UrlEncode:
 class TestJwtGeneration:
     def test_token_has_three_parts(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key)
+        token, _ = _generate_jwt_token(private_key, public_key)
         parts = token.split(".")
         assert len(parts) == 3
 
     def test_header_contains_ed25519_alg(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key)
+        token, _ = _generate_jwt_token(private_key, public_key)
         header_b64 = token.split(".")[0]
         # Add padding for base64 decoding
         import base64
@@ -108,7 +108,7 @@ class TestJwtGeneration:
 
     def test_payload_contains_required_fields(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key)
+        token, _ = _generate_jwt_token(private_key, public_key)
         payload_b64 = token.split(".")[1]
         import base64
 
@@ -125,7 +125,7 @@ class TestJwtGeneration:
 
     def test_payload_includes_email_when_provided(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key, email="test@example.com")
+        token, _ = _generate_jwt_token(private_key, public_key, email="test@example.com")
         payload_b64 = token.split(".")[1]
         import base64
 
@@ -135,7 +135,7 @@ class TestJwtGeneration:
 
     def test_payload_uses_custom_audience(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key, audience="custom.broker.net")
+        token, _ = _generate_jwt_token(private_key, public_key, audience="custom.broker.net")
         payload_b64 = token.split(".")[1]
         import base64
 
@@ -145,7 +145,7 @@ class TestJwtGeneration:
 
     def test_signature_is_valid_hex(self):
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key)
+        token, _ = _generate_jwt_token(private_key, public_key)
         sig_hex = token.split(".")[2]
         sig_bytes = bytes.fromhex(sig_hex)
         assert len(sig_bytes) == 64
@@ -153,7 +153,7 @@ class TestJwtGeneration:
     def test_signature_verifies(self):
         """Verify the JWT signature using nacl.bindings.crypto_sign_open."""
         private_key, public_key = _make_test_keys()
-        token = _generate_jwt_token(private_key, public_key)
+        token, _ = _generate_jwt_token(private_key, public_key)
         parts = token.split(".")
         signing_input = f"{parts[0]}.{parts[1]}".encode()
         signature = bytes.fromhex(parts[2])

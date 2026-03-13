@@ -97,19 +97,48 @@ def _generate_jwt_token(
     *,
     audience: str = _DEFAULT_BROKER,
     email: str = "",
-) -> str:
+) -> tuple[str, str]:
     """Generate a JWT token for community MQTT authentication.
 
-    Creates a token with Ed25519 signature using MeshCore's expanded key format.
-    Token format: header_b64.payload_b64.signature_hex
+    When private_key is 32 bytes (SPI/pymc_core seed), uses standard Ed25519
+    (nacl SigningKey) so LetsMesh accepts the token. When 64 bytes (MeshCore
+    expanded from firmware), uses expanded-key signing.
 
-    Optional ``email`` embeds a node-claiming identity so the community
-    aggregator can associate this radio with an owner.
+    Returns:
+        (token, pubkey_hex) so the caller can set username to v1_{pubkey_hex}.
     """
     header = {"alg": "Ed25519", "typ": "JWT"}
     now = int(time.time())
+
+    if len(private_key) == 32:
+        # Standard Ed25519 seed (SPI/pymc_core) — LetsMesh expects this
+        signing_key = nacl.signing.SigningKey(private_key)
+        real_public = signing_key.verify_key.encode()
+        pubkey_hex = real_public.hex().upper()
+        payload: dict[str, object] = {
+            "publicKey": pubkey_hex,
+            "iat": now,
+            "exp": now + _TOKEN_LIFETIME,
+            "aud": audience,
+            "owner": pubkey_hex,
+            "client": _CLIENT_ID,
+        }
+        if email:
+            payload["email"] = email
+        header_b64 = _base64url_encode(
+            json.dumps(header, separators=(",", ":")).encode()
+        )
+        payload_b64 = _base64url_encode(
+            json.dumps(payload, separators=(",", ":")).encode()
+        )
+        signing_input = f"{header_b64}.{payload_b64}".encode()
+        signature = signing_key.sign(signing_input).signature
+        token = f"{header_b64}.{payload_b64}.{signature.hex()}"
+        return (token, pubkey_hex)
+
+    # 64-byte MeshCore expanded key (firmware export)
     pubkey_hex = public_key.hex().upper()
-    payload: dict[str, object] = {
+    payload = {
         "publicKey": pubkey_hex,
         "iat": now,
         "exp": now + _TOKEN_LIFETIME,
@@ -119,17 +148,14 @@ def _generate_jwt_token(
     }
     if email:
         payload["email"] = email
-
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
-
     signing_input = f"{header_b64}.{payload_b64}".encode()
-
     scalar = private_key[:32]
     prefix = private_key[32:]
     signature = _ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
-
-    return f"{header_b64}.{payload_b64}.{signature.hex()}"
+    token = f"{header_b64}.{payload_b64}.{signature.hex()}"
+    return (token, pubkey_hex)
 
 
 def _calculate_packet_hash(raw_bytes: bytes) -> str:
@@ -375,13 +401,13 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         if auth_mode == "token":
             assert private_key is not None
             token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
-            jwt_token = _generate_jwt_token(
+            jwt_token, jwt_pubkey_hex = _generate_jwt_token(
                 private_key,
                 public_key,
                 audience=token_audience,
                 email=(s.community_mqtt_email or "") if secure_connection else "",
             )
-            kwargs["username"] = f"v1_{pubkey_hex}"
+            kwargs["username"] = f"v1_{jwt_pubkey_hex}"
             kwargs["password"] = jwt_token
         elif auth_mode == "password":
             kwargs["username"] = s.community_mqtt_username or None
