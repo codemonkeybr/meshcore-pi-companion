@@ -217,16 +217,16 @@ class TestRequireConnected:
 
             assert exc_info.value.status_code == 503
 
-    def test_returns_meshcore_when_connected_and_setup_complete(self):
-        """Returns meshcore instance when radio is connected and setup is complete."""
+    def test_returns_backend_when_connected_and_setup_complete(self):
+        """Returns backend instance when radio is connected and setup is complete (SPI has no meshcore)."""
         from app.dependencies import require_connected
 
-        mock_mc = MagicMock()
+        mock_backend = MagicMock()
         manager = MagicMock()
         manager.is_setup_in_progress = False
         manager.is_connected = True
-        manager.meshcore = mock_mc
+        manager.backend = mock_backend
         with patch("app.dependencies.radio_manager", _runtime(manager)):
             result = require_connected()
 
-        assert result is mock_mc
+        assert result is mock_backend

@@ -95,11 +95,15 @@ async def get_radio_config() -> RadioConfigResponse:
     adv_loc_policy = info.get("adv_loc_policy", 1)
     advert_location_source: AdvertLocationSource = "off" if adv_loc_policy == 0 else "current"
 
+    # Backend (e.g. SpiBackend) may use "lat"/"lon"; MeshCore uses "adv_lat"/"adv_lon"
+    lat = info.get("adv_lat", info.get("lat", 0.0))
+    lon = info.get("adv_lon", info.get("lon", 0.0))
+
     return RadioConfigResponse(
         public_key=info.get("public_key", ""),
         name=info.get("name", ""),
-        lat=info.get("adv_lat", 0.0),
-        lon=info.get("adv_lon", 0.0),
+        lat=lat,
+        lon=lon,
         tx_power=info.get("tx_power", 0),
         max_tx_power=info.get("max_tx_power", 0),
         radio=RadioSettings(

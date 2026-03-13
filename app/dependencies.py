@@ -4,5 +4,5 @@ from app.services.radio_runtime import radio_runtime as radio_manager
 
 
 def require_connected():
-    """Dependency that ensures radio is connected and returns meshcore instance."""
+    """Dependency that ensures radio is connected and returns the backend instance."""
     return radio_manager.require_connected()
