@@ -20,6 +20,7 @@ class HealthResponse(BaseModel):
     oldest_undecrypted_timestamp: int | None
     fanout_statuses: dict[str, dict[str, str]] = {}
     bots_disabled: bool = False
+    setup_required: bool = False
 
 
 async def build_health_data(radio_connected: bool, connection_info: str | None) -> dict:
@@ -56,7 +57,7 @@ async def build_health_data(radio_connected: bool, connection_info: str | None) 
 
     radio_initializing = bool(radio_connected and (setup_in_progress or not setup_complete))
 
-    return {
+    out: dict[str, Any] = {
         "status": "ok" if radio_connected and not radio_initializing else "degraded",
         "radio_connected": radio_connected,
         "radio_initializing": radio_initializing,
@@ -66,6 +67,13 @@ async def build_health_data(radio_connected: bool, connection_info: str | None) 
         "fanout_statuses": fanout_statuses,
         "bots_disabled": settings.disable_bots,
     }
+    if settings.connection_type == "spi":
+        from app.routers.setup import get_setup_required
+
+        out["setup_required"] = get_setup_required()
+    else:
+        out["setup_required"] = False
+    return out
 
 
 @router.get("/health", response_model=HealthResponse)

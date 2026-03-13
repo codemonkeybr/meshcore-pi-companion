@@ -34,10 +34,10 @@ _MONOTONIC = "app.routers.repeaters._monotonic"
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
 
 
@@ -71,15 +71,14 @@ async def _insert_contact(public_key: str, name: str = "Node", contact_type: int
 
 def _mock_mc():
     mc = MagicMock()
-    mc.commands = MagicMock()
-    mc.commands.req_status_sync = AsyncMock()
-    mc.commands.fetch_all_neighbours = AsyncMock()
-    mc.commands.req_acl_sync = AsyncMock()
-    mc.commands.req_telemetry_sync = AsyncMock()
-    mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-    mc.commands.get_msg = AsyncMock()
-    mc.commands.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
-    mc.commands.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.req_status_sync = AsyncMock()
+    mc.fetch_all_neighbours = AsyncMock()
+    mc.req_acl_sync = AsyncMock()
+    mc.req_telemetry_sync = AsyncMock()
+    mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.get_msg = AsyncMock()
+    mc.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
+    mc.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
     mc.wait_for_event = AsyncMock()
     mc.stop_auto_message_fetching = AsyncMock()
     mc.start_auto_message_fetching = AsyncMock()
@@ -105,7 +104,7 @@ class TestFetchRepeaterResponse:
     @pytest.mark.asyncio
     async def test_returns_matching_cli_response(self):
         mc = _mock_mc()
-        mc.commands.get_msg = AsyncMock(
+        mc.get_msg = AsyncMock(
             return_value=_radio_result(
                 EventType.CONTACT_MSG_RECV,
                 {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ok", "txt_type": 1},
@@ -117,7 +116,7 @@ class TestFetchRepeaterResponse:
 
         assert result is not None
         assert result.payload["text"] == "ok"
-        mc.commands.get_msg.assert_awaited_once()
+        mc.get_msg.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_rejects_same_sender_non_cli_message(self):
@@ -131,14 +130,14 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ver 1.0", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[non_cli, cli_response])
+        mc.get_msg = AsyncMock(side_effect=[non_cli, cli_response])
 
         with patch(_MONOTONIC, side_effect=_advancing_clock()):
             result = await _fetch_repeater_response(mc, "aaaaaaaaaaaa", timeout=5.0)
 
         assert result is not None
         assert result.payload["text"] == "ver 1.0"
-        assert mc.commands.get_msg.await_count == 2
+        assert mc.get_msg.await_count == 2
 
     @pytest.mark.asyncio
     async def test_unrelated_dm_is_skipped(self):
@@ -152,7 +151,7 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ver 1.0", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[unrelated, expected])
+        mc.get_msg = AsyncMock(side_effect=[unrelated, expected])
 
         with patch(_MONOTONIC, side_effect=_advancing_clock()):
             result = await _fetch_repeater_response(mc, "aaaaaaaaaaaa", timeout=5.0)
@@ -171,7 +170,7 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ok", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[channel_msg, expected])
+        mc.get_msg = AsyncMock(side_effect=[channel_msg, expected])
 
         with patch(_MONOTONIC, side_effect=_advancing_clock()):
             result = await _fetch_repeater_response(mc, "aaaaaaaaaaaa", timeout=5.0)
@@ -187,7 +186,7 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ok", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[no_msgs, expected])
+        mc.get_msg = AsyncMock(side_effect=[no_msgs, expected])
 
         with (
             patch(_MONOTONIC, side_effect=_advancing_clock()),
@@ -197,13 +196,13 @@ class TestFetchRepeaterResponse:
 
         assert result is not None
         assert result.payload["text"] == "ok"
-        assert mc.commands.get_msg.await_count == 2
+        assert mc.get_msg.await_count == 2
 
     @pytest.mark.asyncio
     async def test_returns_none_after_deadline(self):
         """Returns None when wall-clock deadline expires."""
         mc = _mock_mc()
-        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+        mc.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
 
         # Start at 100.0, jump past deadline (timeout=2.0) after 2 get_msg calls
         times = iter([100.0, 100.5, 101.0, 103.0])
@@ -224,7 +223,7 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ok", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[error, expected])
+        mc.get_msg = AsyncMock(side_effect=[error, expected])
 
         with (
             patch(_MONOTONIC, side_effect=_advancing_clock()),
@@ -251,14 +250,14 @@ class TestFetchRepeaterResponse:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": "aaaaaaaaaaaa", "text": "ver 1.0", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[*unrelated, expected])
+        mc.get_msg = AsyncMock(side_effect=[*unrelated, expected])
 
         with patch(_MONOTONIC, side_effect=_advancing_clock()):
             result = await _fetch_repeater_response(mc, "aaaaaaaaaaaa", timeout=30.0)
 
         assert result is not None
         assert result.payload["text"] == "ver 1.0"
-        assert mc.commands.get_msg.await_count == 21
+        assert mc.get_msg.await_count == 21
 
 
 class TestRepeaterCommandRoute:
@@ -266,13 +265,11 @@ class TestRepeaterCommandRoute:
     async def test_send_cmd_error_raises_and_restores_auto_fetch(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(
-            return_value=_radio_result(EventType.ERROR, {"err": "bad"})
-        )
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.ERROR, {"err": "bad"}))
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -284,13 +281,13 @@ class TestRepeaterCommandRoute:
     async def test_timeout_returns_no_response_message(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
 
         # Expire the deadline after a couple of ticks
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=[0.0, 5.0, 25.0]),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -304,8 +301,8 @@ class TestRepeaterCommandRoute:
     async def test_success_returns_command_response_text_and_sender_timestamp(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.get_msg = AsyncMock(
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.get_msg = AsyncMock(
             return_value=_radio_result(
                 EventType.CONTACT_MSG_RECV,
                 {
@@ -319,7 +316,7 @@ class TestRepeaterCommandRoute:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -332,8 +329,8 @@ class TestRepeaterCommandRoute:
     async def test_response_strips_firmware_prompt_prefix(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.get_msg = AsyncMock(
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.get_msg = AsyncMock(
             return_value=_radio_result(
                 EventType.CONTACT_MSG_RECV,
                 {
@@ -347,7 +344,7 @@ class TestRepeaterCommandRoute:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -358,8 +355,8 @@ class TestRepeaterCommandRoute:
     async def test_success_falls_back_to_legacy_timestamp_field(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.get_msg = AsyncMock(
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.get_msg = AsyncMock(
             return_value=_radio_result(
                 EventType.CONTACT_MSG_RECV,
                 {
@@ -373,7 +370,7 @@ class TestRepeaterCommandRoute:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -387,7 +384,7 @@ class TestRepeaterCommandRoute:
         """Unrelated DMs arriving during command wait are skipped; correct response returned."""
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
 
         unrelated = _radio_result(
             EventType.CONTACT_MSG_RECV,
@@ -397,11 +394,11 @@ class TestRepeaterCommandRoute:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": KEY_A[:12], "text": "ver 1.0", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[unrelated, expected])
+        mc.get_msg = AsyncMock(side_effect=[unrelated, expected])
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -413,7 +410,7 @@ class TestRepeaterCommandRoute:
     async def test_channel_message_during_command_is_skipped(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
 
         channel_msg = _radio_result(
             EventType.CHANNEL_MSG_RECV,
@@ -423,11 +420,11 @@ class TestRepeaterCommandRoute:
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": KEY_A[:12], "text": "ok", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[channel_msg, expected])
+        mc.get_msg = AsyncMock(side_effect=[channel_msg, expected])
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await send_repeater_command(KEY_A, CommandRequest(command="ver"))
@@ -439,18 +436,18 @@ class TestRepeaterCommandRoute:
     async def test_no_more_msgs_then_response_succeeds(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
 
         no_msgs = _radio_result(EventType.NO_MORE_MSGS)
         expected = _radio_result(
             EventType.CONTACT_MSG_RECV,
             {"pubkey_prefix": KEY_A[:12], "text": "done", "txt_type": 1},
         )
-        mc.commands.get_msg = AsyncMock(side_effect=[no_msgs, expected])
+        mc.get_msg = AsyncMock(side_effect=[no_msgs, expected])
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -465,13 +462,11 @@ class TestTraceRoute:
     async def test_send_trace_error_returns_500(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Client", contact_type=1)
-        mc.commands.send_trace = AsyncMock(
-            return_value=_radio_result(EventType.ERROR, {"err": "x"})
-        )
+        mc.send_trace = AsyncMock(return_value=_radio_result(EventType.ERROR, {"err": "x"}))
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -483,12 +478,12 @@ class TestTraceRoute:
     async def test_wait_timeout_returns_504(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Client", contact_type=1)
-        mc.commands.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -500,14 +495,14 @@ class TestTraceRoute:
     async def test_success_returns_remote_and_local_snr(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Client", contact_type=1)
-        mc.commands.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_trace = AsyncMock(return_value=_radio_result(EventType.OK))
         mc.wait_for_event = AsyncMock(
             return_value=MagicMock(payload={"path": [{"snr": 5.5}, {"snr": 3.2}], "path_len": 2})
         )
 
         with (
             patch("app.routers.contacts.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.contacts.random.randint", return_value=1234),
         ):
             response = await request_trace(KEY_A)
@@ -530,7 +525,7 @@ class TestRepeaterLogin:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(
                 "app.routers.repeaters.prepare_repeater_connection",
                 new_callable=AsyncMock,
@@ -546,7 +541,7 @@ class TestRepeaterLogin:
         mc = _mock_mc()
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_login(KEY_A, RepeaterLoginRequest(password="pw"))
@@ -558,7 +553,7 @@ class TestRepeaterLogin:
         await _insert_contact(KEY_A, name="Client", contact_type=1)
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_login(KEY_A, RepeaterLoginRequest(password="pw"))
@@ -575,7 +570,7 @@ class TestRepeaterLogin:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.repeaters.prepare_repeater_connection", side_effect=_prepare_fail),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -588,7 +583,7 @@ class TestRepeaterStatus:
     async def test_success_with_field_mapping(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_status_sync = AsyncMock(
+        mc.req_status_sync = AsyncMock(
             return_value={
                 "bat": 4200,
                 "tx_queue_len": 2,
@@ -612,7 +607,7 @@ class TestRepeaterStatus:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_status(KEY_A)
 
@@ -631,11 +626,11 @@ class TestRepeaterStatus:
     async def test_504_on_timeout(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_status_sync = AsyncMock(return_value=None)
+        mc.req_status_sync = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_status(KEY_A)
@@ -647,7 +642,7 @@ class TestRepeaterStatus:
         await _insert_contact(KEY_A, name="Client", contact_type=1)
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_status(KEY_A)
@@ -659,7 +654,7 @@ class TestRepeaterLppTelemetry:
     async def test_success_with_sensors(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_telemetry_sync = AsyncMock(
+        mc.req_telemetry_sync = AsyncMock(
             return_value=[
                 {"channel": 0, "type": "temperature", "value": 24.5},
                 {"channel": 1, "type": "humidity", "value": 62.0},
@@ -673,7 +668,7 @@ class TestRepeaterLppTelemetry:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_lpp_telemetry(KEY_A)
 
@@ -691,11 +686,11 @@ class TestRepeaterLppTelemetry:
     async def test_empty_sensors(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_telemetry_sync = AsyncMock(return_value=[])
+        mc.req_telemetry_sync = AsyncMock(return_value=[])
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_lpp_telemetry(KEY_A)
 
@@ -705,11 +700,11 @@ class TestRepeaterLppTelemetry:
     async def test_504_on_timeout(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_telemetry_sync = AsyncMock(return_value=None)
+        mc.req_telemetry_sync = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_lpp_telemetry(KEY_A)
@@ -721,7 +716,7 @@ class TestRepeaterLppTelemetry:
         await _insert_contact(KEY_A, name="Client", contact_type=1)
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_lpp_telemetry(KEY_A)
@@ -736,7 +731,7 @@ class TestRepeaterNeighbors:
         neighbor_key = "bb" * 32
         await _insert_contact(neighbor_key, name="NeighborNode", contact_type=1)
 
-        mc.commands.fetch_all_neighbours = AsyncMock(
+        mc.fetch_all_neighbours = AsyncMock(
             return_value={
                 "neighbours": [
                     {"pubkey": neighbor_key[:12], "snr": 9.0, "secs_ago": 5},
@@ -747,7 +742,7 @@ class TestRepeaterNeighbors:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_neighbors(KEY_A)
 
@@ -761,11 +756,11 @@ class TestRepeaterNeighbors:
     async def test_empty_neighbors(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.fetch_all_neighbours = AsyncMock(return_value={"neighbours": []})
+        mc.fetch_all_neighbours = AsyncMock(return_value={"neighbours": []})
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_neighbors(KEY_A)
 
@@ -775,11 +770,11 @@ class TestRepeaterNeighbors:
     async def test_timeout_returns_empty(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.fetch_all_neighbours = AsyncMock(return_value=None)
+        mc.fetch_all_neighbours = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_neighbors(KEY_A)
 
@@ -794,7 +789,7 @@ class TestRepeaterAcl:
         neighbor_key = "bb" * 32
         await _insert_contact(neighbor_key, name="Admin User", contact_type=1)
 
-        mc.commands.req_acl_sync = AsyncMock(
+        mc.req_acl_sync = AsyncMock(
             return_value=[
                 {"key": neighbor_key[:12], "perm": 3},
                 {"key": "dddddddddddd", "perm": 0},
@@ -803,7 +798,7 @@ class TestRepeaterAcl:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_acl(KEY_A)
 
@@ -817,11 +812,11 @@ class TestRepeaterAcl:
     async def test_empty_acl(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_acl_sync = AsyncMock(return_value=[])
+        mc.req_acl_sync = AsyncMock(return_value=[])
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_acl(KEY_A)
 
@@ -831,11 +826,11 @@ class TestRepeaterAcl:
     async def test_timeout_returns_empty(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.req_acl_sync = AsyncMock(return_value=None)
+        mc.req_acl_sync = AsyncMock(return_value=None)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             response = await repeater_acl(KEY_A)
 
@@ -868,11 +863,11 @@ class TestRepeaterRadioSettings:
             )
             for text in responses
         ]
-        mc.commands.get_msg = AsyncMock(side_effect=get_msg_results)
+        mc.get_msg = AsyncMock(side_effect=get_msg_results)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await repeater_radio_settings(KEY_A)
@@ -899,7 +894,7 @@ class TestRepeaterRadioSettings:
             {"pubkey_prefix": KEY_A[:12], "text": "v2.0.0", "txt_type": 1},
         )
         no_msgs = _radio_result(EventType.NO_MORE_MSGS)
-        mc.commands.get_msg = AsyncMock(side_effect=[first_response] + [no_msgs] * 50)
+        mc.get_msg = AsyncMock(side_effect=[first_response] + [no_msgs] * 50)
 
         # Provide clock ticks: first command succeeds quickly, others expire
         clock_ticks = [0.0, 0.1]  # First fetch succeeds
@@ -909,7 +904,7 @@ class TestRepeaterRadioSettings:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=clock_ticks),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -925,7 +920,7 @@ class TestRepeaterRadioSettings:
         await _insert_contact(KEY_A, name="Client", contact_type=1)
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_radio_settings(KEY_A)
@@ -948,11 +943,11 @@ class TestRepeaterAdvertIntervals:
                 {"pubkey_prefix": KEY_A[:12], "text": "120", "txt_type": 1},
             ),
         ]
-        mc.commands.get_msg = AsyncMock(side_effect=responses)
+        mc.get_msg = AsyncMock(side_effect=responses)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await repeater_advert_intervals(KEY_A)
@@ -964,7 +959,7 @@ class TestRepeaterAdvertIntervals:
     async def test_timeout_returns_none_fields(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+        mc.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
 
         clock_ticks = []
         for i in range(2):
@@ -973,7 +968,7 @@ class TestRepeaterAdvertIntervals:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=clock_ticks),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -1003,11 +998,11 @@ class TestRepeaterOwnerInfo:
                 {"pubkey_prefix": KEY_A[:12], "text": "guestpw123", "txt_type": 1},
             ),
         ]
-        mc.commands.get_msg = AsyncMock(side_effect=responses)
+        mc.get_msg = AsyncMock(side_effect=responses)
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
         ):
             response = await repeater_owner_info(KEY_A)
@@ -1019,7 +1014,7 @@ class TestRepeaterOwnerInfo:
     async def test_timeout_returns_none_fields(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+        mc.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
 
         clock_ticks = []
         for i in range(2):
@@ -1028,7 +1023,7 @@ class TestRepeaterOwnerInfo:
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=clock_ticks),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -1051,13 +1046,13 @@ class TestBatchCliFetch:
     @pytest.mark.asyncio
     async def test_add_contact_error_raises_500(self):
         mc = _mock_mc()
-        mc.commands.add_contact = AsyncMock(
+        mc.add_contact = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "radio busy"})
         )
 
         contact = _make_contact()
 
-        with patch.object(radio_manager, "_meshcore", mc):
+        with patch.object(radio_manager, "_backend", mc):
             with pytest.raises(HTTPException) as exc:
                 await _batch_cli_fetch(contact, "test_op", [("ver", "firmware_version")])
 
@@ -1067,16 +1062,16 @@ class TestBatchCliFetch:
     @pytest.mark.asyncio
     async def test_send_cmd_error_skips_field(self):
         mc = _mock_mc()
-        mc.commands.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
 
         # First command fails, second succeeds
-        mc.commands.send_cmd = AsyncMock(
+        mc.send_cmd = AsyncMock(
             side_effect=[
                 _radio_result(EventType.ERROR, {"err": "bad cmd"}),
                 _radio_result(EventType.OK),
             ]
         )
-        mc.commands.get_msg = AsyncMock(
+        mc.get_msg = AsyncMock(
             return_value=_radio_result(
                 EventType.CONTACT_MSG_RECV,
                 {"pubkey_prefix": KEY_A[:12], "text": "result2", "txt_type": 1},
@@ -1086,7 +1081,7 @@ class TestBatchCliFetch:
         contact = _make_contact()
 
         with (
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=_advancing_clock()),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -1100,14 +1095,14 @@ class TestBatchCliFetch:
     @pytest.mark.asyncio
     async def test_no_response_leaves_field_none(self):
         mc = _mock_mc()
-        mc.commands.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
-        mc.commands.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
+        mc.add_contact = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.send_cmd = AsyncMock(return_value=_radio_result(EventType.OK))
+        mc.get_msg = AsyncMock(return_value=_radio_result(EventType.NO_MORE_MSGS))
 
         contact = _make_contact()
 
         with (
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch(_MONOTONIC, side_effect=[0.0, 5.0, 11.0]),
             patch("app.routers.repeaters.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -1123,13 +1118,13 @@ class TestRepeaterAddContactError:
     async def test_status_add_contact_error(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.add_contact = AsyncMock(
+        mc.add_contact = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "radio busy"})
         )
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_status(KEY_A)
@@ -1141,13 +1136,13 @@ class TestRepeaterAddContactError:
     async def test_lpp_telemetry_add_contact_error(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.add_contact = AsyncMock(
+        mc.add_contact = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "radio busy"})
         )
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_lpp_telemetry(KEY_A)
@@ -1159,13 +1154,13 @@ class TestRepeaterAddContactError:
     async def test_neighbors_add_contact_error(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.add_contact = AsyncMock(
+        mc.add_contact = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "radio busy"})
         )
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_neighbors(KEY_A)
@@ -1177,13 +1172,13 @@ class TestRepeaterAddContactError:
     async def test_acl_add_contact_error(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
-        mc.commands.add_contact = AsyncMock(
+        mc.add_contact = AsyncMock(
             return_value=_radio_result(EventType.ERROR, {"err": "radio busy"})
         )
 
         with (
             patch("app.routers.repeaters.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_acl(KEY_A)

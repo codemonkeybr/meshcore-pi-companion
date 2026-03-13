@@ -61,14 +61,26 @@ class TestSetPrivateKey:
         assert len(pub) == 32
         assert has_private_key() is True
 
+    def test_accepts_32_byte_key_from_spi(self):
+        """32-byte scalar (e.g. SPI/pymc_core) is expanded to 64 and stored."""
+        scalar = VALID_KEY[:32]  # clamped scalar so derive_public_key works
+        set_private_key(scalar)
+        stored = get_private_key()
+        assert stored is not None
+        assert len(stored) == 64
+        assert stored[:32] == scalar
+        assert get_public_key() is not None
+
     def test_rejects_wrong_length(self):
-        """Keys that aren't 64 bytes are rejected."""
-        with pytest.raises(ValueError, match="64 bytes"):
-            set_private_key(b"\x00" * 32)
+        """Keys that aren't 32 or 64 bytes are rejected."""
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
+            set_private_key(b"\x00" * 31)
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
+            set_private_key(b"\x00" * 65)
 
     def test_rejects_empty_key(self):
         """Empty key is rejected."""
-        with pytest.raises(ValueError, match="64 bytes"):
+        with pytest.raises(ValueError, match="32 or 64 bytes"):
             set_private_key(b"")
 
     def test_overwrites_previous_key(self):
@@ -111,7 +123,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.PRIVATE_KEY
         mock_result.payload = {"private_key": VALID_KEY}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -126,7 +138,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.DISABLED
         mock_result.payload = {}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -140,7 +152,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.ERROR
         mock_result.payload = {"error": "something went wrong"}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         result = await export_and_store_private_key(mock_mc)
 
@@ -154,7 +166,7 @@ class TestExportAndStorePrivateKey:
         mock_result = MagicMock()
         mock_result.type = EventType.ERROR
         mock_result.payload = {"reason": "no_event_received"}
-        mock_mc.commands.export_private_key = AsyncMock(return_value=mock_result)
+        mock_mc.export_private_key = AsyncMock(return_value=mock_result)
 
         with pytest.raises(RuntimeError, match="cannot proceed"):
             await export_and_store_private_key(mock_mc)
@@ -165,7 +177,7 @@ class TestExportAndStorePrivateKey:
     async def test_exception_returns_false(self):
         """Exception during export returns False without storing."""
         mock_mc = MagicMock()
-        mock_mc.commands.export_private_key = AsyncMock(side_effect=Exception("Connection lost"))
+        mock_mc.export_private_key = AsyncMock(side_effect=Exception("Connection lost"))
 
         result = await export_and_store_private_key(mock_mc)
 

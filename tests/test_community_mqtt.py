@@ -706,8 +706,8 @@ class TestLwtAndStatusPublish:
         settings = _make_community_settings(community_mqtt_iata="SFO")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {"name": "TestNode"}
 
         with (
             patch("app.keystore.get_private_key", return_value=private_key),
@@ -750,7 +750,7 @@ class TestLwtAndStatusPublish:
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager") as mock_radio,
         ):
-            mock_radio.meshcore = None
+            mock_radio.backend = None
             kwargs = pub._build_client_kwargs(settings)
 
         assert kwargs["hostname"] == "meshrank.net"
@@ -782,7 +782,7 @@ class TestLwtAndStatusPublish:
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager") as mock_radio,
         ):
-            mock_radio.meshcore = None
+            mock_radio.backend = None
             kwargs = pub._build_client_kwargs(settings)
 
         assert kwargs["hostname"] == "meshrank.net"
@@ -803,8 +803,8 @@ class TestLwtAndStatusPublish:
         )
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {"name": "TestNode"}
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
@@ -850,7 +850,7 @@ class TestLwtAndStatusPublish:
         settings = _make_community_settings(community_mqtt_iata="JFK")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = None
+        mock_radio.backend = None
 
         with (
             patch("app.keystore.get_private_key", return_value=private_key),
@@ -885,7 +885,7 @@ class TestLwtAndStatusPublish:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = None
+        mock_radio.backend = None
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
@@ -931,8 +931,8 @@ class TestCommunityPacketPublishTopic:
         config = {"iata": "lax", "topic_template": "mesh2mqtt/{IATA}/node/{PUBLIC_KEY}"}
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {"name": "Node"}
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {"name": "Node"}
 
         with (
             patch("app.keystore.get_public_key", return_value=bytes.fromhex("AA" * 32)),
@@ -963,7 +963,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.send_device_query = AsyncMock(
+        mc_mock.send_device_query = AsyncMock(
             return_value=Event(
                 EventType.DEVICE_INFO,
                 {"fw ver": 3, "model": "T-Deck", "ver": "2.2.2", "fw_build": "2025-01-15"},
@@ -986,7 +986,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.send_device_query = AsyncMock(
+        mc_mock.send_device_query = AsyncMock(
             return_value=Event(EventType.DEVICE_INFO, {"fw ver": 2})
         )
 
@@ -1006,7 +1006,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.send_device_query = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.send_device_query = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1050,7 +1050,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.send_device_query = AsyncMock(
+        mc_mock.send_device_query = AsyncMock(
             return_value=Event(
                 EventType.DEVICE_INFO,
                 {"fw ver": 3, "model": "Heltec", "ver": "1.0.0", "fw_build": ""},
@@ -1072,13 +1072,13 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.get_stats_core = AsyncMock(
+        mc_mock.get_stats_core = AsyncMock(
             return_value=Event(
                 EventType.STATS_CORE,
                 {"battery_mv": 4200, "uptime_secs": 3600, "errors": 0, "queue_len": 0},
             )
         )
-        mc_mock.commands.get_stats_radio = AsyncMock(
+        mc_mock.get_stats_radio = AsyncMock(
             return_value=Event(
                 EventType.STATS_RADIO,
                 {
@@ -1107,7 +1107,7 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.get_stats_core = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.get_stats_core = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1123,13 +1123,13 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.commands.get_stats_core = AsyncMock(
+        mc_mock.get_stats_core = AsyncMock(
             return_value=Event(
                 EventType.STATS_CORE,
                 {"battery_mv": 4200, "uptime_secs": 3600, "errors": 0, "queue_len": 0},
             )
         )
-        mc_mock.commands.get_stats_radio = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.get_stats_radio = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1176,8 +1176,8 @@ class TestBuildRadioInfo:
     def test_formatted_string(self):
         """Should return comma-separated radio info matching reference format."""
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {
             "radio_freq": 915.0,
             "radio_bw": 250.0,
             "radio_sf": 10,
@@ -1192,7 +1192,7 @@ class TestBuildRadioInfo:
     def test_fallback_when_no_meshcore(self):
         """Should return '0,0,0,0' when meshcore is None."""
         mock_radio = MagicMock()
-        mock_radio.meshcore = None
+        mock_radio.backend = None
 
         with patch("app.radio.radio_manager", mock_radio):
             result = _build_radio_info()
@@ -1202,8 +1202,8 @@ class TestBuildRadioInfo:
     def test_fallback_when_self_info_missing_fields(self):
         """Should use 0 defaults when self_info lacks radio fields."""
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {"name": "TestNode"}
 
         with patch("app.radio.radio_manager", mock_radio):
             result = _build_radio_info()
@@ -1243,8 +1243,8 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = MagicMock()
-        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.backend = MagicMock()
+        mock_radio.backend.self_info = {"name": "TestNode"}
 
         stats = {"battery_mv": 4200, "uptime_secs": 3600, "noise_floor": -120}
 
@@ -1283,7 +1283,7 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = None
+        mock_radio.backend = None
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
@@ -1314,7 +1314,7 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.meshcore = None
+        mock_radio.backend = None
 
         before = time.monotonic()
 

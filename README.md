@@ -27,7 +27,7 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 - Python 3.10+
 - Node.js LTS or current (20, 22, 24, 25)
 - [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- MeshCore radio connected via USB serial, TCP, or BLE
+- **Radio:** MeshCore device over USB serial, TCP, or BLE — *or* on Raspberry Pi, a supported LoRa HAT (SPI; see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode))
 
 <details>
 <summary>Finding your serial port</summary>
@@ -105,11 +105,38 @@ Access at http://localhost:8000
 
 > **Note:** WebGPU cracking requires HTTPS when not on localhost. See the HTTPS section under Additional Setup.
 
+### Running on Raspberry Pi (SPI mode)
+
+On a Pi with a LoRa HAT (e.g. Waveshare SX1262), RemoteTerm can drive the radio directly over SPI — no external MeshCore device needed. **Enable SPI first:** `sudo raspi-config` → Interface Options → SPI → Enable, then reboot.
+
+**One-time install and config:**
+
+```bash
+chmod +x scripts/install_remoterm_pi.sh
+./scripts/install_remoterm_pi.sh
+```
+
+This creates a venv, installs deps with `.[spi]`, and if `config.yaml` is missing runs an interactive **SPI setup wizard** (node name, hardware profile, radio region). To run only the wizard later (e.g. change region or node name):
+
+```bash
+./scripts/install_remoterm_pi.sh --spi-config
+```
+
+**Start the server:**
+
+```bash
+./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000
+```
+
+Config is stored in `config.yaml` (or `data/config.yaml`). You can instead copy `config.yaml.example` and edit it by hand; see `config.yaml.example` for node, radio, and hardware profile options.
+
+For a short deployment guide (troubleshooting, service, identity), see [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
+
 ## Docker Compose
 
 > **Warning:** Docker has intermittent issues with serial event subscriptions. The native method above is more reliable.
 
-> **Note:** BLE-in-docker is outside the scope of this README, but the env vars should all still work.
+> **Note:** BLE-in-docker is outside the scope of this README, but the env vars should all still work. **SPI mode** (Pi + LoRa HAT) is not supported in Docker; the container cannot access the host’s GPIO/SPI. Use the native install and run script on the Pi instead (see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode) and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md)).
 
 Edit `docker-compose.yaml` to set a serial device for passthrough, or uncomment your transport (serial or TCP). Then:
 
@@ -217,15 +244,16 @@ npm run build                        # build the frontend
 |----------|---------|-------------|
 | `MESHCORE_SERIAL_PORT` | (auto-detect) | Serial port path |
 | `MESHCORE_SERIAL_BAUDRATE` | 115200 | Serial baud rate |
-| `MESHCORE_TCP_HOST` | | TCP host (mutually exclusive with serial/BLE) |
+| `MESHCORE_TCP_HOST` | | TCP host (mutually exclusive with serial/BLE/SPI) |
 | `MESHCORE_TCP_PORT` | 4000 | TCP port |
-| `MESHCORE_BLE_ADDRESS` | | BLE device address (mutually exclusive with serial/TCP) |
+| `MESHCORE_BLE_ADDRESS` | | BLE device address (mutually exclusive with serial/TCP/SPI) |
 | `MESHCORE_BLE_PIN` | | BLE PIN (required when BLE address is set) |
+| `MESHCORE_CONFIG_FILE` | data/config.yaml | Path to SPI config file; when this file exists, **SPI mode** is used (Pi + LoRa HAT). Mutually exclusive with serial/TCP/BLE. |
 | `MESHCORE_LOG_LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR |
 | `MESHCORE_DATABASE_PATH` | data/meshcore.db | SQLite database path |
 | `MESHCORE_DISABLE_BOTS` | false | Disable bot system entirely (blocks execution and config) |
 
-Only one transport may be active at a time. If multiple are set, the server will refuse to start.
+Only one transport may be active at a time (serial, TCP, BLE, or SPI). SPI is selected when the config file exists; no env vars are required for SPI beyond an optional `MESHCORE_CONFIG_FILE` override.
 
 ## Additional Setup
 
@@ -325,7 +353,9 @@ npx playwright test --headed # show the browser window
 
 ## API Documentation
 
-With the backend running: http://localhost:8000/docs
+With the backend running: **http://localhost:8000/docs** (interactive OpenAPI).
+
+Markdown reference for all exposed endpoints: [docs/api/](docs/api/README.md) (health, setup, radio, contacts, channels, messages, packets, read-state, settings, fanout, statistics, WebSocket).
 
 ## Debugging & Bug Reports
 

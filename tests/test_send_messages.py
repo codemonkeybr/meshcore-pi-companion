@@ -29,10 +29,10 @@ from app.routers.messages import (
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._meshcore
+    prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._meshcore = prev
+    radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
 
 
@@ -48,12 +48,11 @@ def _make_mc(name="TestNode"):
     """Create a mock MeshCore connection."""
     mc = MagicMock()
     mc.self_info = {"name": name}
-    mc.commands = MagicMock()
-    mc.commands.set_flood_scope = AsyncMock(return_value=_make_radio_result())
-    mc.commands.send_msg = AsyncMock(return_value=_make_radio_result())
-    mc.commands.send_chan_msg = AsyncMock(return_value=_make_radio_result())
-    mc.commands.add_contact = AsyncMock(return_value=_make_radio_result())
-    mc.commands.set_channel = AsyncMock(return_value=_make_radio_result())
+    mc.set_flood_scope = AsyncMock(return_value=_make_radio_result())
+    mc.send_msg = AsyncMock(return_value=_make_radio_result())
+    mc.send_chan_msg = AsyncMock(return_value=_make_radio_result())
+    mc.add_contact = AsyncMock(return_value=_make_radio_result())
+    mc.set_channel = AsyncMock(return_value=_make_radio_result())
     mc.get_contact_by_key_prefix = MagicMock(return_value=None)
     return mc
 
@@ -95,7 +94,7 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="!lasttime Alice")
@@ -142,13 +141,13 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
             await send_direct_message(request)
 
-        contact_payload = mc.commands.add_contact.call_args.args[0]
+        contact_payload = mc.add_contact.call_args.args[0]
         assert contact_payload["public_key"] == pub_key
         assert contact_payload["out_path"] == "aa00bb00"
         assert contact_payload["out_path_len"] == 2
@@ -171,13 +170,13 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
             await send_direct_message(request)
 
-        contact_payload = mc.commands.add_contact.call_args.args[0]
+        contact_payload = mc.add_contact.call_args.args[0]
         assert contact_payload["out_path"] == "cc00dd00"
         assert contact_payload["out_path_len"] == 2
         assert contact_payload["out_path_hash_mode"] == 1
@@ -200,7 +199,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
@@ -225,7 +224,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -253,7 +252,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
@@ -284,14 +283,14 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
             await send_channel_message(request)
 
-        assert mc.commands.set_flood_scope.await_args_list == [
+        assert mc.set_flood_scope.await_args_list == [
             call("#Esperance"),
             call("#Baseline"),
         ]
@@ -308,14 +307,14 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
             await send_channel_message(request)
 
-        mc.commands.set_flood_scope.assert_not_awaited()
+        mc.set_flood_scope.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_send_channel_msg_aborts_when_override_apply_fails(self, test_db):
@@ -324,13 +323,13 @@ class TestOutgoingChannelBroadcast:
         await ChannelRepository.upsert(key=chan_key, name="#flightless")
         await ChannelRepository.update_flood_scope_override(chan_key, "#Esperance")
         await AppSettingsRepository.update(flood_scope="#Baseline")
-        mc.commands.set_flood_scope = AsyncMock(
+        mc.set_flood_scope = AsyncMock(
             return_value=MagicMock(type=EventType.ERROR, payload="unsupported")
         )
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.decoder.calculate_channel_hash", return_value="abcd"),
             patch("app.routers.messages.broadcast_event"),
             pytest.raises(HTTPException) as exc_info,
@@ -340,8 +339,8 @@ class TestOutgoingChannelBroadcast:
 
         assert exc_info.value.status_code == 500
         assert "regional override" in exc_info.value.detail.lower()
-        mc.commands.set_channel.assert_not_awaited()
-        mc.commands.send_chan_msg.assert_not_awaited()
+        mc.set_channel.assert_not_awaited()
+        mc.send_chan_msg.assert_not_awaited()
 
 
 class TestResendChannelMessage:
@@ -367,7 +366,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
 
@@ -375,8 +374,8 @@ class TestResendChannelMessage:
         assert result["message_id"] == msg_id
 
         # Verify radio was called with correct timestamp bytes
-        mc.commands.send_chan_msg.assert_awaited_once()
-        call_kwargs = mc.commands.send_chan_msg.await_args.kwargs
+        mc.send_chan_msg.assert_awaited_once()
+        call_kwargs = mc.send_chan_msg.await_args.kwargs
         assert call_kwargs["timestamp"] == now.to_bytes(4, "little")
         assert call_kwargs["msg"] == "hello"  # Sender prefix stripped
 
@@ -428,11 +427,11 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
-        assert mc.commands.set_flood_scope.await_args_list == [
+        assert mc.set_flood_scope.await_args_list == [
             call("#CurrentRegion"),
             call("#Baseline"),
         ]
@@ -456,7 +455,7 @@ class TestResendChannelMessage:
         )
         assert msg_id is not None
 
-        mc.commands.set_flood_scope = AsyncMock(
+        mc.set_flood_scope = AsyncMock(
             side_effect=[
                 _make_radio_result(),
                 MagicMock(type=EventType.ERROR, payload="restore failed"),
@@ -465,7 +464,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_error") as mock_broadcast_error,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
@@ -494,7 +493,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):
@@ -592,11 +591,11 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
-        call_kwargs = mc.commands.send_chan_msg.await_args.kwargs
+        call_kwargs = mc.send_chan_msg.await_args.kwargs
         assert call_kwargs["msg"] == "hello world"
 
     @pytest.mark.asyncio
@@ -619,7 +618,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -648,7 +647,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -683,7 +682,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -728,17 +727,17 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_dm_send_radio_exception_no_orphan_message(self, test_db):
-        """When mc.commands.send_msg() raises, no message should be stored in DB."""
+        """When mc.send_msg() raises, no message should be stored in DB."""
         mc = _make_mc()
         pub_key = "ab" * 32
         await _insert_contact(pub_key, "Alice")
 
         # Make the radio command raise (simulates serial timeout / connection drop)
-        mc.commands.send_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
+        mc.send_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(ConnectionError):
                 await send_direct_message(
@@ -753,20 +752,18 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_channel_send_radio_exception_no_orphan_message(self, test_db):
-        """When mc.commands.send_chan_msg() raises, no message should be stored in DB."""
+        """When mc.send_chan_msg() raises, no message should be stored in DB."""
         from app.repository import ChannelRepository
 
         mc = _make_mc(name="TestNode")
         chan_key = "ab" * 16
         await ChannelRepository.upsert(key=chan_key, name="#test")
 
-        mc.commands.send_chan_msg = AsyncMock(
-            side_effect=ConnectionError("Serial port disconnected")
-        )
+        mc.send_chan_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(ConnectionError):
                 await send_channel_message(
@@ -780,18 +777,18 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_channel_send_set_channel_exception_no_orphan(self, test_db):
-        """When mc.commands.set_channel() raises, send is not attempted and no message stored."""
+        """When mc.set_channel() raises, send is not attempted and no message stored."""
         from app.repository import ChannelRepository
 
         mc = _make_mc(name="TestNode")
         chan_key = "cd" * 16
         await ChannelRepository.upsert(key=chan_key, name="#broken")
 
-        mc.commands.set_channel = AsyncMock(side_effect=TimeoutError("Radio not responding"))
+        mc.set_channel = AsyncMock(side_effect=TimeoutError("Radio not responding"))
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
         ):
             with pytest.raises(TimeoutError):
                 await send_channel_message(
@@ -799,7 +796,7 @@ class TestRadioExceptionMidSend:
                 )
 
         # send_chan_msg should never have been called
-        mc.commands.send_chan_msg.assert_not_called()
+        mc.send_chan_msg.assert_not_called()
 
         messages = await MessageRepository.get_all(
             msg_type="CHAN", conversation_key=chan_key.upper(), limit=10
@@ -827,7 +824,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
         ):
             results = await asyncio.gather(
@@ -845,10 +842,10 @@ class TestConcurrentChannelSends:
         assert results[1].conversation_key == chan_key_b.upper()
 
         # set_channel should have been called twice (once per send, serialized)
-        assert mc.commands.set_channel.await_count == 2
+        assert mc.set_channel.await_count == 2
 
         # send_chan_msg should have been called twice
-        assert mc.commands.send_chan_msg.await_count == 2
+        assert mc.send_chan_msg.await_count == 2
 
         # Both messages should be in DB
         msgs_a = await MessageRepository.get_all(
@@ -881,7 +878,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_meshcore", mc),
+            patch.object(radio_manager, "_backend", mc),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):

@@ -33,7 +33,7 @@ def register_frontend_static_routes(app: FastAPI, frontend_dir: Path) -> bool:
     assets_dir = frontend_dir / "assets"
 
     if not frontend_dir.exists():
-        logger.error(
+        logger.warning(
             "Frontend build directory not found at %s. "
             "Run 'cd frontend && npm run build'. API will continue without frontend routes.",
             frontend_dir,

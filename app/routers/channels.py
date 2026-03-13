@@ -117,7 +117,7 @@ async def sync_channels_from_radio(max_channels: int = Query(default=40, ge=1, l
 
     async with radio_manager.radio_operation("sync_channels_from_radio") as mc:
         for idx in range(max_channels):
-            result = await mc.commands.get_channel(idx)
+            result = await mc.get_channel(idx)
 
             if result.type == EventType.CHANNEL_INFO:
                 key_hex = await upsert_channel_from_radio_slot(result.payload, on_radio=True)

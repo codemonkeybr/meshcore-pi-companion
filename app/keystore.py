@@ -14,7 +14,7 @@ from meshcore import EventType
 from app.decoder import derive_public_key
 
 if TYPE_CHECKING:
-    from meshcore import MeshCore
+    from app.radio_backend import RadioBackend
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +34,20 @@ def set_private_key(key: bytes) -> None:
     """Store the private key in memory and derive the public key.
 
     Args:
-        key: 64-byte Ed25519 private key in MeshCore format
+        key: 64-byte Ed25519 private key in MeshCore format, or 32-byte scalar
+             (e.g. from SPI/pymc_core identity seed). 32-byte keys are expanded
+             to 64 by appending the derived public key so DM decryption works.
     """
     global _private_key, _public_key
-    if len(key) != 64:
-        raise ValueError(f"Private key must be 64 bytes, got {len(key)}")
-    _private_key = key
-    _public_key = derive_public_key(key)
+    if len(key) == 32:
+        # SPI/pymc_core exports 32-byte seed/scalar; expand to 64 for compatibility
+        _public_key = derive_public_key(key)
+        _private_key = key + _public_key
+    elif len(key) == 64:
+        _private_key = key
+        _public_key = derive_public_key(key)
+    else:
+        raise ValueError(f"Private key must be 32 or 64 bytes, got {len(key)}")
     logger.info("Private key stored in keystore (public key: %s...)", _public_key.hex()[:12])
 
 
@@ -71,23 +78,32 @@ def has_private_key() -> bool:
     return _private_key is not None
 
 
-async def export_and_store_private_key(mc: "MeshCore") -> bool:
+async def export_and_store_private_key(backend: "RadioBackend") -> bool:
     """Export private key from the radio and store it in the keystore.
 
     This should be called on startup and after each reconnect.
 
     Args:
-        mc: Connected MeshCore instance
+        backend: Connected RadioBackend instance
 
     Returns:
         True if the private key was successfully exported and stored
     """
     logger.info("Exporting private key from radio...")
     try:
-        result = await mc.commands.export_private_key()
+        result = await backend.export_private_key()
 
         if result.type == EventType.PRIVATE_KEY:
-            private_key_bytes = result.payload["private_key"]
+            payload = result.payload or {}
+            # MeshCore serial client uses "private_key" (bytes); SPI backend uses "key" (hex str)
+            if "private_key" in payload:
+                private_key_bytes = payload["private_key"]
+            elif "key" in payload:
+                key_str = payload["key"]
+                private_key_bytes = bytes.fromhex(key_str) if isinstance(key_str, str) else key_str
+            else:
+                logger.error("Private key payload missing 'private_key' and 'key'")
+                return False
             set_private_key(private_key_bytes)
             return True
         elif result.type == EventType.DISABLED:

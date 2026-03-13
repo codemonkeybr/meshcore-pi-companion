@@ -1,8 +1,22 @@
 import logging
+from pathlib import Path
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _resolve_spi_config_path(config_file: str) -> Path | None:
+    """Return path to SPI config file if it exists.
+
+    Checks config_file first (default data/config.yaml), then config.yaml in
+    the current working directory, so a config at project root is found.
+    """
+    if Path(config_file).is_file():
+        return Path(config_file)
+    if Path("config.yaml").is_file():
+        return Path("config.yaml")
+    return None
 
 
 class Settings(BaseSettings):
@@ -18,26 +32,40 @@ class Settings(BaseSettings):
     database_path: str = "data/meshcore.db"
     disable_bots: bool = False
 
+    # SPI backend: path to config.yaml (auto-detected at data/config.yaml)
+    config_file: str = "data/config.yaml"
+
+    @property
+    def spi_config_path(self) -> Path | None:
+        """Resolved path to SPI config file, or None if not present."""
+        return _resolve_spi_config_path(self.config_file)
+
     @model_validator(mode="after")
     def validate_transport_exclusivity(self) -> "Settings":
+        spi_active = self.spi_config_path is not None
         transports_set = sum(
             [
                 bool(self.serial_port),
                 bool(self.tcp_host),
                 bool(self.ble_address),
+                spi_active,
             ]
         )
         if transports_set > 1:
             raise ValueError(
                 "Only one transport may be configured at a time. "
-                "Set exactly one of MESHCORE_SERIAL_PORT, MESHCORE_TCP_HOST, or MESHCORE_BLE_ADDRESS."
+                "Set exactly one of MESHCORE_SERIAL_PORT, MESHCORE_TCP_HOST, "
+                "MESHCORE_BLE_ADDRESS, or provide a config file at "
+                f"{self.config_file} or config.yaml for SPI mode."
             )
         if self.ble_address and not self.ble_pin:
             raise ValueError("MESHCORE_BLE_PIN is required when MESHCORE_BLE_ADDRESS is set.")
         return self
 
     @property
-    def connection_type(self) -> Literal["serial", "tcp", "ble"]:
+    def connection_type(self) -> Literal["serial", "tcp", "ble", "spi"]:
+        if self.spi_config_path is not None:
+            return "spi"
         if self.tcp_host:
             return "tcp"
         if self.ble_address:

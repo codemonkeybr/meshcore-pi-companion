@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -89,18 +90,18 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
     async with radio_manager.radio_operation("update_radio_config") as mc:
         if update.name is not None:
             logger.info("Setting radio name to %s", update.name)
-            await mc.commands.set_name(update.name)
+            await mc.set_name(update.name)
 
         if update.lat is not None or update.lon is not None:
-            current_info = mc.self_info
+            current_info = mc.self_info or {}
             lat = update.lat if update.lat is not None else current_info.get("adv_lat", 0.0)
             lon = update.lon if update.lon is not None else current_info.get("adv_lon", 0.0)
             logger.info("Setting radio coordinates to %f, %f", lat, lon)
-            await mc.commands.set_coords(lat=lat, lon=lon)
+            await mc.set_coords(lat=lat, lon=lon)
 
         if update.tx_power is not None:
             logger.info("Setting TX power to %d dBm", update.tx_power)
-            await mc.commands.set_tx_power(val=update.tx_power)
+            await mc.set_tx_power(val=update.tx_power)
 
         if update.radio is not None:
             logger.info(
@@ -110,7 +111,7 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
                 update.radio.sf,
                 update.radio.cr,
             )
-            await mc.commands.set_radio(
+            await mc.set_radio(
                 freq=update.radio.freq,
                 bw=update.radio.bw,
                 sf=update.radio.sf,
@@ -123,7 +124,7 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
                     status_code=400, detail="Firmware does not support path hash mode setting"
                 )
             logger.info("Setting path hash mode to %d", update.path_hash_mode)
-            result = await mc.commands.set_path_hash_mode(update.path_hash_mode)
+            result = await mc.set_path_hash_mode(update.path_hash_mode)
             if result is not None and result.type == EventType.ERROR:
                 raise HTTPException(
                     status_code=500,
@@ -137,7 +138,7 @@ async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
         # Re-fetch self_info so the response reflects the changes we just made.
         # Commands like set_name() write to flash but don't update the cached
         # self_info — send_appstart() triggers a fresh SELF_INFO from the radio.
-        await mc.commands.send_appstart()
+        await mc.send_appstart()
 
     return await get_radio_config()
 
@@ -154,7 +155,7 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
 
     logger.info("Importing private key")
     async with radio_manager.radio_operation("import_private_key") as mc:
-        result = await mc.commands.import_private_key(key_bytes)
+        result = await mc.import_private_key(key_bytes)
 
         if result.type == EventType.ERROR:
             raise HTTPException(
@@ -182,6 +183,10 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
     return {"status": "ok"}
 
 
+# Max time for advertise: wait for radio lock + build packet + TX complete
+ADVERTISE_TIMEOUT_SECONDS = 25
+
+
 @router.post("/advertise")
 async def send_advertisement() -> dict:
     """Send a flood advertisement to announce presence on the mesh.
@@ -196,8 +201,18 @@ async def send_advertisement() -> dict:
     require_connected()
 
     logger.info("Sending flood advertisement")
-    async with radio_manager.radio_operation("manual_advertisement") as mc:
-        success = await do_send_advertisement(mc, force=True)
+    try:
+        async def _do():
+            async with radio_manager.radio_operation("manual_advertisement") as mc:
+                return await do_send_advertisement(mc, force=True)
+
+        success = await asyncio.wait_for(_do(), timeout=ADVERTISE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("Advertisement timed out (radio busy or TX did not complete)")
+        raise HTTPException(
+            status_code=503,
+            detail="Advertisement timed out. Radio may be busy or transmission did not complete; try again in a few seconds.",
+        ) from None
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send advertisement")
@@ -238,11 +253,16 @@ async def reboot_radio() -> dict:
 
     If connected: sends reboot command, connection will temporarily drop and auto-reconnect.
     If not connected: attempts to reconnect (same as /reconnect endpoint).
+
+    Note: On SPI backend, the driver may not release GPIO until process exit. If reconnect
+    fails with \"GPIO already in use\", restart the app manually to clear the pin.
     """
     if radio_manager.is_connected:
         logger.info("Rebooting radio")
+        # Prevent connection monitor from reconnecting during cooldown so GPIO can be released
+        radio_manager.set_suppress_reconnect_until(20)
         async with radio_manager.radio_operation("reboot_radio") as mc:
-            await mc.commands.reboot()
+            await mc.reboot()
         return {
             "status": "ok",
             "message": "Reboot command sent. Radio will reconnect automatically.",

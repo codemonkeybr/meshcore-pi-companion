@@ -20,3 +20,5 @@ references/
 
 # ancillary LLM files
 .claude/
+PLAN_SPI_BACKEND.md
+docs/api/TESTING_PLAN.md

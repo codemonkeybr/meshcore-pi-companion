@@ -497,32 +497,32 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_tracks_subscriptions(self):
         """Registering handlers populates _active_subscriptions."""
-        mock_meshcore = MagicMock()
+        mock_backend = MagicMock()
         mock_subscription = MagicMock()
-        mock_meshcore.subscribe.return_value = mock_subscription
+        mock_backend.subscribe.return_value = mock_subscription
 
-        register_event_handlers(mock_meshcore)
+        register_event_handlers(mock_backend)
 
         # Should have 5 subscriptions (one per event type)
         assert len(_active_subscriptions) == 5
-        assert mock_meshcore.subscribe.call_count == 5
+        assert mock_backend.subscribe.call_count == 5
 
     def test_register_handlers_twice_does_not_duplicate(self):
         """Calling register_event_handlers twice unsubscribes old handlers first."""
-        mock_meshcore = MagicMock()
+        mock_backend = MagicMock()
 
         # First call: create mock subscriptions
         first_subs = [MagicMock() for _ in range(5)]
-        mock_meshcore.subscribe.side_effect = first_subs
-        register_event_handlers(mock_meshcore)
+        mock_backend.subscribe.side_effect = first_subs
+        register_event_handlers(mock_backend)
 
         assert len(_active_subscriptions) == 5
         first_sub_objects = list(_active_subscriptions)
 
         # Second call: create new mock subscriptions
         second_subs = [MagicMock() for _ in range(5)]
-        mock_meshcore.subscribe.side_effect = second_subs
-        register_event_handlers(mock_meshcore)
+        mock_backend.subscribe.side_effect = second_subs
+        register_event_handlers(mock_backend)
 
         # Old subscriptions should have been unsubscribed
         for sub in first_sub_objects:
@@ -537,15 +537,15 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_clears_before_adding(self):
         """The subscription list is cleared before adding new subscriptions."""
-        mock_meshcore = MagicMock()
-        mock_meshcore.subscribe.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.subscribe.return_value = MagicMock()
 
         # Pre-populate with stale subscriptions (simulating a bug scenario)
         stale_sub = MagicMock()
         _active_subscriptions.append(stale_sub)
         _active_subscriptions.append(stale_sub)
 
-        register_event_handlers(mock_meshcore)
+        register_event_handlers(mock_backend)
 
         # Stale subscriptions should have been unsubscribed
         assert stale_sub.unsubscribe.call_count == 2
@@ -555,8 +555,8 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_survives_unsubscribe_exception(self):
         """If unsubscribe() throws, registration still completes successfully."""
-        mock_meshcore = MagicMock()
-        mock_meshcore.subscribe.return_value = MagicMock()
+        mock_backend = MagicMock()
+        mock_backend.subscribe.return_value = MagicMock()
 
         # Create subscriptions where unsubscribe raises an exception
         bad_sub = MagicMock()
@@ -567,7 +567,7 @@ class TestEventHandlerRegistration:
         _active_subscriptions.append(good_sub)
 
         # Should not raise despite the exception
-        register_event_handlers(mock_meshcore)
+        register_event_handlers(mock_backend)
 
         # Both unsubscribe methods should have been called
         bad_sub.unsubscribe.assert_called_once()

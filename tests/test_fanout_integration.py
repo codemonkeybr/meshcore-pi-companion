@@ -10,11 +10,20 @@ Also covers webhook and Apprise modules with real HTTP capture servers.
 
 import asyncio
 import json
+import platform
 import struct
 
 import pytest
 
 import app.repository.fanout as fanout_mod
+
+# paho-mqtt's aiomqtt transport uses add_reader/add_writer which are not
+# supported on Windows' default ProactorEventLoop.  These integration tests
+# require a SelectorEventLoop, so skip the entire module on Windows.
+pytestmark = pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="MQTT integration tests require SelectorEventLoop (not available on Windows)",
+)
 from app.database import Database
 from app.fanout.manager import FanoutManager
 from app.repository.fanout import FanoutConfigRepository

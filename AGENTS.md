@@ -49,14 +49,20 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 │        ↓                                          └───────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │              RadioManager + Event Handlers               │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└───────────────────────────┼──────────────────────────────────────┘
-                            │ Serial / TCP / BLE
-                     ┌──────┴──────┐
-                     │ MeshCore    │
-                     │   Radio     │
-                     └─────────────┘
+│  └─────────────────────────────┬────────────────────────────┘   │
+│                                │ RadioBackend (abstract)         │
+│                    ┌────────────┴────────────┐                    │
+│                    │ ClientBackend | SpiBackend (meshcore|pymc_core) │
+│                    └────────────┬────────────┘                    │
+└────────────────────────────────┼────────────────────────────────┘
+                                 │ Serial/TCP/BLE    │ SPI (Pi+HAT)
+                          ┌──────┴──────┐     ┌──────┴──────┐
+                          │ MeshCore    │     │ LoRa radio   │
+                          │   Radio     │     │ (e.g. SX1262)│
+                          └─────────────┘     └─────────────┘
 ```
+
+**Radio backends:** One transport is active at a time. When `data/config.yaml` (or `config.yaml`) exists, **SPI mode** is used: `RadioManager` uses `SpiBackend` (pymc_core + LoRa HAT). Otherwise serial/TCP/BLE use `ClientBackend` (meshcore library). Setup API (`GET/POST /api/setup/*`) and CLI (`python -m app.setup_cli`) provision SPI config; see `app/AGENTS.md` and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
 ## Feature Priority
 
@@ -180,10 +186,14 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   │       └── ...
 │   └── vite.config.ts
 ├── scripts/
-│   ├── all_quality.sh      # Run all lint, format, typecheck, tests, build (sequential)
-│   ├── collect_licenses.sh # Gather third-party license attributions
-│   ├── e2e.sh              # End-to-end test runner
-│   └── publish.sh          # Version bump, changelog, docker build & push
+│   ├── all_quality.sh         # Run all lint, format, typecheck, tests, build (sequential)
+│   ├── install_remoterm_pi.sh # Pi install + optional SPI config wizard (--spi-config = wizard only)
+│   ├── run_remoterm.sh        # Run backend (venv + PYTHONPATH); use for Pi/SPI
+│   ├── collect_licenses.sh    # Gather third-party license attributions
+│   ├── e2e.sh                 # End-to-end test runner
+│   └── publish.sh             # Version bump, changelog, docker build & push
+├── docs/
+│   └── PI_DEPLOYMENT.md       # Short Pi + SPI deployment guide
 ├── remoteterm.service      # Systemd unit file for production deployment
 ├── tests/                  # Backend tests (pytest)
 ├── data/                   # SQLite database (runtime)
@@ -231,6 +241,27 @@ Access at `http://localhost:8000`. All API routes are prefixed with `/api`.
 
 If `frontend/dist` (or `frontend/dist/index.html`) is missing, backend startup now logs an explicit error and continues serving API routes. In that case, frontend static routes are not mounted until a frontend build is present.
 
+### Future: Prebuilt Frontend `dist` for Pi
+
+For low-memory Raspberry Pi deployments, running `npm install` locally is fragile (OOM kills). The long-term plan is:
+
+- Ship **prebuilt `frontend/dist` assets** as part of release artifacts (e.g. tarball, Docker image), or
+- Have the Pi install script download a versioned `dist.tar.gz` from a release URL when `frontend/dist` is missing.
+
+Goals:
+
+- Pi users should be able to run a **single install script** (`scripts/install_remoterm_pi.sh`) that only needs Python + radio SPI deps on-device.
+- No `npm install` or Vite build should be required on the Pi; all Node-based tooling runs on CI/dev machines.
+
+Implementation notes (for future work):
+
+- CI pipeline should:
+  - Build frontend using `frontend/package-lock.docker.json` (deterministic deps).
+  - Run `npm test` / `npm run build` and then publish `frontend/dist` into:
+    - A release artifact (e.g. `remoteterm-<version>-pi.tar.gz`), and/or
+    - A downloadable `dist-<version>.tar.gz` used by `install_remoterm_pi.sh`.
+- Backend already serves static files from `frontend/dist`; no code changes are required once `dist` is present on disk.
+
 ## Testing
 
 ### Backend (pytest)
@@ -273,7 +304,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Connection status, fanout statuses, bots_disabled flag |
+| GET | `/api/health` | Connection status, fanout statuses, bots_disabled, setup_required (SPI) |
 | GET | `/api/radio/config` | Radio configuration, including `path_hash_mode` and `path_hash_mode_supported` |
 | PATCH | `/api/radio/config` | Update name, location, radio params, and `path_hash_mode` when supported |
 | PUT | `/api/radio/private-key` | Import private key to radio |

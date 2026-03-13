@@ -27,6 +27,7 @@ from app.routers import (
     read_state,
     repeaters,
     settings,
+    setup,
     statistics,
     ws,
 )
@@ -92,8 +93,8 @@ async def lifespan(app: FastAPI):
     await stop_message_polling()
     await stop_periodic_advert()
     await stop_periodic_sync()
-    if radio_manager.meshcore:
-        await radio_manager.meshcore.stop_auto_message_fetching()
+    if radio_manager.backend:
+        await radio_manager.backend.stop_auto_message_fetching()
     await radio_manager.disconnect()
     await db.disconnect()
 
@@ -143,6 +144,7 @@ app.include_router(messages.router, prefix="/api")
 app.include_router(packets.router, prefix="/api")
 app.include_router(read_state.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
+app.include_router(setup.router, prefix="/api")
 app.include_router(statistics.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 

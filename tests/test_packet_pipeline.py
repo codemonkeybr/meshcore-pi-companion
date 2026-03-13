@@ -23,7 +23,7 @@ from app.repository import (
 
 # Load shared fixtures
 FIXTURES_PATH = Path(__file__).parent / "fixtures" / "websocket_events.json"
-with open(FIXTURES_PATH) as f:
+with open(FIXTURES_PATH, encoding="utf-8") as f:
     FIXTURES = json.load(f)
 
 

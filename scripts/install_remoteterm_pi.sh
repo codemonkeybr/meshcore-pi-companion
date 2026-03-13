@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time (or occasional) install/setup script for RemoteTerm on a Pi.
 # - Creates a Python venv (if missing) and installs backend deps (with SPI extras)
+
 # - If frontend/frontend-dist.zip exists, extracts it to frontend/dist (no download)
 #
 # Usage:

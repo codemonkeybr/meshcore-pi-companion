@@ -2,12 +2,15 @@ import asyncio
 import glob
 import logging
 import platform
+import time
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from meshcore import MeshCore
 
+from app.backends.client_backend import ClientBackend
 from app.config import settings
+from app.radio_backend import RadioBackend
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +122,7 @@ class RadioManager:
     """Manages the MeshCore radio connection."""
 
     def __init__(self):
-        self._meshcore: MeshCore | None = None
+        self._backend: RadioBackend | None = None
         self._connection_info: str | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._last_connected: bool = False
@@ -128,6 +131,7 @@ class RadioManager:
         self._setup_lock: asyncio.Lock | None = None
         self._setup_in_progress: bool = False
         self._setup_complete: bool = False
+        self._suppress_reconnect_until: float = 0.0  # monotonic time; used during reboot cooldown
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
 
@@ -170,9 +174,9 @@ class RadioManager:
     ):
         """Acquire shared radio lock and optionally pause polling / auto-fetch.
 
-        After acquiring the lock, resolves the current MeshCore instance and
+        After acquiring the lock, resolves the current backend instance and
         yields it.  Callers get a fresh reference via ``async with ... as mc:``,
-        avoiding stale-reference bugs when a reconnect swaps ``_meshcore``
+        avoiding stale-reference bugs when a reconnect swaps ``_backend``
         between the pre-check and the lock acquisition.
 
         Args:
@@ -183,12 +187,12 @@ class RadioManager:
 
         Raises:
             RadioDisconnectedError: If the radio disconnected before the lock
-                was acquired (``_meshcore`` is ``None``).
+                was acquired (``_backend`` is ``None``).
         """
         await self._acquire_operation_lock(name, blocking=blocking)
 
-        mc = self._meshcore
-        if mc is None:
+        be = self._backend
+        if be is None:
             self._release_operation_lock(name)
             raise RadioDisconnectedError("Radio disconnected")
 
@@ -203,14 +207,14 @@ class RadioManager:
         try:
             async with poll_context:
                 if suspend_auto_fetch:
-                    await mc.stop_auto_message_fetching()
+                    await be.stop_auto_message_fetching()
                     auto_fetch_paused = True
-                yield mc
+                yield be
         finally:
             try:
                 if auto_fetch_paused:
                     try:
-                        await mc.start_auto_message_fetching()
+                        await be.start_auto_message_fetching()
                     except Exception as e:
                         logger.warning("Failed to restart auto message fetching (%s): %s", name, e)
             finally:
@@ -234,120 +238,64 @@ class RadioManager:
             sync_radio_time,
         )
 
-        if not self._meshcore:
+        if not self._backend:
             return
 
         if self._setup_lock is None:
             self._setup_lock = asyncio.Lock()
 
         async with self._setup_lock:
-            if not self._meshcore:
+            if not self._backend:
                 return
             self._setup_in_progress = True
             self._setup_complete = False
-            mc = self._meshcore
+            be = self._backend
             try:
-                # Register event handlers (no radio I/O, just callback setup)
-                register_event_handlers(mc)
+                register_event_handlers(be)
 
-                # Hold the operation lock for all radio I/O during setup.
-                # This prevents user-initiated operations (send message, etc.)
-                # from interleaving commands on the serial link.
                 await self._acquire_operation_lock("post_connect_setup", blocking=True)
                 try:
-                    await export_and_store_private_key(mc)
+                    await export_and_store_private_key(be)
 
-                    # Sync radio clock with system time
-                    await sync_radio_time(mc)
+                    await sync_radio_time(be)
 
-                    # Apply flood scope from settings (best-effort; older firmware
-                    # may not support set_flood_scope)
                     from app.region_scope import normalize_region_scope
                     from app.repository import AppSettingsRepository
 
                     app_settings = await AppSettingsRepository.get()
                     scope = normalize_region_scope(app_settings.flood_scope)
                     try:
-                        await mc.commands.set_flood_scope(scope if scope else "")
+                        await be.set_flood_scope(scope if scope else "")
                         logger.info("Applied flood_scope=%r", scope or "(disabled)")
                     except Exception as exc:
                         logger.warning(
                             "set_flood_scope failed (firmware may not support it): %s", exc
                         )
 
-                    # Query path hash mode support (best-effort; older firmware won't report it).
-                    # If the library's parsed payload is missing path_hash_mode (e.g. stale
-                    # .pyc on WSL2 Windows mounts), fall back to raw-frame extraction.
-                    reader = mc._reader
-                    _original_handle_rx = reader.handle_rx
-                    _captured_frame: list[bytes] = []
-
-                    async def _capture_handle_rx(data: bytearray) -> None:
-                        from meshcore.packets import PacketType
-
-                        if len(data) > 0 and data[0] == PacketType.DEVICE_INFO.value:
-                            _captured_frame.append(bytes(data))
-                        return await _original_handle_rx(data)
-
-                    reader.handle_rx = _capture_handle_rx
                     self.path_hash_mode = 0
                     self.path_hash_mode_supported = False
-                    try:
-                        device_query = await mc.commands.send_device_query()
-                        if device_query and "path_hash_mode" in device_query.payload:
-                            self.path_hash_mode = device_query.payload["path_hash_mode"]
-                            self.path_hash_mode_supported = True
-                        elif _captured_frame:
-                            # Raw-frame fallback: byte 1 = fw_ver, byte 81 = path_hash_mode
-                            raw = _captured_frame[-1]
-                            fw_ver = raw[1] if len(raw) > 1 else 0
-                            if fw_ver >= 10 and len(raw) >= 82:
-                                self.path_hash_mode = raw[81]
-                                self.path_hash_mode_supported = True
-                                logger.warning(
-                                    "path_hash_mode=%d extracted from raw frame "
-                                    "(stale .pyc? try: rm %s)",
-                                    self.path_hash_mode,
-                                    getattr(
-                                        __import__("meshcore.reader", fromlist=["reader"]),
-                                        "__cached__",
-                                        "meshcore __pycache__/reader.*.pyc",
-                                    ),
-                                )
-                        if self.path_hash_mode_supported:
-                            logger.info("Path hash mode: %d (supported)", self.path_hash_mode)
-                        else:
-                            logger.debug("Firmware does not report path_hash_mode")
-                    except Exception as exc:
-                        logger.debug("Failed to query path_hash_mode: %s", exc)
-                    finally:
-                        reader.handle_rx = _original_handle_rx
+                    mode, supported = await be.query_path_hash_mode()
+                    self.path_hash_mode = mode
+                    self.path_hash_mode_supported = supported
 
-                    # Sync contacts/channels from radio to DB and clear radio
                     logger.info("Syncing and offloading radio data...")
-                    result = await sync_and_offload_all(mc)
+                    result = await sync_and_offload_all(be)
                     logger.info("Sync complete: %s", result)
 
-                    # Send advertisement to announce our presence (if enabled and not throttled)
-                    if await send_advertisement(mc):
+                    if await send_advertisement(be):
                         logger.info("Advertisement sent")
                     else:
                         logger.debug("Advertisement skipped (disabled or throttled)")
 
-                    # Drain any messages that were queued before we connected.
-                    # This must happen BEFORE starting auto-fetch, otherwise both
-                    # compete on get_msg() with interleaved radio I/O.
-                    drained = await drain_pending_messages(mc)
+                    drained = await drain_pending_messages(be)
                     if drained > 0:
                         logger.info("Drained %d pending message(s)", drained)
 
-                    await mc.start_auto_message_fetching()
+                    await be.start_auto_message_fetching()
                     logger.info("Auto message fetching started")
                 finally:
                     self._release_operation_lock("post_connect_setup")
 
-                # Start background tasks AFTER releasing the operation lock.
-                # These tasks acquire their own locks when they need radio access.
                 start_periodic_sync()
                 start_periodic_advert()
                 start_message_polling()
@@ -359,8 +307,8 @@ class RadioManager:
         logger.info("Post-connect setup complete")
 
     @property
-    def meshcore(self) -> MeshCore | None:
-        return self._meshcore
+    def backend(self) -> RadioBackend | None:
+        return self._backend
 
     @property
     def connection_info(self) -> str | None:
@@ -368,11 +316,15 @@ class RadioManager:
 
     @property
     def is_connected(self) -> bool:
-        return self._meshcore is not None and self._meshcore.is_connected
+        return self._backend is not None and self._backend.is_connected
 
     @property
     def is_reconnecting(self) -> bool:
         return self._reconnect_lock is not None and self._reconnect_lock.locked()
+
+    def set_suppress_reconnect_until(self, seconds_from_now: float) -> None:
+        """Temporarily suppress connection monitor from reconnecting (e.g. during reboot cooldown)."""
+        self._suppress_reconnect_until = time.monotonic() + seconds_from_now
 
     @property
     def is_setup_in_progress(self) -> bool:
@@ -384,11 +336,13 @@ class RadioManager:
 
     async def connect(self) -> None:
         """Connect to the radio using the configured transport."""
-        if self._meshcore is not None:
+        if self._backend is not None:
             await self.disconnect()
 
         connection_type = settings.connection_type
-        if connection_type == "tcp":
+        if connection_type == "spi":
+            await self._connect_spi()
+        elif connection_type == "tcp":
             await self._connect_tcp()
         elif connection_type == "ble":
             await self._connect_ble()
@@ -404,19 +358,21 @@ class RadioManager:
             logger.info("No serial port specified, auto-detecting...")
             port = await find_radio_port(settings.serial_baudrate)
             if not port:
-                raise RuntimeError("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
+                logger.warning("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
+                return
 
         logger.debug(
             "Connecting to radio at %s (baud %d)",
             port,
             settings.serial_baudrate,
         )
-        self._meshcore = await MeshCore.create_serial(
+        mc = await MeshCore.create_serial(
             port=port,
             baudrate=settings.serial_baudrate,
             auto_reconnect=True,
             max_reconnect_attempts=10,
         )
+        self._backend = ClientBackend(mc)
         self._connection_info = f"Serial: {port}"
         self._last_connected = True
         self._setup_complete = False
@@ -428,16 +384,64 @@ class RadioManager:
         port = settings.tcp_port
 
         logger.debug("Connecting to radio at %s:%d (TCP)", host, port)
-        self._meshcore = await MeshCore.create_tcp(
+        mc = await MeshCore.create_tcp(
             host=host,
             port=port,
             auto_reconnect=True,
             max_reconnect_attempts=10,
         )
+        self._backend = ClientBackend(mc)
         self._connection_info = f"TCP: {host}:{port}"
         self._last_connected = True
         self._setup_complete = False
         logger.debug("TCP connection established")
+
+    async def _connect_spi(self) -> None:
+        """Connect to the radio via SPI (Raspberry Pi + LoRa HAT).
+
+        All parameters come from the config file (data/config.yaml or config.yaml).
+        """
+        from app.backends.spi_backend import SpiBackend
+        from app.spi_config_file import load_config
+        from app.spi_identity import load_or_create_identity
+
+        config_path = settings.spi_config_path
+        if config_path is None:
+            logger.warning("SPI config file not found; cannot connect via SPI.")
+            return
+        cfg = load_config(config_path)
+        node_cfg = cfg["node"]
+        radio_cfg = cfg["radio"]
+        hw_cfg = cfg["hardware"]
+
+        profile = hw_cfg["profile"]
+        node_name = node_cfg.get("name") or f"RemoteTerm-{id(self) % 10000:04d}"
+        identity_seed = load_or_create_identity()
+
+        logger.info("Connecting via SPI (profile=%s, node=%s)", profile, node_name)
+        backend = SpiBackend()
+        await backend.initialise(
+            profile_name=profile,
+            identity_seed=identity_seed,
+            node_name=node_name,
+            frequency=int(radio_cfg["frequency"]),
+            bandwidth=int(radio_cfg["bandwidth"]),
+            spreading_factor=int(radio_cfg["spreading_factor"]),
+            coding_rate=int(radio_cfg["coding_rate"]),
+            tx_power=int(radio_cfg["tx_power"]),
+            preamble_length=int(radio_cfg["preamble_length"]),
+            sync_word=int(radio_cfg["sync_word"]),
+            bus_override=hw_cfg.get("bus_id"),
+            cs_override=hw_cfg.get("cs_pin"),
+            reset_override=hw_cfg.get("reset_pin"),
+            busy_override=hw_cfg.get("busy_pin"),
+            irq_override=hw_cfg.get("irq_pin"),
+        )
+        self._backend = backend
+        self._connection_info = f"SPI: {profile}"
+        self._last_connected = True
+        self._setup_complete = False
+        logger.info("SPI connection established (profile=%s)", profile)
 
     async def _connect_ble(self) -> None:
         """Connect to the radio over BLE."""
@@ -445,12 +449,13 @@ class RadioManager:
         pin = settings.ble_pin
 
         logger.debug("Connecting to radio at %s (BLE)", address)
-        self._meshcore = await MeshCore.create_ble(
+        mc = await MeshCore.create_ble(
             address=address,
             pin=pin,
             auto_reconnect=True,
             max_reconnect_attempts=15,
         )
+        self._backend = ClientBackend(mc)
         self._connection_info = f"BLE: {address}"
         self._last_connected = True
         self._setup_complete = False
@@ -458,10 +463,10 @@ class RadioManager:
 
     async def disconnect(self) -> None:
         """Disconnect from the radio."""
-        if self._meshcore is not None:
+        if self._backend is not None:
             logger.debug("Disconnecting from radio")
-            await self._meshcore.disconnect()
-            self._meshcore = None
+            await self._backend.disconnect()
+            self._backend = None
             self._setup_complete = False
             self.path_hash_mode = 0
             self.path_hash_mode_supported = False
@@ -490,12 +495,12 @@ class RadioManager:
 
             try:
                 # Disconnect if we have a stale connection
-                if self._meshcore is not None:
+                if self._backend is not None:
                     try:
-                        await self._meshcore.disconnect()
+                        await self._backend.disconnect()
                     except Exception:
                         pass
-                    self._meshcore = None
+                    self._backend = None
 
                 # Try to connect (will auto-detect if no port specified)
                 await self.connect()
@@ -523,12 +528,17 @@ class RadioManager:
             from app.websocket import broadcast_health
 
             CHECK_INTERVAL_SECONDS = 5
+            BACKOFF_INTERVAL_SECONDS = 60
+            BACKOFF_AFTER_FAILURES = 6
             UNRESPONSIVE_THRESHOLD = 3
             consecutive_setup_failures = 0
+            consecutive_reconnect_failures = 0
+            backoff_logged = False
+            check_interval = CHECK_INTERVAL_SECONDS
 
             while True:
                 try:
-                    await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+                    await asyncio.sleep(check_interval)
 
                     current_connected = self.is_connected
 
@@ -541,14 +551,35 @@ class RadioManager:
                         consecutive_setup_failures = 0
 
                     if not current_connected:
+                        # During reboot cooldown, do not reconnect so GPIO can be released
+                        if time.monotonic() < self._suppress_reconnect_until:
+                            remaining = self._suppress_reconnect_until - time.monotonic()
+                            logger.info(
+                                "Suppressing reconnect (reboot cooldown, %.1fs remaining)",
+                                remaining,
+                            )
                         # Attempt reconnection on every loop while disconnected
-                        if not self.is_reconnecting and await self.reconnect(
+                        elif not self.is_reconnecting and await self.reconnect(
                             broadcast_on_success=False
                         ):
                             await self.post_connect_setup()
                             broadcast_health(True, self._connection_info)
                             self._last_connected = True
                             consecutive_setup_failures = 0
+                            consecutive_reconnect_failures = 0
+                            backoff_logged = False
+                            check_interval = CHECK_INTERVAL_SECONDS
+                        else:
+                            consecutive_reconnect_failures += 1
+                            if consecutive_reconnect_failures >= BACKOFF_AFTER_FAILURES:
+                                check_interval = BACKOFF_INTERVAL_SECONDS
+                                if not backoff_logged:
+                                    logger.info(
+                                        "No radio found; retrying every %ds. "
+                                        "Set MESHCORE_SERIAL_PORT or plug in a radio.",
+                                        BACKOFF_INTERVAL_SECONDS,
+                                    )
+                                    backoff_logged = True
 
                     elif not self._last_connected and current_connected:
                         # Connection restored (might have reconnected automatically).
@@ -558,6 +589,9 @@ class RadioManager:
                         broadcast_health(True, self._connection_info)
                         self._last_connected = True
                         consecutive_setup_failures = 0
+                        consecutive_reconnect_failures = 0
+                        backoff_logged = False
+                        check_interval = CHECK_INTERVAL_SECONDS
 
                     elif current_connected and not self._setup_complete:
                         # Transport connected but setup incomplete — retry
