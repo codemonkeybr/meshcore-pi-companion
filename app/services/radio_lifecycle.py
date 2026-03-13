@@ -44,9 +44,10 @@ async def run_post_connect_setup(radio_manager) -> None:
                 if not be:
                     return
 
-                # MeshCore-only: register library event handlers (SPI uses callbacks, not events).
-                if mc is not None:
-                    register_event_handlers(mc)
+                # Register event handlers so RX packets (RX_LOG_DATA, CONTACT_MSG_RECV, etc.)
+                # are stored and broadcast. ClientBackend subscribes on meshcore; SpiBackend
+                # subscribes on its _event_bus (fed by _on_raw_packet).
+                register_event_handlers(be)
 
                 await export_and_store_private_key(be)
 

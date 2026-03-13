@@ -143,7 +143,10 @@ class TestRunPostConnectSetup:
         ):
             await run_post_connect_setup(radio_manager)
 
-        mock_register_handlers.assert_called_once_with(replacement_mc)
+        # Handlers are registered on the backend (so SPI's _event_bus gets them too)
+        mock_register_handlers.assert_called_once()
+        reg_be = mock_register_handlers.call_args[0][0]
+        assert getattr(reg_be, "_mc", None) is replacement_mc
         # export_and_store_private_key(be) and sync_radio_time(be) are called with the backend
         mock_export_key.assert_awaited_once()
         export_be = mock_export_key.call_args[0][0]
