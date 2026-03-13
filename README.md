@@ -28,6 +28,7 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 - Node.js LTS or current (20, 22, 24, 25)
 - [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **Radio:** MeshCore device over USB serial, TCP, or BLE — *or* on Raspberry Pi, a supported LoRa HAT (SPI; see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode))
+- **Optional (SQS fanout):** To use Amazon SQS as a fanout destination, run `pip install boto3` (or install the project with full deps; boto3 is listed in `pyproject.toml` but may be omitted in minimal installs).
 
 <details>
 <summary>Finding your serial port</summary>
