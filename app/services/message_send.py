@@ -18,11 +18,6 @@ from app.services.messages import (
 logger = logging.getLogger(__name__)
 
 
-def _meshcore_from_backend(be) -> Any:
-    """Return the underlying MeshCore for code that uses .commands; ClientBackend has _mc."""
-    return getattr(be, "_mc", be)
-
-
 BroadcastFn = Callable[..., Any]
 TrackAckFn = Callable[[str, int, int], None]
 NowFn = Callable[[], float]
@@ -30,7 +25,7 @@ NowFn = Callable[[], float]
 
 async def send_channel_message_with_effective_scope(
     *,
-    mc,
+    be,
     channel,
     channel_key: str,
     key_bytes: bytes,
@@ -56,7 +51,7 @@ async def send_channel_message_with_effective_scope(
             channel.name,
             override_scope,
         )
-        override_result = await mc.commands.set_flood_scope(override_scope)
+        override_result = await be.set_flood_scope(override_scope)
         if override_result is not None and override_result.type == EventType.ERROR:
             logger.warning(
                 "Failed to apply channel flood_scope override for %s: %s",
@@ -89,7 +84,7 @@ async def send_channel_message_with_effective_scope(
                 ),
             )
             try:
-                set_result = await mc.commands.set_channel(
+                set_result = await be.set_channel(
                     channel_idx=channel_slot,
                     channel_name=channel.name,
                     channel_secret=key_bytes,
@@ -120,7 +115,7 @@ async def send_channel_message_with_effective_scope(
                 action_label,
             )
 
-        send_result = await mc.commands.send_chan_msg(
+        send_result = await be.send_chan_msg(
             chan=channel_slot,
             msg=text,
             timestamp=timestamp_bytes,
@@ -133,7 +128,7 @@ async def send_channel_message_with_effective_scope(
     finally:
         if override_scope and override_scope != baseline_scope:
             try:
-                restore_result = await mc.commands.set_flood_scope(
+                restore_result = await be.set_flood_scope(
                     baseline_scope if baseline_scope else ""
                 )
                 if restore_result is not None and restore_result.type == EventType.ERROR:
@@ -182,21 +177,20 @@ async def send_direct_message_to_contact(
     """Send a direct message and persist/broadcast the outgoing row."""
     contact_data = contact.to_radio_dict()
     async with radio_manager.radio_operation("send_direct_message") as be:
-        mc = _meshcore_from_backend(be)
         logger.debug("Ensuring contact %s is on radio before sending", contact.public_key[:12])
-        add_result = await mc.commands.add_contact(contact_data)
+        add_result = await be.add_contact(contact_data)
         if add_result.type == EventType.ERROR:
             logger.warning("Failed to add contact to radio: %s", add_result.payload)
 
-        cached_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
+        cached_contact = be.get_contact_by_key_prefix(contact.public_key[:12])
         if not cached_contact:
             cached_contact = contact_data
 
         logger.info("Sending direct message to %s", contact.public_key[:12])
         now = int(now_fn())
-        result = await mc.commands.send_msg(
-            dst=cached_contact,
-            msg=text,
+        result = await be.send_msg(
+            cached_contact,
+            text,
             timestamp=now,
         )
 
@@ -249,9 +243,8 @@ async def send_channel_message_to_channel(
     text_with_sender = text
 
     async with radio_manager.radio_operation("send_channel_message") as be:
-        mc = _meshcore_from_backend(be)
-        radio_name = mc.self_info.get("name", "") if mc.self_info else ""
-        our_public_key = (mc.self_info.get("public_key") or None) if mc.self_info else None
+        radio_name = be.self_info.get("name", "") if be.self_info else ""
+        our_public_key = (be.self_info.get("public_key") or None) if be.self_info else None
         text_with_sender = f"{radio_name}: {text}" if radio_name else text
         logger.info("Sending channel message to %s: %s", channel.name, text[:50])
 
@@ -259,7 +252,7 @@ async def send_channel_message_to_channel(
         timestamp_bytes = now.to_bytes(4, "little")
 
         result = await send_channel_message_with_effective_scope(
-            mc=mc,
+            be=be,
             channel=channel,
             channel_key=channel_key_upper,
             key_bytes=key_bytes,
@@ -344,15 +337,14 @@ async def resend_channel_message_record(
     radio_name = ""
 
     async with radio_manager.radio_operation("resend_channel_message") as be:
-        mc = _meshcore_from_backend(be)
-        radio_name = mc.self_info.get("name", "") if mc.self_info else ""
-        resend_public_key = (mc.self_info.get("public_key") or None) if mc.self_info else None
+        radio_name = be.self_info.get("name", "") if be.self_info else ""
+        resend_public_key = (be.self_info.get("public_key") or None) if be.self_info else None
         text_to_send = message.text
         if radio_name and text_to_send.startswith(f"{radio_name}: "):
             text_to_send = text_to_send[len(f"{radio_name}: ") :]
 
         result = await send_channel_message_with_effective_scope(
-            mc=mc,
+            be=be,
             channel=channel,
             channel_key=message.conversation_key,
             key_bytes=key_bytes,
