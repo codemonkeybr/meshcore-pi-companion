@@ -119,10 +119,11 @@ class TestJwtGeneration:
         assert "exp" in payload
         assert payload["exp"] - payload["iat"] == 86400
         assert payload["aud"] == _DEFAULT_BROKER
-        # LetsMesh/pyMCRepeater format: email and owner as strings (empty when not set)
-        assert payload["email"] == ""
-        assert payload["owner"] == ""
-        assert "client" not in payload
+        # Main branch / broker format: owner = pubkey hex, client = identifier
+        assert payload["owner"] == public_key.hex().upper()
+        assert "client" in payload
+        # email only present when provided
+        assert payload.get("email", "") == ""
 
     def test_payload_includes_email_when_provided(self):
         private_key, public_key = _make_test_keys()
