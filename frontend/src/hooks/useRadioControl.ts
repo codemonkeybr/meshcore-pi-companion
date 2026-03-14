@@ -69,6 +69,21 @@ export function useRadioControl() {
     pollUntilReconnected();
   }, [fetchConfig]);
 
+  const handleDisconnect = useCallback(async () => {
+    await api.disconnectRadio();
+    const pausedHealth = await api.getHealth();
+    setHealth(pausedHealth);
+  }, []);
+
+  const handleReconnect = useCallback(async () => {
+    await api.reconnectRadio();
+    const refreshedHealth = await api.getHealth();
+    setHealth(refreshedHealth);
+    if (refreshedHealth.radio_connected) {
+      await fetchConfig();
+    }
+  }, [fetchConfig]);
+
   const handleAdvertise = useCallback(async () => {
     try {
       await api.sendAdvertisement();
@@ -100,6 +115,8 @@ export function useRadioControl() {
     handleSaveConfig,
     handleSetPrivateKey,
     handleReboot,
+    handleDisconnect,
+    handleReconnect,
     handleAdvertise,
     handleHealthRefresh,
   };

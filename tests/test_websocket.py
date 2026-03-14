@@ -1,6 +1,7 @@
 """Tests for WebSocket manager functionality."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -245,3 +246,27 @@ class TestBroadcastEventFanout:
 
             mock_ws.broadcast.assert_called_once()
             mock_fm.broadcast_raw.assert_called_once_with({"data": "ff00"})
+
+
+class TestTypedEventSerialization:
+    """Tests for typed websocket event serialization."""
+
+    def test_dump_ws_event_preserves_optional_message_acked_shape(self):
+        from app.events import dump_ws_event
+
+        serialized = dump_ws_event("message_acked", {"message_id": 7, "ack_count": 2})
+
+        assert json.loads(serialized) == {
+            "type": "message_acked",
+            "data": {"message_id": 7, "ack_count": 2},
+        }
+
+    def test_dump_ws_event_falls_back_to_raw_payload_when_validation_fails(self):
+        from app.events import dump_ws_event
+
+        serialized = dump_ws_event("message_acked", {"ack_count": 2})
+
+        assert json.loads(serialized) == {
+            "type": "message_acked",
+            "data": {"ack_count": 2},
+        }

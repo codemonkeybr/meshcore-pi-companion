@@ -90,6 +90,7 @@ describe('SettingsFanoutSection', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Webhook' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Apprise' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Amazon SQS' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Bot' })).toBeInTheDocument();
   });
 
@@ -307,6 +308,23 @@ describe('SettingsFanoutSection', () => {
     });
 
     expect(mockedApi.createFanoutConfig).not.toHaveBeenCalled();
+  });
+
+  it('new SQS draft shows queue url fields and sensible defaults', async () => {
+    renderSection();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Add Integration' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add Integration' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Amazon SQS' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('← Back to list')).toBeInTheDocument();
+      expect(screen.getByLabelText('Name')).toHaveValue('Amazon SQS #1');
+      expect(screen.getByLabelText('Queue URL')).toBeInTheDocument();
+      expect(screen.getByText('Forward raw packets')).toBeInTheDocument();
+    });
   });
 
   it('backing out of a new draft does not create an integration', async () => {
@@ -669,6 +687,30 @@ describe('SettingsFanoutSection', () => {
 
     await waitFor(() =>
       expect(screen.getByText(/discord:\/\/abc, mailto:\/\/one@example.com/)).toBeInTheDocument()
+    );
+  });
+
+  it('sqs list shows queue url summary', async () => {
+    const config: FanoutConfig = {
+      id: 'sqs-1',
+      type: 'sqs',
+      name: 'Queue Feed',
+      enabled: true,
+      config: {
+        queue_url: 'https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events',
+        region_name: 'us-east-1',
+      },
+      scope: { messages: 'all', raw_packets: 'none' },
+      sort_order: 0,
+      created_at: 1000,
+    };
+    mockedApi.getFanoutConfigs.mockResolvedValue([config]);
+    renderSection();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events')
+      ).toBeInTheDocument()
     );
   });
 

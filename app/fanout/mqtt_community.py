@@ -61,6 +61,7 @@ def _config_to_settings(config: dict) -> SimpleNamespace:
         community_mqtt_password=config.get("password", ""),
         community_mqtt_iata=config.get("iata", ""),
         community_mqtt_email=config.get("email", ""),
+        community_mqtt_owner=config.get("owner", ""),
         community_mqtt_token_audience=config.get("token_audience", ""),
     )
 
@@ -109,7 +110,7 @@ async def _publish_community_packet(
     """Format and publish a raw packet to the community broker."""
     try:
         from app.keystore import get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         public_key = get_public_key()
         if public_key is None:

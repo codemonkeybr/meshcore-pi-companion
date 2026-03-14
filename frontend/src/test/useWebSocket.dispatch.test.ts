@@ -103,6 +103,39 @@ describe('useWebSocket dispatch', () => {
     expect(onContact.mock.calls[0][0]).toHaveProperty('name');
   });
 
+  it('routes contact_resolved event to onContactResolved', () => {
+    const onContactResolved = vi.fn();
+    renderHook(() => useWebSocket({ onContactResolved }));
+
+    const contact = {
+      public_key: 'aa'.repeat(32),
+      name: null,
+      type: 0,
+      flags: 0,
+      last_path: null,
+      last_path_len: -1,
+      out_path_hash_mode: -1,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+    fireMessage({
+      type: 'contact_resolved',
+      data: {
+        previous_public_key: 'abc123def456',
+        contact,
+      },
+    });
+
+    expect(onContactResolved).toHaveBeenCalledOnce();
+    expect(onContactResolved).toHaveBeenCalledWith('abc123def456', contact);
+  });
+
   it('routes message_acked to onMessageAcked with (messageId, ackCount, paths)', () => {
     const onMessageAcked = vi.fn();
     renderHook(() => useWebSocket({ onMessageAcked }));

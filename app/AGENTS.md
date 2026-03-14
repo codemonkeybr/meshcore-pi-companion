@@ -8,40 +8,59 @@ Keep it aligned with `app/` source files and router behavior.
 - FastAPI
 - aiosqlite
 - Pydantic
-- MeshCore Python library (`meshcore` from PyPI) for serial/TCP/BLE
-- Optional: `pymc_core[hardware]` for SPI backend (Pi + LoRa HAT)
+- MeshCore Python library (`meshcore` from PyPI) for serial/TCP/BLE; **pymc_core** for SPI (Pi + LoRa HAT)
 - PyCryptodome
+
+## Code Ethos
+
+- Prefer strong domain modules over layers of pass-through helpers.
+- Split code when the new module owns real policy, not just a nicer name.
+- Avoid wrapper services around globals unless they materially improve testability or reduce coupling.
+- Keep workflows locally understandable; do not scatter one reasoning unit across several files without a clear contract.
+- Typed write/read contracts are preferred over loose dict-shaped repository inputs.
 
 ## Backend Map
 
 ```text
 app/
 ├── main.py              # App startup/lifespan, router registration, static frontend mounting
-├── config.py            # Env-driven runtime settings; SPI when config file exists
+├── config.py            # Env-driven runtime settings
 ├── database.py          # SQLite connection + base schema + migration runner
 ├── migrations.py        # Schema migrations (SQLite user_version)
-├── models.py            # Pydantic request/response models
+├── models.py            # Pydantic request/response models and typed write contracts (for example ContactUpsert)
 ├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout)
-├── radio.py             # RadioManager + auto-reconnect; uses RadioBackend (Client or SPI)
+├── services/            # Shared orchestration/domain services
+│   ├── messages.py              # Shared message creation, dedup, ACK application
+│   ├── message_send.py          # Direct send, channel send, resend workflows
+│   ├── dm_ack_tracker.py        # Pending DM ACK state
+│   ├── contact_reconciliation.py # Prefix-claim, sender-key backfill, name-history wiring
+│   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
+│   ├── radio_commands.py        # Radio config/private-key command workflows
+│   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
 ├── radio_backend.py     # RadioBackend ABC; implemented by ClientBackend and SpiBackend
-├── backends/             # ClientBackend (meshcore), SpiBackend (pymc_core), spi_config, adapters
+├── backends/            # ClientBackend (meshcore), SpiBackend (pymc_core), spi_config, adapters
+├── radio.py             # RadioManager transport/session state + lock management
 ├── radio_sync.py        # Polling, sync, periodic advertisement loop
 ├── decoder.py           # Packet parsing/decryption
 ├── packet_processor.py  # Raw packet pipeline, dedup, path handling
-├── event_handlers.py    # Radio event subscriptions and ACK tracking
+├── event_handlers.py    # MeshCore event subscriptions and ACK tracking
+├── events.py            # Typed WS event payload serialization
 ├── websocket.py         # WS manager + broadcast helpers
-├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise (see fanout/AGENTS_fanout.md)
+├── security.py          # Optional app-wide HTTP Basic auth middleware for HTTP + WS
+├── fanout/              # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
 ├── dependencies.py      # Shared FastAPI dependency providers
 ├── path_utils.py        # Path hex rendering and hop-width helpers
+├── region_scope.py      # Normalize/validate regional flood-scope values
 ├── keystore.py          # Ephemeral private/public key storage for DM decryption
-├── spi_config_file.py   # Load/save SPI config.yaml (node, radio, hardware)
-├── spi_identity.py      # Identity seed for SPI node (generate, load, import/export)
-├── setup_cli.py         # Interactive CLI wizard for SPI config (node name, profile, presets)
 ├── frontend_static.py   # Mount/serve built frontend (production)
+├── spi_config_file.py  # Load/save SPI config (data/config.yaml)
+├── spi_identity.py      # SPI identity key (load_or_create, export, import)
+├── setup_cli.py         # CLI wizard for SPI provisioning (node, radio, hardware)
 └── routers/
     ├── health.py
+    ├── setup.py          # SPI provisioning (status, hardware-profiles, radio-presets, provision)
+    ├── debug.py
     ├── radio.py
-    ├── setup.py         # SPI provisioning: status, hardware-profiles, radio-presets, provision
     ├── contacts.py
     ├── channels.py
     ├── messages.py
@@ -58,15 +77,15 @@ app/
 
 ### Incoming data
 
-1. Radio (or SPI backend) emits events via the active `RadioBackend`.
+1. Radio emits events.
 2. `on_rx_log_data` stores raw packet and tries decrypt/pipeline handling.
-3. Decrypted messages are inserted into `messages` and broadcast over WS.
+3. Shared message-domain services create/update `messages` and shape WS payloads.
 4. `CONTACT_MSG_RECV` is a fallback DM path when packet pipeline cannot decrypt.
 
 ### Outgoing messages
 
-1. Send endpoints in `routers/messages.py` call the backend (MeshCore commands for ClientBackend; pymc_core for SpiBackend).
-2. Message is persisted as outgoing.
+1. Send endpoints in `routers/messages.py` validate requests and delegate to `services/message_send.py`.
+2. Service-layer send workflows call the active backend (MeshCore commands for ClientBackend; pymc_core for SpiBackend), persist outgoing messages, and wire ACK tracking.
 3. Endpoint broadcasts WS `message` event so all live clients update.
 4. ACK/repeat updates arrive later as `message_acked` events.
 5. Channel resend (`POST /messages/channel/{id}/resend`) strips the sender name prefix by exact match against the current radio name. This assumes the radio name hasn't changed between the original send and the resend. Name changes require an explicit radio config update and are rare, but the `new_timestamp=true` resend path has no time window, so a mismatch is possible if the name was changed between the original send and a later resend.
@@ -74,9 +93,11 @@ app/
 ### Connection lifecycle
 
 - `RadioManager.start_connection_monitor()` checks health every 5s.
-- Monitor reconnect path runs `post_connect_setup()` before broadcasting healthy state.
-- Manual reconnect/reboot endpoints call `reconnect()` then `post_connect_setup()`.
-- Setup includes handler registration, key export, time sync, contact/channel sync, polling/advert tasks.
+- `RadioManager.post_connect_setup()` delegates to `services/radio_lifecycle.py`.
+- Routers, startup/lifespan code, fanout helpers, and `radio_sync.py` should reach radio state through `services/radio_runtime.py`, not by importing `app.radio.radio_manager` directly.
+- Shared reconnect/setup helpers in `services/radio_lifecycle.py` are used by startup, the monitor, and manual reconnect/reboot flows before broadcasting healthy state.
+- Setup still includes handler registration, key export, time sync, contact/channel sync, and advertisement tasks. The message-poll task always starts: by default it runs as a low-frequency hourly audit, and `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true` switches it to aggressive 10-second polling. That audit checks both missed-radio-message drift and channel-slot cache drift; cache mismatches are logged, toasted, and the send-slot cache is reset.
+- Post-connect setup is timeout-bounded. If initial radio offload/setup hangs too long, the backend logs the failure and broadcasts an `error` toast telling the operator to reboot the radio and restart the server.
 
 ## Important Behaviors
 
@@ -84,6 +105,10 @@ app/
 
 - Packet `path_len` values are hop counts, not byte counts.
 - Hop width comes from the packet or radio `path_hash_mode`: `0` = 1-byte, `1` = 2-byte, `2` = 3-byte.
+- Channel slot count comes from firmware-reported `DEVICE_INFO.max_channels`; do not hardcode `40` when scanning/offloading channel slots.
+- Channel sends use a session-local LRU slot cache after startup channel offload clears the radio. Repeated sends to the same room reuse the loaded slot; new rooms fill free slots up to the discovered channel capacity, then evict the least recently used cached room.
+- TCP radios do not reuse cached slot contents. For TCP, channel sends still force `set_channel(...)` before every send because this backend does not have exclusive device access.
+- `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true` disables slot reuse on all transports and forces the old always-`set_channel(...)` behavior before every channel send.
 - Contacts persist `out_path_hash_mode` in the database so contact sync and outbound DM routing reuse the exact stored mode instead of inferring from path bytes.
 - Contacts may also persist `route_override_path`, `route_override_len`, and `route_override_hash_mode`. `Contact.to_radio_dict()` gives these override fields precedence over learned `last_path*`, while advert processing still updates the learned route for telemetry/fallback.
 - `contact_advert_paths` identity is `(public_key, path_hex, path_len)` because the same hex bytes can represent different routes at different hop widths.
@@ -119,7 +144,7 @@ app/
 
 ### Fanout bus
 
-- All external integrations (MQTT, bots, webhooks, Apprise) are managed through the fanout bus (`app/fanout/`).
+- All external integrations (MQTT, bots, webhooks, Apprise, SQS) are managed through the fanout bus (`app/fanout/`).
 - Configs stored in `fanout_configs` table, managed via `GET/POST/PATCH/DELETE /api/fanout`.
 - `broadcast_event()` in `websocket.py` dispatches to the fanout manager for `message` and `raw_packet` events.
 - Each integration is a `FanoutModule` with scope-based filtering.
@@ -131,25 +156,24 @@ app/
 ### Health
 - `GET /health`
 
+### Debug
+- `GET /debug` — support snapshot with recent logs, live radio probe, slot/contact audits, and version/git info
+
 ### Radio
-- `GET /radio/config` — includes `path_hash_mode` and `path_hash_mode_supported`
+- `GET /radio/config` — includes `path_hash_mode`, `path_hash_mode_supported`, and advert-location on/off
 - `PATCH /radio/config` — may update `path_hash_mode` (`0..2`) when firmware supports it
 - `PUT /radio/private-key`
 - `POST /radio/advertise`
+- `POST /radio/disconnect`
 - `POST /radio/reboot`
 - `POST /radio/reconnect`
 
 ### Contacts
 - `GET /contacts`
+- `GET /contacts/analytics` — unified keyed-or-name analytics payload
 - `GET /contacts/repeaters/advert-paths` — recent advert paths for all contacts
-- `GET /contacts/{public_key}`
-- `GET /contacts/{public_key}/detail` — comprehensive contact profile (stats, name history, paths, nearest repeaters)
-- `GET /contacts/{public_key}/advert-paths` — recent advert paths for one contact
 - `POST /contacts`
 - `DELETE /contacts/{public_key}`
-- `POST /contacts/sync`
-- `POST /contacts/{public_key}/add-to-radio`
-- `POST /contacts/{public_key}/remove-from-radio`
 - `POST /contacts/{public_key}/mark-read`
 - `POST /contacts/{public_key}/command`
 - `POST /contacts/{public_key}/routing-override`
@@ -159,6 +183,7 @@ app/
 - `POST /contacts/{public_key}/repeater/lpp-telemetry`
 - `POST /contacts/{public_key}/repeater/neighbors`
 - `POST /contacts/{public_key}/repeater/acl`
+- `POST /contacts/{public_key}/repeater/node-info`
 - `POST /contacts/{public_key}/repeater/radio-settings`
 - `POST /contacts/{public_key}/repeater/advert-intervals`
 - `POST /contacts/{public_key}/repeater/owner-info`
@@ -166,10 +191,8 @@ app/
 ### Channels
 - `GET /channels`
 - `GET /channels/{key}/detail`
-- `GET /channels/{key}`
 - `POST /channels`
 - `DELETE /channels/{key}`
-- `POST /channels/sync`
 - `POST /channels/{key}/flood-scope-override`
 - `POST /channels/{key}/mark-read`
 
@@ -206,12 +229,6 @@ app/
 ### Statistics
 - `GET /statistics` — aggregated mesh network stats (entity counts, message/packet splits, activity windows, busiest channels)
 
-### Setup (SPI provisioning)
-- `GET /setup/status` — whether SPI config is required; mode and config_path
-- `GET /setup/hardware-profiles` — list of supported LoRa HAT profiles (id, name, pins, prerequisites)
-- `GET /setup/radio-presets` — region presets (from api.meshcore.nz or data/radio-presets-fallback.json)
-- `POST /setup/provision` — write/update config.yaml (node_name, hardware_profile, radio_preset, lat/lon)
-
 ### WebSocket
 - `WS /ws`
 
@@ -219,16 +236,17 @@ app/
 
 - `health` — radio connection status (broadcast on change, personal on connect)
 - `contact` — single contact upsert (from advertisements and radio sync)
+- `contact_resolved` — prefix contact reconciled to a full contact row (payload: `{ previous_public_key, contact }`)
 - `message` — new message (channel or DM, from packet processor or send endpoints)
 - `message_acked` — ACK/echo update for existing message (ack count + paths)
 - `raw_packet` — every incoming RF packet (for real-time packet feed UI)
 - `contact_deleted` — contact removed from database (payload: `{ public_key }`)
 - `channel` — single channel upsert/update (payload: full `Channel`)
 - `channel_deleted` — channel removed from database (payload: `{ key }`)
-- `error` — toast notification (reconnect failure, missing private key, etc.)
+- `error` — toast notification (reconnect failure, missing private key, stuck radio startup, etc.)
 - `success` — toast notification (historical decrypt complete, etc.)
 
-Initial WS connect sends `health` only. Contacts/channels are loaded by REST.
+Backend WS sends go through typed serialization in `events.py`. Initial WS connect sends `health` only. Contacts/channels are loaded by REST.
 Client sends `"ping"` text; server replies `{"type":"pong"}`.
 
 ## Data Model Notes
@@ -242,6 +260,10 @@ Main tables:
 - `contact_advert_paths` (recent unique advertisement paths per contact, keyed by contact + path bytes + hop count)
 - `contact_name_history` (tracks name changes over time)
 - `app_settings`
+
+Repository writes should prefer typed models such as `ContactUpsert` over ad hoc dict payloads when adding or updating schema-coupled data.
+
+`max_radio_contacts` is the configured radio contact capacity baseline. Favorites reload first, the app refills non-favorite working-set contacts to about 80% of that capacity, and periodic offload triggers once occupancy reaches about 95%.
 
 `app_settings` fields in active model:
 - `max_radio_contacts`
@@ -282,16 +304,20 @@ tests/
 ├── test_api.py                 # REST endpoint integration tests
 ├── test_bot.py                 # Bot execution and sandboxing
 ├── test_channels_router.py     # Channels router endpoints
+├── test_channel_sender_backfill.py # Sender-key backfill uniqueness rules for channel messages
 ├── test_config.py              # Configuration validation
+├── test_contact_reconciliation_service.py # Prefix/contact reconciliation service helpers
 ├── test_contacts_router.py     # Contacts router endpoints
 ├── test_decoder.py             # Packet parsing/decryption
 ├── test_disable_bots.py        # MESHCORE_DISABLE_BOTS=true feature
 ├── test_echo_dedup.py          # Echo/repeat deduplication (incl. concurrent)
 ├── test_fanout.py              # Fanout bus CRUD, scope matching, manager dispatch
 ├── test_fanout_integration.py  # Fanout integration tests
+├── test_fanout_hitlist.py      # Fanout-related hitlist regression tests
 ├── test_event_handlers.py      # ACK tracking, event registration, cleanup
 ├── test_frontend_static.py     # Frontend static file serving
 ├── test_health_mqtt_status.py  # Health endpoint MQTT status field
+├── test_http_quality.py        # Cache-control / gzip / basic-auth HTTP quality checks
 ├── test_key_normalization.py   # Public key normalization
 ├── test_keystore.py            # Ephemeral keystore
 ├── test_message_pagination.py  # Cursor-based message pagination
@@ -302,6 +328,9 @@ tests/
 ├── test_packet_pipeline.py     # End-to-end packet processing
 ├── test_packets_router.py      # Packets router endpoints (decrypt, maintenance)
 ├── test_radio.py               # RadioManager, serial detection
+├── test_radio_commands_service.py # Radio config/private-key service workflows
+├── test_radio_lifecycle_service.py # Reconnect/setup orchestration helpers
+├── test_radio_runtime_service.py # radio_runtime seam behavior and helpers
 ├── test_real_crypto.py         # Real cryptographic operations
 ├── test_radio_operation.py     # radio_operation() context manager
 ├── test_radio_router.py        # Radio router endpoints
@@ -311,11 +340,10 @@ tests/
 ├── test_rx_log_data.py         # on_rx_log_data event handler integration
 ├── test_messages_search.py      # Message search, around, forward pagination
 ├── test_block_lists.py          # Blocked keys/names filtering
+├── test_security.py            # Optional Basic Auth middleware / config behavior
 ├── test_send_messages.py       # Outgoing messages, bot triggers, concurrent sends
 ├── test_settings_router.py     # Settings endpoints, advert validation
 ├── test_statistics.py          # Statistics aggregation
-├── test_channel_sender_backfill.py # Sender key backfill for channel messages
-├── test_fanout_hitlist.py      # Fanout-related hitlist regression tests
 ├── test_main_startup.py        # App startup and lifespan
 ├── test_path_utils.py          # Path hex rendering helpers
 ├── test_websocket.py           # WS manager broadcast/cleanup

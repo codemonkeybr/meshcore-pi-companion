@@ -2,12 +2,14 @@ import { useState, useCallback, useEffect } from 'react';
 import { Button } from '../ui/button';
 
 export function ActionsPane({
-  onSendAdvert,
+  onSendZeroHopAdvert,
+  onSendFloodAdvert,
   onSyncClock,
   onReboot,
   consoleLoading,
 }: {
-  onSendAdvert: () => void;
+  onSendZeroHopAdvert: () => void;
+  onSendFloodAdvert: () => void;
   onSyncClock: () => void;
   onReboot: () => void;
   consoleLoading: boolean;
@@ -36,8 +38,16 @@ export function ActionsPane({
         <h3 className="text-sm font-medium">Actions</h3>
       </div>
       <div className="p-3 flex flex-wrap gap-2">
-        <Button variant="outline" size="sm" onClick={onSendAdvert} disabled={consoleLoading}>
-          Send Advert
+        <Button variant="outline" size="sm" onClick={onSendZeroHopAdvert} disabled={consoleLoading}>
+          Zero Hop Advert
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={onSendFloodAdvert}
+          disabled={consoleLoading}
+        >
+          Flood Advert
         </Button>
         <Button variant="outline" size="sm" onClick={onSyncClock} disabled={consoleLoading}>
           Sync Clock

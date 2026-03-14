@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.models import SendDirectMessageRequest
 from app.radio import radio_manager
 from app.repository import ContactRepository
@@ -29,7 +30,8 @@ def _reset_radio_state():
 def _make_mc(name="TestNode"):
     mc = MagicMock()
     mc.self_info = {"name": name}
-    mc.add_contact = AsyncMock(return_value=MagicMock(type=EventType.OK, payload={}))
+    mc.commands = MagicMock()
+    mc.commands.add_contact = AsyncMock(return_value=MagicMock(type=EventType.OK, payload={}))
     mc.get_contact_by_key_prefix = MagicMock(return_value=None)
     return mc
 
@@ -68,14 +70,14 @@ class TestDMAckTrackingWiring:
             "expected_ack": ack_bytes,
             "suggested_timeout": 8000,
         }
-        mc.send_msg = AsyncMock(return_value=result)
+        mc.commands.send_msg = AsyncMock(return_value=result)
 
         pub_key = "aa" * 32
         await _insert_contact(pub_key)
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -100,14 +102,14 @@ class TestDMAckTrackingWiring:
             "expected_ack": "abcdef01",
             "suggested_timeout": 5000,
         }
-        mc.send_msg = AsyncMock(return_value=result)
+        mc.commands.send_msg = AsyncMock(return_value=result)
 
         pub_key = "bb" * 32
         await _insert_contact(pub_key)
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -129,14 +131,14 @@ class TestDMAckTrackingWiring:
         result = MagicMock()
         result.type = EventType.MSG_SENT
         result.payload = {}  # no expected_ack
-        mc.send_msg = AsyncMock(return_value=result)
+        mc.commands.send_msg = AsyncMock(return_value=result)
 
         pub_key = "cc" * 32
         await _insert_contact(pub_key)
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -157,14 +159,14 @@ class TestDMAckTrackingWiring:
             "expected_ack": b"\x01\x02\x03\x04",
             # no suggested_timeout
         }
-        mc.send_msg = AsyncMock(return_value=result)
+        mc.commands.send_msg = AsyncMock(return_value=result)
 
         pub_key = "dd" * 32
         await _insert_contact(pub_key)
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):

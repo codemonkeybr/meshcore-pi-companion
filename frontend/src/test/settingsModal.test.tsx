@@ -32,6 +32,7 @@ const baseConfig: RadioConfig = {
   },
   path_hash_mode: 0,
   path_hash_mode_supported: false,
+  advert_location_source: 'current',
 };
 
 const baseHealth: HealthStatus = {
@@ -68,6 +69,8 @@ function renderModal(overrides?: {
   onClose?: () => void;
   onSetPrivateKey?: (key: string) => Promise<void>;
   onReboot?: () => Promise<void>;
+  onDisconnect?: () => Promise<void>;
+  onReconnect?: () => Promise<void>;
   open?: boolean;
   pageMode?: boolean;
   externalSidebarNav?: boolean;
@@ -82,6 +85,8 @@ function renderModal(overrides?: {
   const onClose = overrides?.onClose ?? vi.fn();
   const onSetPrivateKey = overrides?.onSetPrivateKey ?? vi.fn(async () => {});
   const onReboot = overrides?.onReboot ?? vi.fn(async () => {});
+  const onDisconnect = overrides?.onDisconnect ?? vi.fn(async () => {});
+  const onReconnect = overrides?.onReconnect ?? vi.fn(async () => {});
 
   const commonProps = {
     open: overrides?.open ?? true,
@@ -94,6 +99,8 @@ function renderModal(overrides?: {
     onSaveAppSettings,
     onSetPrivateKey,
     onReboot,
+    onDisconnect,
+    onReconnect,
     onAdvertise: vi.fn(async () => {}),
     onHealthRefresh: vi.fn(async () => {}),
     onRefreshAppSettings,
@@ -116,6 +123,8 @@ function renderModal(overrides?: {
     onClose,
     onSetPrivateKey,
     onReboot,
+    onDisconnect,
+    onReconnect,
     view,
   };
 }
@@ -179,15 +188,36 @@ describe('SettingsModal', () => {
     expect(screen.queryByLabelText('Preset')).not.toBeInTheDocument();
   });
 
-  it('shows favorite-first contact sync helper text in radio tab', async () => {
+  it('shows favorite-contact radio sync helper text in radio tab', async () => {
     renderModal();
     openRadioSection();
 
-    expect(
-      screen.getByText(
-        /Favorite contacts load first, then recent non-repeater contacts until this\s+limit is reached/i
-      )
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Configured radio contact capacity/i)).toBeInTheDocument();
+  });
+
+  it('shows reconnect action when radio connection is paused', () => {
+    renderModal({
+      health: { ...baseHealth, radio_state: 'paused' },
+    });
+    openRadioSection();
+
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+  });
+
+  it('saves advert location source through radio config save', async () => {
+    const { onSave } = renderModal();
+    openRadioSection();
+
+    fireEvent.change(screen.getByLabelText('Advert Location Source'), {
+      target: { value: 'off' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ advert_location_source: 'off' })
+      );
+    });
   });
 
   it('saves changed max contacts value through onSaveAppSettings', async () => {
@@ -266,6 +296,14 @@ describe('SettingsModal', () => {
     expect(screen.queryByLabelText('Local label text')).not.toBeInTheDocument();
   });
 
+  it('lists the new Windows 95 and iPhone themes', () => {
+    renderModal();
+    openLocalSection();
+
+    expect(screen.getByText('Windows 95')).toBeInTheDocument();
+    expect(screen.getByText('iPhone')).toBeInTheDocument();
+  });
+
   it('clears stale errors when switching external desktop sections', async () => {
     const onSaveAppSettings = vi.fn(async () => {
       throw new Error('Save failed');
@@ -295,6 +333,8 @@ describe('SettingsModal', () => {
         onSaveAppSettings={onSaveAppSettings}
         onSetPrivateKey={vi.fn(async () => {})}
         onReboot={vi.fn(async () => {})}
+        onDisconnect={vi.fn(async () => {})}
+        onReconnect={vi.fn(async () => {})}
         onAdvertise={vi.fn(async () => {})}
         onHealthRefresh={vi.fn(async () => {})}
         onRefreshAppSettings={vi.fn(async () => {})}
@@ -316,6 +356,8 @@ describe('SettingsModal', () => {
       onSave,
       onSetPrivateKey,
       onReboot,
+      onDisconnect: vi.fn(async () => {}),
+      onReconnect: vi.fn(async () => {}),
     });
     openRadioSection();
 

@@ -58,6 +58,11 @@ echo -e "${GREEN}Frontend build complete!${NC}"
 cd "$SCRIPT_DIR"
 echo
 
+echo -e "${YELLOW}Regenerating LICENSES.md...${NC}"
+bash scripts/collect_licenses.sh LICENSES.md
+echo -e "${GREEN}LICENSES.md updated!${NC}"
+echo
+
 # Prompt for version
 echo -e "${YELLOW}Current versions:${NC}"
 echo -n "  pyproject.toml: "
@@ -66,7 +71,8 @@ echo -n "  package.json:   "
 grep '"version"' frontend/package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/'
 echo
 
-read -p "Enter new version (e.g., 1.2.3): " VERSION
+read -r -p "Enter new version (e.g., 1.2.3): " VERSION
+VERSION="$(printf '%s' "$VERSION" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 
 if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo -e "${RED}Error: Version must be in format X.Y.Z${NC}"
@@ -179,11 +185,12 @@ RELEASE_NOTES_FILE=$(mktemp)
 } > "$RELEASE_NOTES_FILE"
 
 # Create and push the release tag first so GitHub release creation does not
-# depend on resolving a symbolic ref like HEAD on the remote side.
+# depend on resolving a symbolic ref like HEAD on the remote side. Use the same
+# changelog-derived notes for the annotated tag message.
 if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
     echo -e "${YELLOW}Tag $VERSION already exists locally; reusing it.${NC}"
 else
-    git tag "$VERSION" "$FULL_GIT_HASH"
+    git tag -a "$VERSION" "$FULL_GIT_HASH" -F "$RELEASE_NOTES_FILE"
 fi
 
 if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then

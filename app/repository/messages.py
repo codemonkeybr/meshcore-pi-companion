@@ -1,12 +1,43 @@
 import json
+import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from app.database import db
-from app.models import Message, MessagePath
+from app.models import (
+    ContactAnalyticsHourlyBucket,
+    ContactAnalyticsWeeklyBucket,
+    Message,
+    MessagePath,
+)
 
 
 class MessageRepository:
+    @dataclass
+    class _SearchQuery:
+        free_text: str
+        user_terms: list[str]
+        channel_terms: list[str]
+
+    _SEARCH_OPERATOR_RE = re.compile(
+        r'(?<!\S)(user|channel):(?:"((?:[^"\\]|\\.)*)"|(\S+))',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _contact_activity_filter(public_key: str) -> tuple[str, list[Any]]:
+        lower_key = public_key.lower()
+        return (
+            "((type = 'PRIV' AND LOWER(conversation_key) = ?)"
+            " OR (type = 'CHAN' AND LOWER(sender_key) = ?))",
+            [lower_key, lower_key],
+        )
+
+    @staticmethod
+    def _name_activity_filter(sender_name: str) -> tuple[str, list[Any]]:
+        return "type = 'CHAN' AND sender_name = ?", [sender_name]
+
     @staticmethod
     def _parse_paths(paths_json: str | None) -> list[MessagePath] | None:
         """Parse paths JSON string to list of MessagePath objects."""
@@ -131,7 +162,8 @@ class MessageRepository:
                AND ? LIKE conversation_key || '%'
                AND (
                    SELECT COUNT(*) FROM contacts
-                   WHERE public_key LIKE messages.conversation_key || '%'
+                   WHERE length(public_key) = 64
+                     AND public_key LIKE messages.conversation_key || '%'
                ) = 1""",
             (lower_key, lower_key),
         )
@@ -148,8 +180,16 @@ class MessageRepository:
         """
         cursor = await db.conn.execute(
             """UPDATE messages SET sender_key = ?
-               WHERE type = 'CHAN' AND sender_name = ? AND sender_key IS NULL""",
-            (public_key.lower(), name),
+               WHERE type = 'CHAN' AND sender_name = ? AND sender_key IS NULL
+               AND (
+                   SELECT COUNT(*) FROM contacts
+                   WHERE name = ?
+               ) = 1
+               AND EXISTS (
+                   SELECT 1 FROM contacts
+                   WHERE public_key = ? AND name = ?
+               )""",
+            (public_key.lower(), name, name, public_key.lower(), name),
         )
         await db.conn.commit()
         return cursor.rowcount
@@ -166,6 +206,92 @@ class MessageRepository:
             return "AND conversation_key = ?", conversation_key.upper()
         else:
             return "AND conversation_key LIKE ?", f"{conversation_key}%"
+
+    @staticmethod
+    def _unescape_search_quoted_value(value: str) -> str:
+        return value.replace('\\"', '"').replace("\\\\", "\\")
+
+    @staticmethod
+    def _parse_search_query(q: str) -> _SearchQuery:
+        user_terms: list[str] = []
+        channel_terms: list[str] = []
+        fragments: list[str] = []
+        last_end = 0
+
+        for match in MessageRepository._SEARCH_OPERATOR_RE.finditer(q):
+            fragments.append(q[last_end : match.start()])
+            raw_value = match.group(2) if match.group(2) is not None else match.group(3) or ""
+            value = MessageRepository._unescape_search_quoted_value(raw_value)
+            if match.group(1).lower() == "user":
+                user_terms.append(value)
+            else:
+                channel_terms.append(value)
+            last_end = match.end()
+
+        if not user_terms and not channel_terms:
+            return MessageRepository._SearchQuery(free_text=q, user_terms=[], channel_terms=[])
+
+        fragments.append(q[last_end:])
+        free_text = " ".join(fragment.strip() for fragment in fragments if fragment.strip())
+        return MessageRepository._SearchQuery(
+            free_text=free_text,
+            user_terms=user_terms,
+            channel_terms=channel_terms,
+        )
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _looks_like_hex_prefix(value: str) -> bool:
+        return bool(value) and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+    @staticmethod
+    def _build_channel_scope_clause(value: str) -> tuple[str, list[Any]]:
+        params: list[Any] = [value]
+        clause = "(messages.type = 'CHAN' AND (channels.name = ? COLLATE NOCASE"
+
+        if MessageRepository._looks_like_hex_prefix(value):
+            if len(value) == 32:
+                clause += " OR UPPER(messages.conversation_key) = ?"
+                params.append(value.upper())
+            else:
+                clause += " OR UPPER(messages.conversation_key) LIKE ? ESCAPE '\\'"
+                params.append(f"{MessageRepository._escape_like(value.upper())}%")
+
+        clause += "))"
+        return clause, params
+
+    @staticmethod
+    def _build_user_scope_clause(value: str) -> tuple[str, list[Any]]:
+        params: list[Any] = [value, value]
+        clause = (
+            "((messages.type = 'PRIV' AND contacts.name = ? COLLATE NOCASE)"
+            " OR (messages.type = 'CHAN' AND sender_name = ? COLLATE NOCASE)"
+        )
+
+        if MessageRepository._looks_like_hex_prefix(value):
+            lower_value = value.lower()
+            priv_key_clause: str
+            chan_key_clause: str
+            if len(value) == 64:
+                priv_key_clause = "LOWER(messages.conversation_key) = ?"
+                chan_key_clause = "LOWER(sender_key) = ?"
+                params.extend([lower_value, lower_value])
+            else:
+                escaped_prefix = f"{MessageRepository._escape_like(lower_value)}%"
+                priv_key_clause = "LOWER(messages.conversation_key) LIKE ? ESCAPE '\\'"
+                chan_key_clause = "LOWER(sender_key) LIKE ? ESCAPE '\\'"
+                params.extend([escaped_prefix, escaped_prefix])
+
+            clause += (
+                f" OR (messages.type = 'PRIV' AND {priv_key_clause})"
+                f" OR (messages.type = 'CHAN' AND sender_key IS NOT NULL AND {chan_key_clause})"
+            )
+
+        clause += ")"
+        return clause, params
 
     @staticmethod
     def _row_to_message(row: Any) -> Message:
@@ -200,15 +326,24 @@ class MessageRepository:
         blocked_keys: list[str] | None = None,
         blocked_names: list[str] | None = None,
     ) -> list[Message]:
-        query = "SELECT * FROM messages WHERE 1=1"
+        search_query = MessageRepository._parse_search_query(q) if q else None
+        query = (
+            "SELECT messages.* FROM messages "
+            "LEFT JOIN contacts ON messages.type = 'PRIV' "
+            "AND LOWER(messages.conversation_key) = LOWER(contacts.public_key) "
+            "LEFT JOIN channels ON messages.type = 'CHAN' "
+            "AND UPPER(messages.conversation_key) = UPPER(channels.key) "
+            "WHERE 1=1"
+        )
         params: list[Any] = []
 
         if blocked_keys:
             placeholders = ",".join("?" for _ in blocked_keys)
             query += (
-                f" AND NOT (outgoing=0 AND ("
-                f"(type='PRIV' AND LOWER(conversation_key) IN ({placeholders}))"
-                f" OR (type='CHAN' AND sender_key IS NOT NULL AND LOWER(sender_key) IN ({placeholders}))"
+                f" AND NOT (messages.outgoing=0 AND ("
+                f"(messages.type='PRIV' AND LOWER(messages.conversation_key) IN ({placeholders}))"
+                f" OR (messages.type='CHAN' AND messages.sender_key IS NOT NULL"
+                f" AND LOWER(messages.sender_key) IN ({placeholders}))"
                 f"))"
             )
             params.extend(blocked_keys)
@@ -217,36 +352,57 @@ class MessageRepository:
         if blocked_names:
             placeholders = ",".join("?" for _ in blocked_names)
             query += (
-                f" AND NOT (outgoing=0 AND sender_name IS NOT NULL"
-                f" AND sender_name IN ({placeholders}))"
+                f" AND NOT (messages.outgoing=0 AND messages.sender_name IS NOT NULL"
+                f" AND messages.sender_name IN ({placeholders}))"
             )
             params.extend(blocked_names)
 
         if msg_type:
-            query += " AND type = ?"
+            query += " AND messages.type = ?"
             params.append(msg_type)
         if conversation_key:
             clause, norm_key = MessageRepository._normalize_conversation_key(conversation_key)
-            query += f" {clause}"
+            query += f" {clause.replace('conversation_key', 'messages.conversation_key')}"
             params.append(norm_key)
 
-        if q:
-            escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query += " AND text LIKE ? ESCAPE '\\' COLLATE NOCASE"
+        if search_query and search_query.user_terms:
+            scope_clauses: list[str] = []
+            for term in search_query.user_terms:
+                clause, clause_params = MessageRepository._build_user_scope_clause(term)
+                scope_clauses.append(clause)
+                params.extend(clause_params)
+            query += f" AND ({' OR '.join(scope_clauses)})"
+
+        if search_query and search_query.channel_terms:
+            scope_clauses = []
+            for term in search_query.channel_terms:
+                clause, clause_params = MessageRepository._build_channel_scope_clause(term)
+                scope_clauses.append(clause)
+                params.extend(clause_params)
+            query += f" AND ({' OR '.join(scope_clauses)})"
+
+        if search_query and search_query.free_text:
+            escaped_q = MessageRepository._escape_like(search_query.free_text)
+            query += " AND messages.text LIKE ? ESCAPE '\\' COLLATE NOCASE"
             params.append(f"%{escaped_q}%")
 
         # Forward cursor (after/after_id) — mutually exclusive with before/before_id
         if after is not None and after_id is not None:
-            query += " AND (received_at > ? OR (received_at = ? AND id > ?))"
+            query += (
+                " AND (messages.received_at > ? OR (messages.received_at = ? AND messages.id > ?))"
+            )
             params.extend([after, after, after_id])
-            query += " ORDER BY received_at ASC, id ASC LIMIT ?"
+            query += " ORDER BY messages.received_at ASC, messages.id ASC LIMIT ?"
             params.append(limit)
         else:
             if before is not None and before_id is not None:
-                query += " AND (received_at < ? OR (received_at = ? AND id < ?))"
+                query += (
+                    " AND (messages.received_at < ?"
+                    " OR (messages.received_at = ? AND messages.id < ?))"
+                )
                 params.extend([before, before, before_id])
 
-            query += " ORDER BY received_at DESC, id DESC LIMIT ?"
+            query += " ORDER BY messages.received_at DESC, messages.id DESC LIMIT ?"
             params.append(limit)
             if before is None or before_id is None:
                 query += " OFFSET ?"
@@ -423,11 +579,12 @@ class MessageRepository:
             blocked_names: Display names whose messages should be excluded from counts.
 
         Returns:
-            Dict with 'counts', 'mentions', and 'last_message_times' keys.
+            Dict with 'counts', 'mentions', 'last_message_times', and 'last_read_ats' keys.
         """
         counts: dict[str, int] = {}
         mention_flags: dict[str, bool] = {}
         last_message_times: dict[str, int] = {}
+        last_read_ats: dict[str, int | None] = {}
 
         mention_token = f"@[{name}]" if name else None
 
@@ -505,13 +662,81 @@ class MessageRepository:
             if mention_token and row["has_mention"]:
                 mention_flags[state_key] = True
 
-        # Last message times for all conversations (including read ones)
         cursor = await db.conn.execute(
             """
+            SELECT key, last_read_at
+            FROM channels
+            """
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            last_read_ats[f"channel-{row['key']}"] = row["last_read_at"]
+
+        cursor = await db.conn.execute(
+            """
+            SELECT public_key, last_read_at
+            FROM contacts
+            """
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            last_read_ats[f"contact-{row['public_key']}"] = row["last_read_at"]
+
+        # Last message times for all conversations (including read ones),
+        # excluding blocked incoming traffic so refresh matches live WS behavior.
+        last_time_filters: list[str] = []
+        last_time_params: list[Any] = []
+
+        if blocked_keys:
+            placeholders = ",".join("?" for _ in blocked_keys)
+            last_time_filters.append(
+                f"""
+                NOT (
+                    type = 'PRIV'
+                    AND outgoing = 0
+                    AND LOWER(conversation_key) IN ({placeholders})
+                )
+                """
+            )
+            last_time_params.extend(blocked_keys)
+            last_time_filters.append(
+                f"""
+                NOT (
+                    type = 'CHAN'
+                    AND outgoing = 0
+                    AND sender_key IS NOT NULL
+                    AND LOWER(sender_key) IN ({placeholders})
+                )
+                """
+            )
+            last_time_params.extend(blocked_keys)
+
+        if blocked_names:
+            placeholders = ",".join("?" for _ in blocked_names)
+            last_time_filters.append(
+                f"""
+                NOT (
+                    type = 'CHAN'
+                    AND outgoing = 0
+                    AND sender_name IS NOT NULL
+                    AND sender_name IN ({placeholders})
+                )
+                """
+            )
+            last_time_params.extend(blocked_names)
+
+        last_time_where_sql = (
+            f"WHERE {' AND '.join(last_time_filters)}" if last_time_filters else ""
+        )
+
+        cursor = await db.conn.execute(
+            f"""
             SELECT type, conversation_key, MAX(received_at) as last_message_time
             FROM messages
+            {last_time_where_sql}
             GROUP BY type, conversation_key
-            """
+            """,
+            last_time_params,
         )
         rows = await cursor.fetchall()
         for row in rows:
@@ -523,6 +748,7 @@ class MessageRepository:
             "counts": counts,
             "mentions": mention_flags,
             "last_message_times": last_message_times,
+            "last_read_ats": last_read_ats,
         }
 
     @staticmethod
@@ -544,6 +770,26 @@ class MessageRepository:
         )
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
+
+    @staticmethod
+    async def count_channel_messages_by_sender_name(sender_name: str) -> int:
+        """Count channel messages attributed to a display name."""
+        cursor = await db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM messages WHERE type = 'CHAN' AND sender_name = ?",
+            (sender_name,),
+        )
+        row = await cursor.fetchone()
+        return row["cnt"] if row else 0
+
+    @staticmethod
+    async def get_first_channel_message_by_sender_name(sender_name: str) -> int | None:
+        """Get the earliest stored channel message timestamp for a display name."""
+        cursor = await db.conn.execute(
+            "SELECT MIN(received_at) AS first_seen FROM messages WHERE type = 'CHAN' AND sender_name = ?",
+            (sender_name,),
+        )
+        row = await cursor.fetchone()
+        return row["first_seen"] if row and row["first_seen"] is not None else None
 
     @staticmethod
     async def get_channel_stats(conversation_key: str) -> dict:
@@ -612,6 +858,19 @@ class MessageRepository:
         }
 
     @staticmethod
+    async def count_channels_with_incoming_messages() -> int:
+        """Count distinct channel conversations with at least one incoming message."""
+        cursor = await db.conn.execute(
+            """
+            SELECT COUNT(DISTINCT conversation_key) AS cnt
+            FROM messages
+            WHERE type = 'CHAN' AND outgoing = 0
+            """
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row and row["cnt"] is not None else 0
+
+    @staticmethod
     async def get_most_active_rooms(sender_key: str, limit: int = 5) -> list[tuple[str, str, int]]:
         """Get channels where a contact has sent the most messages.
 
@@ -632,3 +891,135 @@ class MessageRepository:
         )
         rows = await cursor.fetchall()
         return [(row["conversation_key"], row["channel_name"], row["cnt"]) for row in rows]
+
+    @staticmethod
+    async def get_most_active_rooms_by_sender_name(
+        sender_name: str, limit: int = 5
+    ) -> list[tuple[str, str, int]]:
+        """Get channels where a display name has sent the most messages."""
+        cursor = await db.conn.execute(
+            """
+            SELECT m.conversation_key, COALESCE(c.name, m.conversation_key) AS channel_name,
+                   COUNT(*) AS cnt
+            FROM messages m
+            LEFT JOIN channels c ON m.conversation_key = c.key
+            WHERE m.type = 'CHAN' AND m.sender_name = ?
+            GROUP BY m.conversation_key
+            ORDER BY cnt DESC
+            LIMIT ?
+            """,
+            (sender_name, limit),
+        )
+        rows = await cursor.fetchall()
+        return [(row["conversation_key"], row["channel_name"], row["cnt"]) for row in rows]
+
+    @staticmethod
+    async def _get_activity_hour_buckets(where_sql: str, params: list[Any]) -> dict[int, int]:
+        cursor = await db.conn.execute(
+            f"""
+            SELECT received_at / 3600 AS hour_bucket, COUNT(*) AS cnt
+            FROM messages
+            WHERE {where_sql}
+            GROUP BY hour_bucket
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+        return {int(row["hour_bucket"]): row["cnt"] for row in rows}
+
+    @staticmethod
+    def _build_hourly_activity(
+        hour_counts: dict[int, int], now: int
+    ) -> list[ContactAnalyticsHourlyBucket]:
+        current_hour = now // 3600
+        if hour_counts:
+            min_hour = min(hour_counts)
+        else:
+            min_hour = current_hour
+
+        buckets: list[ContactAnalyticsHourlyBucket] = []
+        for hour_bucket in range(current_hour - 23, current_hour + 1):
+            last_24h_count = hour_counts.get(hour_bucket, 0)
+
+            week_total = 0
+            week_samples = 0
+            all_time_total = 0
+            all_time_samples = 0
+            compare_hour = hour_bucket
+            while compare_hour >= min_hour:
+                count = hour_counts.get(compare_hour, 0)
+                all_time_total += count
+                all_time_samples += 1
+                if week_samples < 7:
+                    week_total += count
+                    week_samples += 1
+                compare_hour -= 24
+
+            buckets.append(
+                ContactAnalyticsHourlyBucket(
+                    bucket_start=hour_bucket * 3600,
+                    last_24h_count=last_24h_count,
+                    last_week_average=round(week_total / week_samples, 2) if week_samples else 0,
+                    all_time_average=round(all_time_total / all_time_samples, 2)
+                    if all_time_samples
+                    else 0,
+                )
+            )
+        return buckets
+
+    @staticmethod
+    async def _get_weekly_activity(
+        where_sql: str,
+        params: list[Any],
+        now: int,
+        weeks: int = 26,
+    ) -> list[ContactAnalyticsWeeklyBucket]:
+        bucket_seconds = 7 * 24 * 3600
+        current_day_start = (now // 86400) * 86400
+        start = current_day_start - (weeks - 1) * bucket_seconds
+
+        cursor = await db.conn.execute(
+            f"""
+            SELECT (received_at - ?) / ? AS bucket_idx, COUNT(*) AS cnt
+            FROM messages
+            WHERE {where_sql} AND received_at >= ?
+            GROUP BY bucket_idx
+            """,
+            [start, bucket_seconds, *params, start],
+        )
+        rows = await cursor.fetchall()
+        counts = {int(row["bucket_idx"]): row["cnt"] for row in rows}
+
+        return [
+            ContactAnalyticsWeeklyBucket(
+                bucket_start=start + bucket_idx * bucket_seconds,
+                message_count=counts.get(bucket_idx, 0),
+            )
+            for bucket_idx in range(weeks)
+        ]
+
+    @staticmethod
+    async def get_contact_activity_series(
+        public_key: str,
+        now: int | None = None,
+    ) -> tuple[list[ContactAnalyticsHourlyBucket], list[ContactAnalyticsWeeklyBucket]]:
+        """Get combined DM + channel activity series for a keyed contact."""
+        ts = now if now is not None else int(time.time())
+        where_sql, params = MessageRepository._contact_activity_filter(public_key)
+        hour_counts = await MessageRepository._get_activity_hour_buckets(where_sql, params)
+        hourly = MessageRepository._build_hourly_activity(hour_counts, ts)
+        weekly = await MessageRepository._get_weekly_activity(where_sql, params, ts)
+        return hourly, weekly
+
+    @staticmethod
+    async def get_sender_name_activity_series(
+        sender_name: str,
+        now: int | None = None,
+    ) -> tuple[list[ContactAnalyticsHourlyBucket], list[ContactAnalyticsWeeklyBucket]]:
+        """Get channel-only activity series for a sender name."""
+        ts = now if now is not None else int(time.time())
+        where_sql, params = MessageRepository._name_activity_filter(sender_name)
+        hour_counts = await MessageRepository._get_activity_hour_buckets(where_sql, params)
+        hourly = MessageRepository._build_hourly_activity(hour_counts, ts)
+        weekly = await MessageRepository._get_weekly_activity(where_sql, params, ts)
+        return hourly, weekly

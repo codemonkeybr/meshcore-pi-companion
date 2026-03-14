@@ -3,7 +3,7 @@
  * These bypass the UI to set up preconditions and verify backend state.
  */
 
-const BASE_URL = 'http://localhost:8000/api';
+const BASE_URL = 'http://localhost:8001/api';
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -21,6 +21,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export interface HealthStatus {
   radio_connected: boolean;
+  radio_initializing: boolean;
   connection_info: string | null;
 }
 
@@ -174,6 +175,7 @@ export interface UnreadCounts {
   counts: Record<string, number>;
   mentions: Record<string, boolean>;
   last_message_times: Record<string, number>;
+  last_read_ats: Record<string, number | null>;
 }
 
 export function getUnreads(): Promise<UnreadCounts> {
@@ -267,7 +269,7 @@ export async function ensureFlightlessChannel(): Promise<Channel> {
 }
 
 /**
- * Wait for health to show radio_connected, polling with retries.
+ * Wait for health to show a fully ready radio, polling with retries.
  */
 export async function waitForRadioConnected(
   timeoutMs: number = 30_000,
@@ -277,19 +279,13 @@ export async function waitForRadioConnected(
   while (Date.now() < deadline) {
     try {
       const health = await getHealth();
-      if (health.radio_connected) return;
+      if (health.radio_connected && !health.radio_initializing) return;
     } catch {
       // Backend might be restarting
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  throw new Error(`Radio did not reconnect within ${timeoutMs}ms`);
-}
-
-// --- Contacts sync ---
-
-export function syncContacts(): Promise<{ synced: number }> {
-  return fetchJson('/contacts/sync', { method: 'POST' });
+  throw new Error(`Radio did not finish reconnect/setup within ${timeoutMs}ms`);
 }
 
 // --- Packets / Historical decryption ---

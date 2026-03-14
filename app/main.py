@@ -5,12 +5,14 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from app.config import settings as server_settings
 from app.config import setup_logging
 from app.database import db
 from app.frontend_static import register_frontend_missing_fallback, register_frontend_static_routes
-from app.radio import RadioDisconnectedError, radio_manager
+from app.radio import RadioDisconnectedError
 from app.radio_sync import (
     stop_message_polling,
     stop_periodic_advert,
@@ -19,6 +21,7 @@ from app.radio_sync import (
 from app.routers import (
     channels,
     contacts,
+    debug,
     fanout,
     health,
     messages,
@@ -31,6 +34,8 @@ from app.routers import (
     statistics,
     ws,
 )
+from app.security import add_optional_basic_auth_middleware
+from app.services.radio_runtime import radio_runtime as radio_manager
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -39,12 +44,8 @@ logger = logging.getLogger(__name__)
 async def _startup_radio_connect_and_setup() -> None:
     """Connect/setup the radio in the background so HTTP serving can start immediately."""
     try:
-        connected = await radio_manager.reconnect(broadcast_on_success=False)
+        connected = await radio_manager.reconnect_and_prepare(broadcast_on_success=True)
         if connected:
-            await radio_manager.post_connect_setup()
-            from app.websocket import broadcast_health
-
-            broadcast_health(True, radio_manager.connection_info)
             logger.info("Connected to radio")
         else:
             logger.warning("Failed to connect to radio on startup")
@@ -118,6 +119,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+add_optional_basic_auth_middleware(app, server_settings)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -135,6 +138,7 @@ async def radio_disconnected_handler(request: Request, exc: RadioDisconnectedErr
 
 # API routes - all prefixed with /api for production compatibility
 app.include_router(health.router, prefix="/api")
+app.include_router(debug.router, prefix="/api")
 app.include_router(fanout.router, prefix="/api")
 app.include_router(radio.router, prefix="/api")
 app.include_router(contacts.router, prefix="/api")

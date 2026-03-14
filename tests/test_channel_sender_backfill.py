@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.repository import MessageRepository
+from app.repository import ContactRepository, MessageRepository
 
 
 @pytest.mark.asyncio
@@ -36,6 +36,14 @@ async def test_backfill_sets_sender_key_on_matching_messages(test_db):
     assert all(m.sender_key is None for m in messages)
 
     # Contact becomes known
+    await ContactRepository.upsert(
+        {
+            "public_key": pub_key,
+            "name": "Alice",
+            "type": 1,
+            "flags": 0,
+        }
+    )
     backfilled = await MessageRepository.backfill_channel_sender_key(pub_key, "Alice")
     assert backfilled == 2
 
@@ -95,6 +103,14 @@ async def test_backfill_only_affects_matching_name(test_db):
         sender_name="Bob",
     )
 
+    await ContactRepository.upsert(
+        {
+            "public_key": pub_key,
+            "name": "Alice",
+            "type": 1,
+            "flags": 0,
+        }
+    )
     backfilled = await MessageRepository.backfill_channel_sender_key(pub_key, "Alice")
     assert backfilled == 1
 
@@ -138,8 +154,56 @@ async def test_backfill_idempotent(test_db):
         sender_name="Alice",
     )
 
+    await ContactRepository.upsert(
+        {
+            "public_key": pub_key,
+            "name": "Alice",
+            "type": 1,
+            "flags": 0,
+        }
+    )
     first = await MessageRepository.backfill_channel_sender_key(pub_key, "Alice")
     assert first == 1
 
     second = await MessageRepository.backfill_channel_sender_key(pub_key, "Alice")
     assert second == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_ambiguous_duplicate_names(test_db):
+    """Duplicate contact names should leave channel sender_key unresolved."""
+    pub_key_a = "33" * 32
+    pub_key_b = "44" * 32
+    channel_key = "55" * 16
+
+    await ContactRepository.upsert(
+        {
+            "public_key": pub_key_a,
+            "name": "Alice",
+            "type": 1,
+            "flags": 0,
+        }
+    )
+    await ContactRepository.upsert(
+        {
+            "public_key": pub_key_b,
+            "name": "Alice",
+            "type": 1,
+            "flags": 0,
+        }
+    )
+    await MessageRepository.create(
+        msg_type="CHAN",
+        text="Alice: ambiguous",
+        conversation_key=channel_key,
+        sender_timestamp=100,
+        received_at=100,
+        sender_name="Alice",
+    )
+
+    backfilled = await MessageRepository.backfill_channel_sender_key(pub_key_a, "Alice")
+    assert backfilled == 0
+
+    messages = await MessageRepository.get_all(msg_type="CHAN", conversation_key=channel_key)
+    assert len(messages) == 1
+    assert messages[0].sender_key is None

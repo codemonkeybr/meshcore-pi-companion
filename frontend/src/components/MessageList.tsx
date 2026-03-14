@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -22,6 +23,8 @@ interface MessageListProps {
   loading: boolean;
   loadingOlder?: boolean;
   hasOlderMessages?: boolean;
+  unreadMarkerLastReadAt?: number | null;
+  onDismissUnreadMarker?: () => void;
   onSenderClick?: (sender: string) => void;
   onLoadOlder?: () => void;
   onResendChannelMessage?: (messageId: number, newTimestamp?: boolean) => void;
@@ -148,6 +151,23 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
 }
 
 const RESEND_WINDOW_SECONDS = 30;
+const CORRUPT_SENDER_LABEL = '<No name -- corrupt packet?>';
+
+function hasUnexpectedControlChars(text: string): boolean {
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+    if (
+      (code >= 0 && code <= 8) ||
+      code === 11 ||
+      code === 12 ||
+      (code >= 14 && code <= 31) ||
+      code === 127
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function MessageList({
   messages,
@@ -155,6 +175,8 @@ export function MessageList({
   loading,
   loadingOlder = false,
   hasOlderMessages = false,
+  unreadMarkerLastReadAt,
+  onDismissUnreadMarker,
   onSenderClick,
   onLoadOlder,
   onResendChannelMessage,
@@ -181,7 +203,10 @@ export function MessageList({
   const [resendableIds, setResendableIds] = useState<Set<number>>(new Set());
   const resendTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
+  const [showJumpToUnread, setShowJumpToUnread] = useState(false);
+  const [jumpToUnreadDismissed, setJumpToUnreadDismissed] = useState(false);
   const targetScrolledRef = useRef(false);
+  const unreadMarkerRef = useRef<HTMLButtonElement | HTMLDivElement | null>(null);
 
   // Capture scroll state in the scroll handler BEFORE any state updates
   const scrollStateRef = useRef({
@@ -303,6 +328,57 @@ export function MessageList({
     };
   }, [messages, onResendChannelMessage]);
 
+  // Sort messages by received_at ascending (oldest first)
+  // Note: Deduplication is handled by useConversationMessages.addMessageIfNew()
+  // and the database UNIQUE constraint on (type, conversation_key, text, sender_timestamp)
+  const sortedMessages = useMemo(
+    () => [...messages].sort((a, b) => a.received_at - b.received_at || a.id - b.id),
+    [messages]
+  );
+  const unreadMarkerIndex = useMemo(() => {
+    if (unreadMarkerLastReadAt === undefined) {
+      return -1;
+    }
+
+    const boundary = unreadMarkerLastReadAt ?? 0;
+    return sortedMessages.findIndex((msg) => !msg.outgoing && msg.received_at > boundary);
+  }, [sortedMessages, unreadMarkerLastReadAt]);
+
+  const syncJumpToUnreadVisibility = useCallback(() => {
+    if (unreadMarkerIndex === -1 || jumpToUnreadDismissed) {
+      setShowJumpToUnread(false);
+      return;
+    }
+
+    const marker = unreadMarkerRef.current;
+    const list = listRef.current;
+    if (!marker || !list) {
+      setShowJumpToUnread(true);
+      return;
+    }
+
+    const markerRect = marker.getBoundingClientRect();
+    const listRect = list.getBoundingClientRect();
+
+    if (
+      markerRect.width === 0 ||
+      markerRect.height === 0 ||
+      listRect.width === 0 ||
+      listRect.height === 0
+    ) {
+      setShowJumpToUnread(true);
+      return;
+    }
+
+    const markerVisible =
+      markerRect.top >= listRect.top &&
+      markerRect.bottom <= listRect.bottom &&
+      markerRect.left >= listRect.left &&
+      markerRect.right <= listRect.right;
+
+    setShowJumpToUnread(!markerVisible);
+  }, [jumpToUnreadDismissed, unreadMarkerIndex]);
+
   // Refs for scroll handler to read without causing callback recreation
   const onLoadOlderRef = useRef(onLoadOlder);
   const loadingOlderRef = useRef(loadingOlder);
@@ -317,6 +393,22 @@ export function MessageList({
   loadingNewerRef.current = loadingNewer;
   hasNewerMessagesRef.current = hasNewerMessages;
 
+  const setUnreadMarkerElement = useCallback(
+    (node: HTMLButtonElement | HTMLDivElement | null) => {
+      unreadMarkerRef.current = node;
+      syncJumpToUnreadVisibility();
+    },
+    [syncJumpToUnreadVisibility]
+  );
+
+  useEffect(() => {
+    setJumpToUnreadDismissed(false);
+  }, [unreadMarkerIndex]);
+
+  useLayoutEffect(() => {
+    syncJumpToUnreadVisibility();
+  }, [messages, syncJumpToUnreadVisibility]);
+
   // Handle scroll - capture state and detect when user is near top/bottom
   // Stable callback: reads changing values from refs, never recreated.
   const handleScroll = useCallback(() => {
@@ -325,7 +417,6 @@ export function MessageList({
     const { scrollTop, scrollHeight, clientHeight } = listRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
 
-    // Always capture current scroll state (needed for scroll preservation)
     scrollStateRef.current = {
       scrollTop,
       scrollHeight,
@@ -334,7 +425,6 @@ export function MessageList({
       wasNearBottom: distanceFromBottom < 100,
     };
 
-    // Show scroll-to-bottom button when not near the bottom (more than 100px away)
     setShowScrollToBottom(distanceFromBottom > 100);
 
     if (!onLoadOlderRef.current || loadingOlderRef.current || !hasOlderMessagesRef.current) {
@@ -343,7 +433,6 @@ export function MessageList({
       onLoadOlderRef.current();
     }
 
-    // Trigger load newer when within 100px of bottom
     if (
       onLoadNewerRef.current &&
       !loadingNewerRef.current &&
@@ -352,7 +441,8 @@ export function MessageList({
     ) {
       onLoadNewerRef.current();
     }
-  }, []);
+    syncJumpToUnreadVisibility();
+  }, [syncJumpToUnreadVisibility]);
 
   // Scroll to bottom handler (or jump to bottom if viewing historical messages)
   const scrollToBottom = useCallback(() => {
@@ -364,14 +454,6 @@ export function MessageList({
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [hasNewerMessages, onJumpToBottom]);
-
-  // Sort messages by received_at ascending (oldest first)
-  // Note: Deduplication is handled by useConversationMessages.addMessageIfNew()
-  // and the database UNIQUE constraint on (type, conversation_key, text, sender_timestamp)
-  const sortedMessages = useMemo(
-    () => [...messages].sort((a, b) => a.received_at - b.received_at || a.id - b.id),
-    [messages]
-  );
 
   // Sender info for outgoing messages (used by path modal on own messages)
   const selfSenderInfo = useMemo<SenderInfo>(
@@ -400,6 +482,17 @@ export function MessageList({
     return contacts.find((c) => c.name === name) || null;
   };
 
+  const isCorruptUnnamedChannelMessage = (msg: Message, parsedSender: string | null): boolean => {
+    return (
+      msg.type === 'CHAN' &&
+      !msg.outgoing &&
+      !msg.sender_name &&
+      !msg.sender_key &&
+      !parsedSender &&
+      hasUnexpectedControlChars(msg.text)
+    );
+  };
+
   // Build sender info for path modal
   const getSenderInfo = (
     msg: Message,
@@ -415,6 +508,32 @@ export function MessageList({
         pathHashMode: contact.out_path_hash_mode,
       };
     }
+    if (msg.type === 'CHAN') {
+      const senderName = msg.sender_name || parsedSender;
+      const senderContact =
+        (msg.sender_key
+          ? contacts.find((candidate) => candidate.public_key === msg.sender_key)
+          : null) || (senderName ? getContactByName(senderName) : null);
+      if (senderContact) {
+        return {
+          name: senderContact.name || senderName || senderContact.public_key.slice(0, 12),
+          publicKeyOrPrefix: senderContact.public_key,
+          lat: senderContact.lat,
+          lon: senderContact.lon,
+          pathHashMode: senderContact.out_path_hash_mode,
+        };
+      }
+      if (senderName || msg.sender_key) {
+        return {
+          name: senderName || msg.sender_key || 'Unknown',
+          publicKeyOrPrefix: msg.sender_key || msg.conversation_key || '',
+          lat: null,
+          lon: null,
+          pathHashMode: null,
+        };
+      }
+    }
+
     // For channel messages, try to find contact by parsed sender name
     if (parsedSender) {
       const senderContact = getContactByName(parsedSender);
@@ -455,10 +574,17 @@ export function MessageList({
   }
 
   // Helper to get a unique sender key for grouping messages
-  const getSenderKey = (msg: Message, sender: string | null): string => {
+  const getSenderKey = (
+    msg: Message,
+    senderName: string | null,
+    isCorruptChannelMessage: boolean
+  ): string => {
     if (msg.outgoing) return '__outgoing__';
     if (msg.type === 'PRIV' && msg.conversation_key) return msg.conversation_key;
-    return sender || '__unknown__';
+    if (msg.sender_key) return `key:${msg.sender_key}`;
+    if (senderName) return `name:${senderName}`;
+    if (isCorruptChannelMessage) return `corrupt:${msg.id}`;
+    return '__unknown__';
   };
 
   return (
@@ -487,17 +613,36 @@ export function MessageList({
           const { sender, content } = isRepeater
             ? { sender: null, content: msg.text }
             : parseSenderFromText(msg.text);
+          const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
+          const channelSenderContact =
+            msg.type === 'CHAN' && channelSenderName ? getContactByName(channelSenderName) : null;
+          const isCorruptChannelMessage = isCorruptUnnamedChannelMessage(msg, sender);
           const displaySender = msg.outgoing
             ? 'You'
-            : contact?.name || sender || msg.conversation_key?.slice(0, 8) || 'Unknown';
+            : contact?.name ||
+              channelSenderName ||
+              (isCorruptChannelMessage
+                ? CORRUPT_SENDER_LABEL
+                : msg.conversation_key?.slice(0, 8) || 'Unknown');
 
-          const canClickSender = !msg.outgoing && onSenderClick && displaySender !== 'Unknown';
+          const canClickSender =
+            !msg.outgoing &&
+            onSenderClick &&
+            displaySender !== 'Unknown' &&
+            displaySender !== CORRUPT_SENDER_LABEL;
 
           // Determine if we should show avatar (first message in a chunk from same sender)
-          const currentSenderKey = getSenderKey(msg, sender);
+          const currentSenderKey = getSenderKey(msg, channelSenderName, isCorruptChannelMessage);
           const prevMsg = sortedMessages[index - 1];
+          const prevParsedSender = prevMsg ? parseSenderFromText(prevMsg.text).sender : null;
           const prevSenderKey = prevMsg
-            ? getSenderKey(prevMsg, parseSenderFromText(prevMsg.text).sender)
+            ? getSenderKey(
+                prevMsg,
+                prevMsg.type === 'CHAN'
+                  ? prevMsg.sender_name || prevParsedSender
+                  : prevParsedSender,
+                isCorruptUnnamedChannelMessage(prevMsg, prevParsedSender)
+              )
             : null;
           const isFirstInGroup = currentSenderKey !== prevSenderKey;
           const showAvatar = !msg.outgoing && isFirstInGroup;
@@ -506,108 +651,128 @@ export function MessageList({
           // Get avatar info for incoming messages
           let avatarName: string | null = null;
           let avatarKey: string = '';
+          let avatarVariant: 'default' | 'corrupt' = 'default';
           if (!msg.outgoing) {
             if (msg.type === 'PRIV' && msg.conversation_key) {
               // DM: use conversation_key (sender's public key)
               avatarName = contact?.name || null;
               avatarKey = msg.conversation_key;
-            } else if (sender) {
-              // Channel message: try to find contact by name, or use sender name as pseudo-key
-              const senderContact = getContactByName(sender);
-              avatarName = sender;
-              avatarKey = senderContact?.public_key || `name:${sender}`;
+            } else if (isCorruptChannelMessage) {
+              avatarName = CORRUPT_SENDER_LABEL;
+              avatarKey = `corrupt:${msg.id}`;
+              avatarVariant = 'corrupt';
+            } else {
+              // Channel message: use stored sender identity first, then parsed/fallback display name
+              avatarName =
+                channelSenderName || (displaySender !== 'Unknown' ? displaySender : null);
+              avatarKey =
+                msg.sender_key ||
+                channelSenderContact?.public_key ||
+                (avatarName ? `name:${avatarName}` : `message:${msg.id}`);
             }
           }
+          const avatarActionLabel =
+            avatarName && avatarName !== 'Unknown'
+              ? `View info for ${avatarName}`
+              : `View info for ${avatarKey.slice(0, 12)}`;
 
           return (
-            <div
-              key={msg.id}
-              data-message-id={msg.id}
-              className={cn(
-                'flex items-start max-w-[85%]',
-                msg.outgoing && 'flex-row-reverse self-end',
-                isFirstInGroup && !isFirstMessage && 'mt-3'
-              )}
-            >
-              {!msg.outgoing && (
-                <div className="w-10 flex-shrink-0 flex items-start pt-0.5">
-                  {showAvatar && avatarKey && (
-                    <span
-                      role={onOpenContactInfo ? 'button' : undefined}
-                      tabIndex={onOpenContactInfo ? 0 : undefined}
-                      onKeyDown={onOpenContactInfo ? handleKeyboardActivate : undefined}
-                      onClick={
-                        onOpenContactInfo
-                          ? () => onOpenContactInfo(avatarKey, msg.type === 'CHAN')
-                          : undefined
-                      }
-                    >
-                      <ContactAvatar
-                        name={avatarName}
-                        publicKey={avatarKey}
-                        size={32}
-                        clickable={!!onOpenContactInfo}
-                      />
+            <Fragment key={msg.id}>
+              {unreadMarkerIndex === index &&
+                (onDismissUnreadMarker ? (
+                  <button
+                    ref={setUnreadMarkerElement}
+                    type="button"
+                    className="my-2 flex w-full items-center gap-3 text-left text-xs font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={onDismissUnreadMarker}
+                  >
+                    <span className="h-px flex-1 bg-border" />
+                    <span className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1">
+                      Unread messages
                     </span>
-                  )}
-                </div>
-              )}
+                    <span className="h-px flex-1 bg-border" />
+                  </button>
+                ) : (
+                  <div
+                    ref={setUnreadMarkerElement}
+                    className="my-2 flex w-full items-center gap-3 text-xs font-medium text-primary"
+                  >
+                    <span className="h-px flex-1 bg-border" />
+                    <span className="rounded-full border border-primary/30 bg-primary/10 px-3 py-1">
+                      Unread messages
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                ))}
               <div
+                data-message-id={msg.id}
                 className={cn(
-                  'py-1.5 px-3 rounded-lg min-w-0',
-                  msg.outgoing ? 'bg-msg-outgoing' : 'bg-msg-incoming',
-                  highlightedMessageId === msg.id && 'message-highlight'
+                  'flex items-start max-w-[85%]',
+                  msg.outgoing && 'flex-row-reverse self-end',
+                  isFirstInGroup && !isFirstMessage && 'mt-3'
                 )}
               >
-                {showAvatar && (
-                  <div className="text-[13px] font-semibold text-foreground mb-0.5">
-                    {canClickSender ? (
-                      <span
-                        className="cursor-pointer hover:text-primary transition-colors"
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={handleKeyboardActivate}
-                        onClick={() => onSenderClick(displaySender)}
-                        title={`Mention ${displaySender}`}
-                      >
-                        {displaySender}
-                      </span>
-                    ) : (
-                      displaySender
-                    )}
-                    <span className="font-normal text-muted-foreground ml-2 text-[11px]">
-                      {formatTime(msg.sender_timestamp || msg.received_at)}
-                    </span>
-                    {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
-                      <HopCountBadge
-                        paths={msg.paths}
-                        variant="header"
-                        onClick={() =>
-                          setSelectedPath({
-                            paths: msg.paths!,
-                            senderInfo: getSenderInfo(msg, contact, sender),
-                          })
-                        }
-                      />
-                    )}
+                {!msg.outgoing && (
+                  <div className="w-10 flex-shrink-0 flex items-start pt-0.5">
+                    {showAvatar &&
+                      avatarKey &&
+                      (onOpenContactInfo ? (
+                        <button
+                          type="button"
+                          className="avatar-action-button rounded-full border-none bg-transparent p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label={avatarActionLabel}
+                          onClick={() => onOpenContactInfo(avatarKey, msg.type === 'CHAN')}
+                        >
+                          <ContactAvatar
+                            name={avatarName}
+                            publicKey={avatarKey}
+                            size={32}
+                            clickable
+                            variant={avatarVariant}
+                          />
+                        </button>
+                      ) : (
+                        <span>
+                          <ContactAvatar
+                            name={avatarName}
+                            publicKey={avatarKey}
+                            size={32}
+                            variant={avatarVariant}
+                          />
+                        </span>
+                      ))}
                   </div>
                 )}
-                <div className="break-words whitespace-pre-wrap">
-                  {content.split('\n').map((line, i, arr) => (
-                    <span key={i}>
-                      {renderTextWithMentions(line, radioName)}
-                      {i < arr.length - 1 && <br />}
-                    </span>
-                  ))}
-                  {!showAvatar && (
-                    <>
-                      <span className="text-[10px] text-muted-foreground ml-2">
+                <div
+                  className={cn(
+                    'py-1.5 px-3 rounded-lg min-w-0',
+                    msg.outgoing ? 'bg-msg-outgoing' : 'bg-msg-incoming',
+                    highlightedMessageId === msg.id && 'message-highlight'
+                  )}
+                >
+                  {showAvatar && (
+                    <div className="text-[13px] font-semibold text-foreground mb-0.5">
+                      {canClickSender ? (
+                        <span
+                          className="cursor-pointer hover:text-primary transition-colors"
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={handleKeyboardActivate}
+                          onClick={() => onSenderClick(displaySender)}
+                          title={`Mention ${displaySender}`}
+                        >
+                          {displaySender}
+                        </span>
+                      ) : (
+                        displaySender
+                      )}
+                      <span className="font-normal text-muted-foreground ml-2 text-[11px]">
                         {formatTime(msg.sender_timestamp || msg.received_at)}
                       </span>
                       {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
                         <HopCountBadge
                           paths={msg.paths}
-                          variant="inline"
+                          variant="header"
                           onClick={() =>
                             setSelectedPath({
                               paths: msg.paths!,
@@ -616,11 +781,58 @@ export function MessageList({
                           }
                         />
                       )}
-                    </>
+                    </div>
                   )}
-                  {msg.outgoing &&
-                    (msg.acked > 0 ? (
-                      msg.paths && msg.paths.length > 0 ? (
+                  <div className="break-words whitespace-pre-wrap">
+                    {content.split('\n').map((line, i, arr) => (
+                      <span key={i}>
+                        {renderTextWithMentions(line, radioName)}
+                        {i < arr.length - 1 && <br />}
+                      </span>
+                    ))}
+                    {!showAvatar && (
+                      <>
+                        <span className="text-[10px] text-muted-foreground ml-2">
+                          {formatTime(msg.sender_timestamp || msg.received_at)}
+                        </span>
+                        {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
+                          <HopCountBadge
+                            paths={msg.paths}
+                            variant="inline"
+                            onClick={() =>
+                              setSelectedPath({
+                                paths: msg.paths!,
+                                senderInfo: getSenderInfo(msg, contact, sender),
+                              })
+                            }
+                          />
+                        )}
+                      </>
+                    )}
+                    {msg.outgoing &&
+                      (msg.acked > 0 ? (
+                        msg.paths && msg.paths.length > 0 ? (
+                          <span
+                            className="text-muted-foreground cursor-pointer hover:text-primary"
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={handleKeyboardActivate}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedPath({
+                                paths: msg.paths!,
+                                senderInfo: selfSenderInfo,
+                                messageId: msg.id,
+                                isOutgoingChan: msg.type === 'CHAN' && !!onResendChannelMessage,
+                              });
+                            }}
+                            title="View echo paths"
+                            aria-label={`Acknowledged, ${msg.acked} echo${msg.acked !== 1 ? 's' : ''} — view paths`}
+                          >{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
+                        ) : (
+                          <span className="text-muted-foreground">{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
+                        )
+                      ) : onResendChannelMessage && msg.type === 'CHAN' ? (
                         <span
                           className="text-muted-foreground cursor-pointer hover:text-primary"
                           role="button"
@@ -629,48 +841,28 @@ export function MessageList({
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedPath({
-                              paths: msg.paths!,
+                              paths: [],
                               senderInfo: selfSenderInfo,
                               messageId: msg.id,
-                              isOutgoingChan: msg.type === 'CHAN' && !!onResendChannelMessage,
+                              isOutgoingChan: true,
                             });
                           }}
-                          title="View echo paths"
-                          aria-label={`Acknowledged, ${msg.acked} echo${msg.acked !== 1 ? 's' : ''} — view paths`}
-                        >{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
+                          title="Message status"
+                          aria-label="No echoes yet — view message status"
+                        >
+                          {' '}
+                          ?
+                        </span>
                       ) : (
-                        <span className="text-muted-foreground">{` ✓${msg.acked > 1 ? msg.acked : ''}`}</span>
-                      )
-                    ) : onResendChannelMessage && msg.type === 'CHAN' ? (
-                      <span
-                        className="text-muted-foreground cursor-pointer hover:text-primary"
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={handleKeyboardActivate}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedPath({
-                            paths: [],
-                            senderInfo: selfSenderInfo,
-                            messageId: msg.id,
-                            isOutgoingChan: true,
-                          });
-                        }}
-                        title="Message status"
-                        aria-label="No echoes yet — view message status"
-                      >
-                        {' '}
-                        ?
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground" title="No repeats heard yet">
-                        {' '}
-                        ?
-                      </span>
-                    ))}
+                        <span className="text-muted-foreground" title="No repeats heard yet">
+                          {' '}
+                          ?
+                        </span>
+                      ))}
+                  </div>
                 </div>
               </div>
-            </div>
+            </Fragment>
           );
         })}
         {loadingNewer && (
@@ -686,6 +878,35 @@ export function MessageList({
       </div>
 
       {/* Scroll to bottom button */}
+      {showJumpToUnread && (
+        <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2">
+          <div className="pointer-events-auto flex h-9 items-center overflow-hidden rounded-full border border-border bg-card shadow-lg transition-all hover:scale-105">
+            <button
+              type="button"
+              onClick={() => {
+                unreadMarkerRef.current?.scrollIntoView?.({ block: 'center' });
+                setJumpToUnreadDismissed(true);
+                setShowJumpToUnread(false);
+              }}
+              className="h-full px-3 text-sm font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Jump to unread
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setJumpToUnreadDismissed(true);
+                setShowJumpToUnread(false);
+              }}
+              className="flex h-full w-9 items-center justify-center border-l border-border text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label="Dismiss jump to unread"
+              title="Dismiss jump to unread"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       {showScrollToBottom && (
         <button
           onClick={scrollToBottom}

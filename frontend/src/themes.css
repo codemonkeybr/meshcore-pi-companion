@@ -35,6 +35,7 @@
   --success-foreground: 0 0% 100%;
   --info: 217 91% 48%;
   --info-foreground: 0 0% 100%;
+  --region-override: 274 78% 24%;
   --favorite: 43 96% 50%;
   --console: 153 50% 22%;
   --console-command: 153 55% 18%;
@@ -46,6 +47,281 @@
   --scrollbar: 36 8% 76%;
   --scrollbar-hover: 36 8% 64%;
   --overlay: 220 20% 10%;
+}
+
+:root[data-theme='light'] .sidebar-tool-label {
+  color: hsl(var(--foreground));
+}
+
+/* ── Windows 95 ───────────────────────────────────────────── */
+:root[data-theme='windows-95'] {
+  --background: 180 100% 25%;
+  --foreground: 0 0% 0%;
+  --card: 0 0% 75%;
+  --card-foreground: 0 0% 0%;
+  --popover: 0 0% 75%;
+  --popover-foreground: 0 0% 0%;
+  --primary: 240 100% 25%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 84%;
+  --secondary-foreground: 0 0% 0%;
+  --muted: 0 0% 80%;
+  --muted-foreground: 0 0% 18%;
+  --accent: 0 0% 88%;
+  --accent-foreground: 0 0% 0%;
+  --destructive: 0 82% 44%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 47%;
+  --input: 0 0% 47%;
+  --ring: 240 100% 25%;
+  --radius: 0px;
+  --msg-outgoing: 210 100% 92%;
+  --msg-incoming: 0 0% 92%;
+  --status-connected: 142 75% 32%;
+  --status-disconnected: 0 0% 35%;
+  --warning: 45 100% 38%;
+  --warning-foreground: 0 0% 0%;
+  --success: 142 75% 28%;
+  --success-foreground: 0 0% 100%;
+  --info: 210 100% 42%;
+  --info-foreground: 0 0% 100%;
+  --region-override: 300 100% 28%;
+  --favorite: 44 100% 50%;
+  --console: 120 100% 22%;
+  --console-command: 120 100% 28%;
+  --console-bg: 0 0% 0%;
+  --toast-error: 0 0% 86%;
+  --toast-error-foreground: 0 72% 30%;
+  --toast-error-border: 0 0% 38%;
+  --code-editor-bg: 0 0% 94%;
+  --font-sans: Tahoma, 'MS Sans Serif', 'Segoe UI', sans-serif;
+  --font-mono: 'Courier New', monospace;
+  --scrollbar: 0 0% 62%;
+  --scrollbar-hover: 0 0% 48%;
+  --overlay: 0 0% 0%;
+}
+
+[data-theme='windows-95'] body {
+  background: hsl(180 100% 25%);
+}
+
+[data-theme='windows-95'] .bg-card,
+[data-theme='windows-95'] .bg-popover,
+[data-theme='windows-95'] .bg-secondary,
+[data-theme='windows-95'] .bg-muted {
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 100%),
+    inset -1px -1px 0 hsl(0 0% 34%);
+}
+
+[data-theme='windows-95'] button,
+[data-theme='windows-95'] input,
+[data-theme='windows-95'] select,
+[data-theme='windows-95'] textarea {
+  border-radius: 0 !important;
+}
+
+[data-theme='windows-95'] button {
+  background: hsl(0 0% 75%);
+  color: hsl(0 0% 0%);
+  padding: 0.35rem 0.75rem;
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 100%),
+    inset -1px -1px 0 hsl(0 0% 34%);
+}
+
+[data-theme='windows-95'] .avatar-action-button {
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+[data-theme='windows-95'] button:active,
+[data-theme='windows-95'] button:active {
+  box-shadow:
+    inset -1px -1px 0 hsl(0 0% 100%),
+    inset 1px 1px 0 hsl(0 0% 34%);
+}
+
+[data-theme='windows-95'] input,
+[data-theme='windows-95'] select,
+[data-theme='windows-95'] textarea {
+  background: hsl(0 0% 100%);
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 34%),
+    inset -1px -1px 0 hsl(0 0% 100%);
+}
+
+[data-theme='windows-95'] .bg-msg-incoming,
+[data-theme='windows-95'] .bg-msg-outgoing {
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 100%),
+    inset -1px -1px 0 hsl(0 0% 34%);
+}
+
+[data-theme='windows-95'] .conversation-header {
+  background: hsl(240 100% 25%);
+  color: hsl(0 0% 100%);
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 100% / 0.35),
+    inset -1px -1px 0 hsl(240 100% 14%);
+}
+
+[data-theme='windows-95'] .conversation-header .text-muted-foreground,
+[data-theme='windows-95'] .conversation-header .text-foreground,
+[data-theme='windows-95'] .conversation-header .text-primary,
+[data-theme='windows-95'] .conversation-header button,
+[data-theme='windows-95'] .conversation-header [role='button'] {
+  color: hsl(0 0% 100%);
+}
+
+[data-theme='windows-95'] .conversation-header button {
+  background: hsl(240 100% 25%);
+  box-shadow: none;
+}
+
+[data-theme='windows-95'] .conversation-header .lucide-info {
+  color: hsl(0 0% 100%);
+}
+
+[data-theme='windows-95'] .message-input-shell {
+  background: hsl(0 0% 75%);
+  box-shadow:
+    inset 1px 1px 0 hsl(0 0% 100%),
+    inset -1px -1px 0 hsl(0 0% 34%);
+}
+
+@media (min-width: 768px) {
+  [data-theme='windows-95'] * {
+    scrollbar-width: auto;
+    scrollbar-color: hsl(0 0% 75%) hsl(0 0% 84%);
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar {
+    width: 16px;
+    height: 16px;
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar-track,
+  [data-theme='windows-95'] ::-webkit-scrollbar-corner {
+    background: hsl(0 0% 84%);
+    box-shadow:
+      inset 1px 1px 0 hsl(0 0% 100%),
+      inset -1px -1px 0 hsl(0 0% 34%);
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar-thumb {
+    background: hsl(0 0% 75%);
+    border-radius: 0;
+    box-shadow:
+      inset 1px 1px 0 hsl(0 0% 100%),
+      inset -1px -1px 0 hsl(0 0% 34%);
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar-thumb:hover {
+    background: hsl(0 0% 80%);
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar-thumb:active {
+    box-shadow:
+      inset -1px -1px 0 hsl(0 0% 100%),
+      inset 1px 1px 0 hsl(0 0% 34%);
+  }
+
+  [data-theme='windows-95'] ::-webkit-scrollbar-button:single-button {
+    display: block;
+    background: hsl(0 0% 75%);
+    height: 16px;
+    width: 16px;
+    box-shadow:
+      inset 1px 1px 0 hsl(0 0% 100%),
+      inset -1px -1px 0 hsl(0 0% 34%);
+  }
+}
+
+/* ── iPhone / iOS ─────────────────────────────────────────── */
+:root[data-theme='ios'] {
+  --background: 240 18% 96%;
+  --foreground: 220 18% 14%;
+  --card: 0 0% 100%;
+  --card-foreground: 220 18% 14%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 18% 14%;
+  --primary: 211 100% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 240 10% 92%;
+  --secondary-foreground: 220 10% 26%;
+  --muted: 240 10% 94%;
+  --muted-foreground: 220 8% 45%;
+  --accent: 240 12% 90%;
+  --accent-foreground: 220 18% 14%;
+  --destructive: 3 100% 59%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 240 7% 84%;
+  --input: 240 7% 84%;
+  --ring: 211 100% 50%;
+  --radius: 1.35rem;
+  --msg-outgoing: 211 100% 50%;
+  --msg-incoming: 240 12% 90%;
+  --status-connected: 134 61% 49%;
+  --status-disconnected: 240 5% 60%;
+  --warning: 35 100% 50%;
+  --warning-foreground: 0 0% 100%;
+  --success: 134 61% 42%;
+  --success-foreground: 0 0% 100%;
+  --info: 188 100% 43%;
+  --info-foreground: 0 0% 100%;
+  --region-override: 279 100% 67%;
+  --favorite: 47 100% 50%;
+  --console: 134 61% 40%;
+  --console-command: 134 61% 34%;
+  --console-bg: 0 0% 100%;
+  --toast-error: 0 0% 100%;
+  --toast-error-foreground: 3 70% 46%;
+  --toast-error-border: 240 7% 84%;
+  --code-editor-bg: 240 16% 97%;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', SFMono-Regular, ui-monospace, monospace;
+  --scrollbar: 240 8% 76%;
+  --scrollbar-hover: 240 8% 64%;
+  --overlay: 220 30% 8%;
+}
+
+[data-theme='ios'] body {
+  background:
+    radial-gradient(circle at top, hsl(211 100% 97%), transparent 40%),
+    linear-gradient(180deg, hsl(240 25% 98%), hsl(240 16% 95%));
+}
+
+[data-theme='ios'] .bg-card,
+[data-theme='ios'] .bg-popover {
+  background: hsl(0 0% 100% / 0.82);
+  backdrop-filter: saturate(180%) blur(24px);
+  box-shadow:
+    0 14px 32px hsl(220 30% 10% / 0.08),
+    0 1px 0 hsl(0 0% 100% / 0.7) inset;
+}
+
+[data-theme='ios'] button,
+[data-theme='ios'] [role='button'] {
+  font-weight: 600;
+}
+
+[data-theme='ios'] input,
+[data-theme='ios'] select,
+[data-theme='ios'] textarea {
+  background: hsl(0 0% 100% / 0.9);
+  box-shadow: 0 1px 2px hsl(220 30% 10% / 0.06) inset;
+}
+
+[data-theme='ios'] .bg-msg-outgoing {
+  color: hsl(0 0% 100%);
+  box-shadow: 0 10px 24px hsl(211 100% 50% / 0.18);
+}
+
+[data-theme='ios'] .bg-msg-incoming {
+  box-shadow: 0 8px 18px hsl(220 30% 10% / 0.08);
 }
 
 /* ── Cyberpunk ("Neon Bleed") ──────────────────────────────── */
@@ -65,7 +341,7 @@
   --accent: 150 14% 12%;
   --accent-foreground: 120 8% 82%;
   --destructive: 340 100% 59%;
-  --destructive-foreground: 0 0% 100%;
+  --destructive-foreground: 340 100% 6%;
   --border: 135 30% 14%;
   --input: 135 30% 14%;
   --ring: 135 100% 50%;
@@ -80,6 +356,7 @@
   --success-foreground: 135 100% 6%;
   --info: 185 100% 42%;
   --info-foreground: 185 100% 6%;
+  --region-override: 292 100% 68%;
   --favorite: 62 100% 52%;
   --console: 135 100% 50%;
   --console-command: 135 100% 62%;
@@ -103,7 +380,7 @@
   --popover: 0 0% 8%;
   --popover-foreground: 0 0% 100%;
   --primary: 212 100% 62%;
-  --primary-foreground: 0 0% 100%;
+  --primary-foreground: 0 0% 0%;
   --secondary: 0 0% 12%;
   --secondary-foreground: 0 0% 92%;
   --muted: 0 0% 10%;
@@ -111,7 +388,7 @@
   --accent: 0 0% 14%;
   --accent-foreground: 0 0% 100%;
   --destructive: 355 100% 50%;
-  --destructive-foreground: 0 0% 100%;
+  --destructive-foreground: 0 0% 0%;
   --border: 0 0% 22%;
   --input: 0 0% 22%;
   --ring: 212 100% 62%;
@@ -126,6 +403,7 @@
   --success-foreground: 0 0% 100%;
   --info: 212 100% 58%;
   --info-foreground: 0 0% 100%;
+  --region-override: 286 100% 76%;
   --favorite: 43 100% 54%;
   --console: 212 100% 62%;
   --console-command: 212 100% 74%;
@@ -172,6 +450,7 @@
   --success-foreground: 0 0% 100%;
   --info: 210 50% 56%;
   --info-foreground: 0 0% 100%;
+  --region-override: 273 72% 72%;
   --favorite: 38 70% 56%;
   --console: 30 40% 58%;
   --console-command: 30 40% 70%;
@@ -267,6 +546,7 @@
   --success-foreground: 0 0% 100%;
   --info: 198 80% 54%;
   --info-foreground: 0 0% 100%;
+  --region-override: 282 100% 72%;
   --favorite: 46 100% 54%;
   --console: 338 100% 54%;
   --console-command: 338 100% 68%;
@@ -372,4 +652,417 @@
 
 [data-theme='solar-flare'] ::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(180deg, hsl(338 90% 48%), hsl(24 90% 48%));
+}
+
+/* ── Lagoon Pop ("Tidal Candy") ───────────────────────────── */
+:root[data-theme='lagoon-pop'] {
+  --background: 197 62% 9%;
+  --foreground: 42 33% 92%;
+  --card: 197 46% 13%;
+  --card-foreground: 42 33% 92%;
+  --popover: 197 46% 14%;
+  --popover-foreground: 42 33% 92%;
+  --primary: 175 72% 49%;
+  --primary-foreground: 196 60% 9%;
+  --secondary: 197 34% 18%;
+  --secondary-foreground: 42 22% 84%;
+  --muted: 197 30% 16%;
+  --muted-foreground: 195 16% 64%;
+  --accent: 205 46% 22%;
+  --accent-foreground: 42 33% 92%;
+  --destructive: 8 88% 61%;
+  --destructive-foreground: 196 60% 9%;
+  --border: 191 34% 24%;
+  --input: 191 34% 24%;
+  --ring: 175 72% 49%;
+  --radius: 1rem;
+  --msg-outgoing: 184 46% 16%;
+  --msg-incoming: 204 34% 14%;
+  --status-connected: 167 76% 46%;
+  --status-disconnected: 204 12% 46%;
+  --warning: 41 100% 58%;
+  --warning-foreground: 38 100% 10%;
+  --success: 167 76% 42%;
+  --success-foreground: 196 60% 9%;
+  --info: 229 90% 72%;
+  --info-foreground: 232 56% 14%;
+  --region-override: 277 88% 76%;
+  --favorite: 49 100% 63%;
+  --console: 175 72% 54%;
+  --console-command: 175 78% 68%;
+  --console-bg: 198 68% 7%;
+  --toast-error: 8 38% 14%;
+  --toast-error-foreground: 10 86% 77%;
+  --toast-error-border: 8 30% 24%;
+  --code-editor-bg: 198 44% 11%;
+  --font-sans: 'Trebuchet MS', 'Avenir Next', 'Segoe UI', sans-serif;
+  --scrollbar: 191 34% 22%;
+  --scrollbar-hover: 191 40% 30%;
+  --overlay: 198 80% 4%;
+}
+
+[data-theme='lagoon-pop'] body {
+  background:
+    radial-gradient(circle at top left, hsl(175 72% 49% / 0.1), transparent 28%),
+    radial-gradient(circle at top right, hsl(229 90% 72% / 0.1), transparent 24%),
+    radial-gradient(circle at bottom center, hsl(8 88% 61% / 0.08), transparent 26%),
+    hsl(197 62% 9%);
+}
+
+[data-theme='lagoon-pop'] .bg-card {
+  background: linear-gradient(145deg, hsl(197 46% 14%), hsl(205 40% 16%));
+}
+
+[data-theme='lagoon-pop'] .bg-popover {
+  background: linear-gradient(145deg, hsl(197 46% 15%), hsl(205 40% 17%));
+}
+
+[data-theme='lagoon-pop'] .bg-msg-outgoing {
+  background: linear-gradient(135deg, hsl(184 48% 16%), hsl(175 38% 19%));
+  border-left: 2px solid hsl(175 72% 49% / 0.45);
+}
+
+[data-theme='lagoon-pop'] .bg-msg-incoming {
+  background: linear-gradient(135deg, hsl(204 34% 14%), hsl(214 30% 16%));
+  border-left: 2px solid hsl(229 90% 72% / 0.35);
+}
+
+[data-theme='lagoon-pop'] .bg-primary {
+  background: linear-gradient(135deg, hsl(175 72% 49%), hsl(191 78% 56%));
+}
+
+[data-theme='lagoon-pop'] button {
+  transition:
+    transform 0.12s ease,
+    filter 0.2s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+[data-theme='lagoon-pop'] button:hover {
+  filter: drop-shadow(0 0 10px hsl(175 72% 49% / 0.18));
+}
+
+[data-theme='lagoon-pop'] button:active {
+  transform: translateY(1px);
+}
+
+[data-theme='lagoon-pop'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, hsl(175 40% 32%), hsl(229 38% 40%));
+}
+
+[data-theme='lagoon-pop'] ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, hsl(175 52% 42%), hsl(229 52% 54%));
+}
+
+/* ── Candy Dusk ("Dream Arcade") ──────────────────────────── */
+:root[data-theme='candy-dusk'] {
+  --background: 258 38% 10%;
+  --foreground: 302 30% 93%;
+  --card: 258 30% 15%;
+  --card-foreground: 302 30% 93%;
+  --popover: 258 30% 16%;
+  --popover-foreground: 302 30% 93%;
+  --primary: 325 100% 74%;
+  --primary-foreground: 258 38% 12%;
+  --secondary: 255 24% 20%;
+  --secondary-foreground: 291 20% 85%;
+  --muted: 255 20% 18%;
+  --muted-foreground: 265 12% 66%;
+  --accent: 251 28% 24%;
+  --accent-foreground: 302 30% 93%;
+  --destructive: 9 88% 66%;
+  --destructive-foreground: 258 38% 12%;
+  --border: 256 24% 28%;
+  --input: 256 24% 28%;
+  --ring: 325 100% 74%;
+  --radius: 1.25rem;
+  --msg-outgoing: 307 32% 20%;
+  --msg-incoming: 250 24% 18%;
+  --status-connected: 164 78% 58%;
+  --status-disconnected: 255 10% 48%;
+  --warning: 43 100% 63%;
+  --warning-foreground: 36 100% 12%;
+  --success: 164 78% 54%;
+  --success-foreground: 258 38% 12%;
+  --info: 191 90% 76%;
+  --info-foreground: 242 32% 18%;
+  --region-override: 278 100% 82%;
+  --favorite: 43 100% 66%;
+  --console: 191 90% 76%;
+  --console-command: 325 100% 82%;
+  --console-bg: 252 42% 8%;
+  --toast-error: 352 34% 16%;
+  --toast-error-foreground: 8 92% 82%;
+  --toast-error-border: 352 24% 26%;
+  --code-editor-bg: 255 28% 13%;
+  --font-sans: 'Nunito', 'Trebuchet MS', 'Segoe UI', sans-serif;
+  --scrollbar: 256 28% 24%;
+  --scrollbar-hover: 256 34% 32%;
+  --overlay: 258 40% 6%;
+}
+
+[data-theme='candy-dusk'] body {
+  background:
+    radial-gradient(circle at 20% 10%, hsl(325 100% 74% / 0.16), transparent 22%),
+    radial-gradient(circle at 85% 12%, hsl(191 90% 76% / 0.12), transparent 18%),
+    radial-gradient(circle at 50% 100%, hsl(43 100% 63% / 0.08), transparent 24%), hsl(258 38% 10%);
+}
+
+[data-theme='candy-dusk'] .bg-card {
+  background: linear-gradient(160deg, hsl(258 30% 16%), hsl(248 28% 18%));
+  box-shadow: inset 0 1px 0 hsl(302 50% 96% / 0.04);
+}
+
+[data-theme='candy-dusk'] .bg-popover {
+  background: linear-gradient(160deg, hsl(258 30% 17%), hsl(248 28% 19%));
+}
+
+[data-theme='candy-dusk'] .bg-msg-outgoing {
+  background: linear-gradient(135deg, hsl(307 34% 21%), hsl(325 28% 24%));
+  border-left: 2px solid hsl(325 100% 74% / 0.55);
+}
+
+[data-theme='candy-dusk'] .bg-msg-incoming {
+  background: linear-gradient(135deg, hsl(250 24% 18%), hsl(258 20% 20%));
+  border-left: 2px solid hsl(191 90% 76% / 0.38);
+}
+
+[data-theme='candy-dusk'] .bg-primary {
+  background: linear-gradient(135deg, hsl(325 100% 74%), hsl(289 84% 74%));
+}
+
+[data-theme='candy-dusk'] button {
+  border-radius: 999px;
+  transition:
+    transform 0.12s ease,
+    filter 0.2s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+[data-theme='candy-dusk'] button:hover {
+  filter: drop-shadow(0 0 10px hsl(325 100% 74% / 0.22))
+    drop-shadow(0 0 18px hsl(191 90% 76% / 0.08));
+}
+
+[data-theme='candy-dusk'] button:active {
+  transform: scale(0.98);
+}
+
+[data-theme='candy-dusk'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, hsl(325 48% 44%), hsl(256 46% 42%));
+}
+
+[data-theme='candy-dusk'] ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, hsl(325 66% 58%), hsl(191 58% 56%));
+}
+
+/* ── Paper Grove ("Field Notes") ──────────────────────────── */
+:root[data-theme='paper-grove'] {
+  --background: 41 43% 93%;
+  --foreground: 148 16% 18%;
+  --card: 43 52% 97%;
+  --card-foreground: 148 16% 18%;
+  --popover: 43 52% 98%;
+  --popover-foreground: 148 16% 18%;
+  --primary: 157 54% 40%;
+  --primary-foreground: 45 60% 98%;
+  --secondary: 42 26% 87%;
+  --secondary-foreground: 148 14% 26%;
+  --muted: 42 22% 89%;
+  --muted-foreground: 148 10% 44%;
+  --accent: 36 42% 83%;
+  --accent-foreground: 148 16% 18%;
+  --destructive: 12 76% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 38 22% 76%;
+  --input: 38 22% 76%;
+  --ring: 157 54% 40%;
+  --radius: 0.9rem;
+  --msg-outgoing: 151 32% 90%;
+  --msg-incoming: 40 30% 94%;
+  --status-connected: 157 54% 38%;
+  --status-disconnected: 148 8% 58%;
+  --warning: 39 92% 46%;
+  --warning-foreground: 39 100% 12%;
+  --success: 157 54% 34%;
+  --success-foreground: 45 60% 98%;
+  --info: 227 78% 64%;
+  --info-foreground: 228 40% 20%;
+  --region-override: 273 56% 44%;
+  --favorite: 43 92% 48%;
+  --console: 157 54% 34%;
+  --console-command: 224 48% 42%;
+  --console-bg: 45 24% 89%;
+  --toast-error: 8 52% 94%;
+  --toast-error-foreground: 9 58% 40%;
+  --toast-error-border: 10 34% 78%;
+  --code-editor-bg: 42 30% 90%;
+  --font-sans: 'Avenir Next', 'Segoe UI', sans-serif;
+  --scrollbar: 36 18% 68%;
+  --scrollbar-hover: 36 22% 58%;
+  --overlay: 148 20% 12%;
+}
+
+[data-theme='paper-grove'] body {
+  background:
+    linear-gradient(hsl(157 20% 50% / 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(157 20% 50% / 0.04) 1px, transparent 1px), hsl(41 43% 93%);
+  background-size:
+    32px 32px,
+    32px 32px,
+    auto;
+}
+
+[data-theme='paper-grove'] .bg-card {
+  background: linear-gradient(180deg, hsl(43 52% 98%), hsl(40 42% 95%));
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.8),
+    0 8px 22px hsl(148 18% 20% / 0.06);
+}
+
+[data-theme='paper-grove'] .bg-popover {
+  background: linear-gradient(180deg, hsl(43 52% 98%), hsl(40 38% 96%));
+}
+
+[data-theme='paper-grove'] .bg-msg-outgoing {
+  background: linear-gradient(135deg, hsl(151 34% 90%), hsl(157 30% 87%));
+  border-left: 2px solid hsl(157 54% 40% / 0.45);
+}
+
+[data-theme='paper-grove'] .bg-msg-incoming {
+  background: linear-gradient(135deg, hsl(40 30% 95%), hsl(38 26% 92%));
+  border-left: 2px solid hsl(227 78% 64% / 0.28);
+}
+
+[data-theme='paper-grove'] .bg-primary {
+  background: linear-gradient(135deg, hsl(157 54% 40%), hsl(180 42% 42%));
+}
+
+[data-theme='paper-grove'] button {
+  box-shadow: 0 1px 0 hsl(0 0% 100% / 0.7);
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.18s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+[data-theme='paper-grove'] button:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.8),
+    0 6px 14px hsl(148 20% 20% / 0.08);
+}
+
+[data-theme='paper-grove'] button:active {
+  transform: translateY(0);
+}
+
+[data-theme='paper-grove'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, hsl(157 26% 54%), hsl(227 26% 60%));
+}
+
+[data-theme='paper-grove'] ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, hsl(157 34% 46%), hsl(227 34% 52%));
+}
+
+/* ── Monochrome ("Workbench") ─────────────────────────────── */
+:root[data-theme='monochrome'] {
+  --background: 0 0% 98%;
+  --foreground: 0 0% 8%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 8%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 8%;
+  --primary: 0 0% 10%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 0 0% 96%;
+  --secondary-foreground: 0 0% 10%;
+  --muted: 0 0% 97%;
+  --muted-foreground: 0 0% 18%;
+  --accent: 0 0% 94%;
+  --accent-foreground: 0 0% 8%;
+  --destructive: 0 0% 18%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 72%;
+  --input: 0 0% 72%;
+  --ring: 0 0% 10%;
+  --radius: 0.2rem;
+  --msg-outgoing: 0 0% 92%;
+  --msg-incoming: 0 0% 98%;
+  --status-connected: 0 0% 12%;
+  --status-disconnected: 0 0% 24%;
+  --warning: 0 0% 22%;
+  --warning-foreground: 0 0% 98%;
+  --success: 0 0% 12%;
+  --success-foreground: 0 0% 98%;
+  --info: 0 0% 18%;
+  --info-foreground: 0 0% 98%;
+  --region-override: 0 0% 14%;
+  --favorite: 0 0% 10%;
+  --console: 0 0% 18%;
+  --console-command: 0 0% 8%;
+  --console-bg: 0 0% 96%;
+  --toast-error: 0 0% 96%;
+  --toast-error-foreground: 0 0% 12%;
+  --toast-error-border: 0 0% 70%;
+  --code-editor-bg: 0 0% 96%;
+  --font-sans: 'Inter', 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Cascadia Mono', 'SFMono-Regular', monospace;
+  --scrollbar: 0 0% 18%;
+  --scrollbar-hover: 0 0% 8%;
+  --overlay: 0 0% 6%;
+}
+
+[data-theme='monochrome'] body {
+  background: hsl(0 0% 98%);
+}
+
+[data-theme='monochrome'] .bg-card,
+[data-theme='monochrome'] .bg-popover {
+  background: hsl(0 0% 100%);
+}
+
+[data-theme='monochrome'] .bg-msg-outgoing {
+  background: hsl(0 0% 92%);
+  border-left: 2px solid hsl(0 0% 12% / 0.9);
+}
+
+[data-theme='monochrome'] .bg-msg-incoming {
+  background: hsl(0 0% 98%);
+  border-left: 2px solid hsl(0 0% 12% / 0.35);
+}
+
+[data-theme='monochrome'] .bg-primary {
+  background: hsl(0 0% 10%);
+}
+
+[data-theme='monochrome'] button {
+  border-radius: 0.2rem;
+  box-shadow: none;
+  filter: none;
+  transition:
+    background-color 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+[data-theme='monochrome'] button:hover {
+  transform: none;
+  box-shadow: none;
+  filter: none;
+}
+
+[data-theme='monochrome'] button:active {
+  transform: none;
+}
+
+[data-theme='monochrome'] ::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 18%);
+}
+
+[data-theme='monochrome'] ::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 8%);
 }

@@ -2,15 +2,15 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { ContactInfoPane } from '../components/ContactInfoPane';
-import type { Contact, ContactDetail } from '../types';
+import type { Contact, ContactAnalytics } from '../types';
 
-const { getContactDetail } = vi.hoisted(() => ({
-  getContactDetail: vi.fn(),
+const { getContactAnalytics } = vi.hoisted(() => ({
+  getContactAnalytics: vi.fn(),
 }));
 
 vi.mock('../api', () => ({
   api: {
-    getContactDetail,
+    getContactAnalytics,
   },
 }));
 
@@ -54,16 +54,34 @@ function createContact(overrides: Partial<Contact> = {}): Contact {
   };
 }
 
-function createDetail(contact: Contact): ContactDetail {
+function createAnalytics(
+  contact: Contact | null,
+  overrides: Partial<ContactAnalytics> = {}
+): ContactAnalytics {
   return {
+    lookup_type: contact ? 'contact' : 'name',
+    name: contact?.name ?? 'Mystery',
     contact,
+    name_first_seen_at: null,
     name_history: [],
     dm_message_count: 0,
     channel_message_count: 0,
+    includes_direct_messages: Boolean(contact),
     most_active_rooms: [],
     advert_paths: [],
     advert_frequency: null,
     nearest_repeaters: [],
+    hourly_activity: Array.from({ length: 24 }, (_, index) => ({
+      bucket_start: 1_700_000_000 + index * 3600,
+      last_24h_count: 0,
+      last_week_average: 0,
+      all_time_average: 0,
+    })),
+    weekly_activity: Array.from({ length: 26 }, (_, index) => ({
+      bucket_start: 1_700_000_000 + index * 604800,
+      message_count: 0,
+    })),
+    ...overrides,
   };
 }
 
@@ -74,20 +92,24 @@ const baseProps = {
   config: null,
   favorites: [],
   onToggleFavorite: () => {},
+  onSearchMessagesByKey: vi.fn(),
+  onSearchMessagesByName: vi.fn(),
 };
 
 describe('ContactInfoPane', () => {
   beforeEach(() => {
-    getContactDetail.mockReset();
+    getContactAnalytics.mockReset();
+    baseProps.onSearchMessagesByKey = vi.fn();
+    baseProps.onSearchMessagesByName = vi.fn();
   });
 
   it('shows hop width when contact has a stored path hash mode', async () => {
     const contact = createContact({ out_path_hash_mode: 1 });
-    getContactDetail.mockResolvedValue(createDetail(contact));
+    getContactAnalytics.mockResolvedValue(createAnalytics(contact));
 
     render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
 
-    await screen.findByText('Alice');
+    await screen.findByText(contact.public_key);
     await waitFor(() => {
       expect(screen.getByText('Hop Width')).toBeInTheDocument();
       expect(screen.getByText('2-byte IDs')).toBeInTheDocument();
@@ -96,7 +118,7 @@ describe('ContactInfoPane', () => {
 
   it('does not show hop width for flood-routed contacts', async () => {
     const contact = createContact({ last_path_len: -1, out_path_hash_mode: -1 });
-    getContactDetail.mockResolvedValue(createDetail(contact));
+    getContactAnalytics.mockResolvedValue(createAnalytics(contact));
 
     render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
 
@@ -115,7 +137,7 @@ describe('ContactInfoPane', () => {
       route_override_len: 2,
       route_override_hash_mode: 1,
     });
-    getContactDetail.mockResolvedValue(createDetail(contact));
+    getContactAnalytics.mockResolvedValue(createAnalytics(contact));
 
     render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
 
@@ -126,5 +148,103 @@ describe('ContactInfoPane', () => {
       expect(screen.getByText('Learned Route')).toBeInTheDocument();
       expect(screen.getByText('1 hop')).toBeInTheDocument();
     });
+  });
+
+  it('loads name-only channel stats and most active rooms', async () => {
+    getContactAnalytics.mockResolvedValue(
+      createAnalytics(null, {
+        lookup_type: 'name',
+        name: 'Mystery',
+        name_first_seen_at: 1_699_999_000,
+        channel_message_count: 4,
+        most_active_rooms: [
+          {
+            channel_key: 'ab'.repeat(16),
+            channel_name: '#ops',
+            message_count: 3,
+          },
+        ],
+        hourly_activity: Array.from({ length: 24 }, (_, index) => ({
+          bucket_start: 1_700_000_000 + index * 3600,
+          last_24h_count: index === 23 ? 2 : 0,
+          last_week_average: index === 23 ? 1.5 : 0,
+          all_time_average: index === 23 ? 1.2 : 0,
+        })),
+        weekly_activity: Array.from({ length: 26 }, (_, index) => ({
+          bucket_start: 1_700_000_000 + index * 604800,
+          message_count: index === 25 ? 4 : 0,
+        })),
+      })
+    );
+
+    render(<ContactInfoPane {...baseProps} contactKey="name:Mystery" fromChannel />);
+
+    await screen.findByText('Mystery');
+    await waitFor(() => {
+      expect(getContactAnalytics).toHaveBeenCalledWith({ name: 'Mystery' });
+      expect(screen.getByText('Messages')).toBeInTheDocument();
+      expect(screen.getByText('Channel Messages')).toBeInTheDocument();
+      expect(screen.getByText('4', { selector: 'p' })).toBeInTheDocument();
+      expect(screen.getByText('Name First In Use')).toBeInTheDocument();
+      expect(screen.getByText('Messages Per Hour')).toBeInTheDocument();
+      expect(screen.getByText('Messages Per Week')).toBeInTheDocument();
+      expect(screen.getByText('Most Active Rooms')).toBeInTheDocument();
+      expect(screen.getByText('#ops')).toBeInTheDocument();
+      expect(
+        screen.getByText(/Name-only analytics include channel messages only/i)
+      ).toBeInTheDocument();
+      expect(screen.getByText(/same sender name/i)).toBeInTheDocument();
+      expect(screen.getByText("Search user's messages by name")).toBeInTheDocument();
+    });
+  });
+
+  it('fires the name search callback from the name-only pane', async () => {
+    getContactAnalytics.mockResolvedValue(
+      createAnalytics(null, { lookup_type: 'name', name: 'Mystery' })
+    );
+
+    render(<ContactInfoPane {...baseProps} contactKey="name:Mystery" fromChannel />);
+
+    const button = await screen.findByRole('button', { name: "Search user's messages by name" });
+    button.click();
+
+    expect(baseProps.onSearchMessagesByName).toHaveBeenCalledWith('Mystery');
+  });
+
+  it('shows alias note in the channel attribution warning for keyed contacts', async () => {
+    const contact = createContact();
+    getContactAnalytics.mockResolvedValue(
+      createAnalytics(contact, {
+        name_history: [
+          { name: 'Alice', first_seen: 1000, last_seen: 2000 },
+          { name: 'AliceOld', first_seen: 900, last_seen: 999 },
+        ],
+      })
+    );
+
+    render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} fromChannel />);
+
+    await screen.findByText(contact.public_key);
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Also Known As' })).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /may include messages previously attributed under names shown in Also Known As/i
+        )
+      ).toBeInTheDocument();
+      expect(screen.getByText("Search user's messages by key")).toBeInTheDocument();
+    });
+  });
+
+  it('fires the key search callback from the keyed pane', async () => {
+    const contact = createContact();
+    getContactAnalytics.mockResolvedValue(createAnalytics(contact));
+
+    render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
+
+    const button = await screen.findByRole('button', { name: "Search user's messages by key" });
+    button.click();
+
+    expect(baseProps.onSearchMessagesByKey).toHaveBeenCalledWith(contact.public_key);
   });
 });

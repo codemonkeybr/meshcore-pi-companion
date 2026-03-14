@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { Dice5 } from 'lucide-react';
 import type { Contact, Conversation } from '../types';
 import { getContactDisplayName } from '../utils/pubkey';
 import {
@@ -168,34 +169,40 @@ export function NewMessageModal({
 
           <TabsContent value="existing" className="mt-4">
             <div className="max-h-[300px] overflow-y-auto rounded-md border">
-              {contacts.length === 0 ? (
+              {contacts.filter((contact) => contact.public_key.length === 64).length === 0 ? (
                 <div className="p-4 text-center text-muted-foreground">No contacts available</div>
               ) : (
-                contacts.map((contact) => (
-                  <div
-                    key={contact.public_key}
-                    className="cursor-pointer px-4 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        (e.currentTarget as HTMLElement).click();
-                      }
-                    }}
-                    onClick={() => {
-                      onSelectConversation({
-                        type: 'contact',
-                        id: contact.public_key,
-                        name: getContactDisplayName(contact.name, contact.public_key),
-                      });
-                      resetForm();
-                      onClose();
-                    }}
-                  >
-                    {getContactDisplayName(contact.name, contact.public_key)}
-                  </div>
-                ))
+                contacts
+                  .filter((contact) => contact.public_key.length === 64)
+                  .map((contact) => (
+                    <div
+                      key={contact.public_key}
+                      className="cursor-pointer px-4 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          (e.currentTarget as HTMLElement).click();
+                        }
+                      }}
+                      onClick={() => {
+                        onSelectConversation({
+                          type: 'contact',
+                          id: contact.public_key,
+                          name: getContactDisplayName(
+                            contact.name,
+                            contact.public_key,
+                            contact.last_advert
+                          ),
+                        });
+                        resetForm();
+                        onClose();
+                      }}
+                    >
+                      {getContactDisplayName(contact.name, contact.public_key, contact.last_advert)}
+                    </div>
+                  ))
               )}
             </div>
           </TabsContent>
@@ -256,7 +263,7 @@ export function NewMessageModal({
                   title="Generate random key"
                   aria-label="Generate random key"
                 >
-                  <span aria-hidden="true">🎲</span>
+                  <Dice5 className="h-4 w-4" aria-hidden="true" />
                 </Button>
               </div>
             </div>

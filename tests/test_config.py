@@ -80,3 +80,41 @@ class TestBLEPinRequirement:
         s = Settings(ble_address="AA:BB:CC:DD:EE:FF", ble_pin="123456")
         assert s.ble_address == "AA:BB:CC:DD:EE:FF"
         assert s.ble_pin == "123456"
+
+
+class TestBasicAuthConfiguration:
+    """Ensure basic auth credentials are configured as a pair."""
+
+    def test_basic_auth_disabled_by_default(self):
+        s = Settings(serial_port="", tcp_host="", ble_address="")
+        assert s.basic_auth_enabled is False
+
+    def test_basic_auth_enabled_when_both_credentials_are_set(self):
+        s = Settings(
+            serial_port="",
+            tcp_host="",
+            ble_address="",
+            basic_auth_username="mesh",
+            basic_auth_password="secret",
+        )
+        assert s.basic_auth_enabled is True
+
+    def test_basic_auth_requires_password_with_username(self):
+        with pytest.raises(ValidationError, match="MESHCORE_BASIC_AUTH_USERNAME"):
+            Settings(
+                serial_port="",
+                tcp_host="",
+                ble_address="",
+                basic_auth_username="mesh",
+                basic_auth_password="",
+            )
+
+    def test_basic_auth_requires_username_with_password(self):
+        with pytest.raises(ValidationError, match="MESHCORE_BASIC_AUTH_USERNAME"):
+            Settings(
+                serial_port="",
+                tcp_host="",
+                ble_address="",
+                basic_auth_username="",
+                basic_auth_password="secret",
+            )

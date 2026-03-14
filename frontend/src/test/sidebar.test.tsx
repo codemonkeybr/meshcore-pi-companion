@@ -41,6 +41,7 @@ function renderSidebar(overrides?: {
   favorites?: Favorite[];
   lastMessageTimes?: ConversationTimes;
   channels?: Channel[];
+  isConversationNotificationsEnabled?: (type: 'channel' | 'contact', id: string) => boolean;
 }) {
   const aliceName = 'Alice';
   const publicChannel = makeChannel('AA'.repeat(16), 'Public');
@@ -76,6 +77,7 @@ function renderSidebar(overrides?: {
       favorites={favorites}
       sortOrder="recent"
       onSortOrderChange={vi.fn()}
+      isConversationNotificationsEnabled={overrides?.isConversationNotificationsEnabled}
     />
   );
 
@@ -148,7 +150,7 @@ describe('Sidebar section summaries', () => {
     expect(screen.queryByText(opsChannel.name)).not.toBeInTheDocument();
     expect(screen.queryByText(aliceName)).not.toBeInTheDocument();
 
-    const search = screen.getByPlaceholderText('Search...');
+    const search = screen.getByLabelText('Search conversations');
     fireEvent.change(search, { target: { value: 'alice' } });
 
     await waitFor(() => {
@@ -217,5 +219,38 @@ describe('Sidebar section summaries', () => {
 
     const selectedIds = onSelectConversation.mock.calls.map(([conv]) => conv.id);
     expect(new Set(selectedIds)).toEqual(new Set([channelA.key, channelB.key]));
+  });
+
+  it('shows a notification bell for conversations with notifications enabled', () => {
+    const { aliceName } = renderSidebar({
+      unreadCounts: {},
+      isConversationNotificationsEnabled: (type, id) =>
+        (type === 'contact' && id === '11'.repeat(32)) ||
+        (type === 'channel' && id === 'BB'.repeat(16)),
+    });
+
+    const aliceRow = screen.getByText(aliceName).closest('div');
+    const flightRow = screen.getByText('#flight').closest('div');
+    if (!aliceRow || !flightRow) throw new Error('Missing sidebar rows');
+
+    expect(within(aliceRow).getByLabelText('Notifications enabled')).toBeInTheDocument();
+    expect(within(flightRow).getByLabelText('Notifications enabled')).toBeInTheDocument();
+  });
+
+  it('keeps the notification bell to the left of the unread pill when both are present', () => {
+    const { aliceName } = renderSidebar({
+      unreadCounts: {
+        [getStateKey('contact', '11'.repeat(32))]: 3,
+      },
+      isConversationNotificationsEnabled: (type, id) =>
+        type === 'contact' && id === '11'.repeat(32),
+    });
+
+    const aliceRow = screen.getByText(aliceName).closest('div');
+    if (!aliceRow) throw new Error('Missing Alice row');
+
+    const bell = within(aliceRow).getByLabelText('Notifications enabled');
+    const unread = within(aliceRow).getByText('3');
+    expect(bell.compareDocumentPosition(unread) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

@@ -31,6 +31,16 @@ def _register_module_types() -> None:
     _MODULE_TYPES["webhook"] = WebhookModule
     _MODULE_TYPES["apprise"] = AppriseModule
 
+    try:
+        from app.fanout.sqs import SqsModule
+
+        _MODULE_TYPES["sqs"] = SqsModule
+    except ModuleNotFoundError as e:
+        if "boto3" in str(e).lower() or "botocore" in str(e).lower():
+            logger.info("SQS fanout module not registered: optional dependency boto3 not installed")
+        else:
+            raise
+
 
 def _matches_filter(filter_value: Any, key: str) -> bool:
     """Check a single filter value (channels or contacts) against a key.
@@ -107,7 +117,15 @@ class FanoutManager:
 
         cls = _MODULE_TYPES.get(config_type)
         if cls is None:
-            logger.warning("Unknown fanout type %r for config %s, skipping", config_type, config_id)
+            if config_type == "sqs":
+                logger.warning(
+                    "SQS fanout config %s skipped: boto3 not installed (pip install boto3)",
+                    config_id,
+                )
+            else:
+                logger.warning(
+                    "Unknown fanout type %r for config %s, skipping", config_type, config_id
+                )
             return
 
         try:

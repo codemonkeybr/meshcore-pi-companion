@@ -33,7 +33,7 @@ export interface PendingPacket {
   expiresAt: number;
 }
 
-interface ParsedPacket {
+export interface ParsedPacket {
   payloadType: number;
   messageHash: string | null;
   pathBytes: string[];
@@ -109,6 +109,12 @@ export const PACKET_LEGEND_ITEMS = [
   { label: 'RS', color: COLORS.particleRS, description: 'Response' },
   { label: '?', color: COLORS.particleUnknown, description: 'Other' },
 ] as const;
+
+export interface PathStep {
+  nodeId: string | null;
+  markHiddenLinkWhenOmitted?: boolean;
+  hiddenLabel?: string | null;
+}
 
 export function normalizeHopToken(hop: string | null | undefined): string | null {
   const normalized = hop?.trim().toLowerCase() ?? '';
@@ -234,12 +240,57 @@ export function getLinkId<
   };
 }
 
+export function buildLinkKey(sourceId: string, targetId: string): string {
+  return [sourceId, targetId].sort().join('->');
+}
+
 export function getNodeType(contact: Contact | null | undefined): NodeType {
   return contact?.type === CONTACT_TYPE_REPEATER ? 'repeater' : 'client';
 }
 
 export function dedupeConsecutive<T>(arr: T[]): T[] {
   return arr.filter((item, i) => i === 0 || item !== arr[i - 1]);
+}
+
+export function compactPathSteps(steps: PathStep[]): {
+  nodes: string[];
+  dashedLinkDetails: Map<string, string[]>;
+} {
+  const nodes: string[] = [];
+  const dashedLinkDetails = new Map<string, string[]>();
+  let pendingHiddenLink = false;
+  let pendingHiddenLabels: string[] = [];
+
+  for (const step of steps) {
+    if (step.nodeId) {
+      const previousNodeId = nodes.length > 0 ? nodes[nodes.length - 1] : null;
+      if (previousNodeId && pendingHiddenLink && previousNodeId !== step.nodeId) {
+        const key = buildLinkKey(previousNodeId, step.nodeId);
+        const existing = dashedLinkDetails.get(key) ?? [];
+        for (const label of pendingHiddenLabels) {
+          if (!existing.includes(label)) {
+            existing.push(label);
+          }
+        }
+        dashedLinkDetails.set(key, existing);
+      }
+      if (previousNodeId !== step.nodeId) {
+        nodes.push(step.nodeId);
+      }
+      pendingHiddenLink = false;
+      pendingHiddenLabels = [];
+      continue;
+    }
+
+    if (step.markHiddenLinkWhenOmitted && nodes.length > 0) {
+      pendingHiddenLink = true;
+      if (step.hiddenLabel && !pendingHiddenLabels.includes(step.hiddenLabel)) {
+        pendingHiddenLabels.push(step.hiddenLabel);
+      }
+    }
+  }
+
+  return { nodes, dashedLinkDetails };
 }
 
 /**

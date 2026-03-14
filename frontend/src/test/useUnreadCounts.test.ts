@@ -80,6 +80,7 @@ describe('useUnreadCounts', () => {
       counts: {},
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
     mocks.markChannelRead.mockResolvedValue({ status: 'ok', key: '' });
     mocks.markContactRead.mockResolvedValue({ status: 'ok', public_key: '' });
@@ -110,6 +111,7 @@ describe('useUnreadCounts', () => {
       counts: { [`channel-${CHANNEL_KEY}`]: 5 },
       mentions: { [`channel-${CHANNEL_KEY}`]: true },
       last_message_times: {},
+      last_read_ats: { [`channel-${CHANNEL_KEY}`]: 1234 },
     });
 
     const activeConv: Conversation = { type: 'channel', id: CHANNEL_KEY, name: 'Test' };
@@ -123,6 +125,7 @@ describe('useUnreadCounts', () => {
     // The active conversation should NOT have unreads
     expect(result.current.unreadCounts[`channel-${CHANNEL_KEY}`]).toBeUndefined();
     expect(result.current.mentions[`channel-${CHANNEL_KEY}`]).toBeUndefined();
+    expect(result.current.unreadLastReadAts[`channel-${CHANNEL_KEY}`]).toBe(1234);
   });
 
   it('filters out active contact conversation from server unreads', async () => {
@@ -133,6 +136,7 @@ describe('useUnreadCounts', () => {
       counts: { [`contact-${CONTACT_KEY}`]: 3 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: { [`contact-${CONTACT_KEY}`]: 2345 },
     });
 
     const activeConv: Conversation = { type: 'contact', id: CONTACT_KEY, name: 'Test' };
@@ -143,6 +147,7 @@ describe('useUnreadCounts', () => {
     });
 
     expect(result.current.unreadCounts[`contact-${CONTACT_KEY}`]).toBeUndefined();
+    expect(result.current.unreadLastReadAts[`contact-${CONTACT_KEY}`]).toBe(2345);
   });
 
   it('preserves unreads for non-active conversations', async () => {
@@ -157,6 +162,7 @@ describe('useUnreadCounts', () => {
       },
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     const activeConv: Conversation = { type: 'channel', id: CHANNEL_KEY, name: 'Active' };
@@ -205,6 +211,7 @@ describe('useUnreadCounts', () => {
       counts: {},
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     const { result } = renderWith({ channels, activeConversation: activeConv });
@@ -218,6 +225,7 @@ describe('useUnreadCounts', () => {
       counts: { [`channel-${CHANNEL_KEY}`]: 7 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: { [`channel-${CHANNEL_KEY}`]: 3456 },
     });
 
     await act(async () => {
@@ -226,6 +234,7 @@ describe('useUnreadCounts', () => {
 
     // Should still be filtered out
     expect(result.current.unreadCounts[`channel-${CHANNEL_KEY}`]).toBeUndefined();
+    expect(result.current.unreadLastReadAts[`channel-${CHANNEL_KEY}`]).toBe(3456);
   });
 
   it('re-fetches when channels change while contacts remain empty', async () => {
@@ -243,6 +252,7 @@ describe('useUnreadCounts', () => {
       counts: { [`channel-${addedChannelKey}`]: 2 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     rerender({
@@ -271,6 +281,7 @@ describe('useUnreadCounts', () => {
       counts: { [`contact-${addedContactKey}`]: 1 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     rerender({
@@ -290,6 +301,7 @@ describe('useUnreadCounts', () => {
       counts: { [`channel-${CHANNEL_KEY}`]: 5 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     const { result } = renderWith({});
@@ -307,6 +319,7 @@ describe('useUnreadCounts', () => {
       counts: { [`channel-${CHANNEL_KEY}`]: 5 },
       mentions: {},
       last_message_times: {},
+      last_read_ats: {},
     });
 
     const activeConv: Conversation = { type: 'raw', id: 'raw', name: 'Raw Packet Feed' };

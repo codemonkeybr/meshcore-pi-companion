@@ -5,6 +5,64 @@ from pydantic import BaseModel, Field
 from app.path_utils import normalize_contact_route
 
 
+class ContactUpsert(BaseModel):
+    """Typed write contract for contacts persisted to SQLite."""
+
+    public_key: str = Field(description="Public key (64-char hex)")
+    name: str | None = None
+    type: int = 0
+    flags: int = 0
+    last_path: str | None = None
+    last_path_len: int = -1
+    out_path_hash_mode: int | None = None
+    route_override_path: str | None = None
+    route_override_len: int | None = None
+    route_override_hash_mode: int | None = None
+    last_advert: int | None = None
+    lat: float | None = None
+    lon: float | None = None
+    last_seen: int | None = None
+    on_radio: bool | None = None
+    last_contacted: int | None = None
+    first_seen: int | None = None
+
+    @classmethod
+    def from_contact(cls, contact: "Contact", **changes) -> "ContactUpsert":
+        return cls.model_validate(
+            {
+                **contact.model_dump(exclude={"last_read_at"}),
+                **changes,
+            }
+        )
+
+    @classmethod
+    def from_radio_dict(
+        cls, public_key: str, radio_data: dict, on_radio: bool = False
+    ) -> "ContactUpsert":
+        """Convert radio contact data to the contact-row write shape."""
+        last_path, last_path_len, out_path_hash_mode = normalize_contact_route(
+            radio_data.get("out_path"),
+            radio_data.get("out_path_len", -1),
+            radio_data.get(
+                "out_path_hash_mode",
+                -1 if radio_data.get("out_path_len", -1) == -1 else 0,
+            ),
+        )
+        return cls(
+            public_key=public_key,
+            name=radio_data.get("adv_name"),
+            type=radio_data.get("type", 0),
+            flags=radio_data.get("flags", 0),
+            last_path=last_path,
+            last_path_len=last_path_len,
+            out_path_hash_mode=out_path_hash_mode,
+            lat=radio_data.get("adv_lat"),
+            lon=radio_data.get("adv_lon"),
+            last_advert=radio_data.get("last_advert"),
+            on_radio=on_radio,
+        )
+
+
 class Contact(BaseModel):
     public_key: str = Field(description="Public key (64-char hex)")
     name: str | None = None
@@ -61,34 +119,18 @@ class Contact(BaseModel):
             "last_advert": self.last_advert if self.last_advert is not None else 0,
         }
 
+    def to_upsert(self, **changes) -> ContactUpsert:
+        """Convert the stored contact to the repository's write contract."""
+        return ContactUpsert.from_contact(self, **changes)
+
     @staticmethod
     def from_radio_dict(public_key: str, radio_data: dict, on_radio: bool = False) -> dict:
-        """Convert radio contact data to database format dict.
-
-        This is the inverse of to_radio_dict(), used when syncing contacts
-        from radio to database.
-        """
-        last_path, last_path_len, out_path_hash_mode = normalize_contact_route(
-            radio_data.get("out_path"),
-            radio_data.get("out_path_len", -1),
-            radio_data.get(
-                "out_path_hash_mode",
-                -1 if radio_data.get("out_path_len", -1) == -1 else 0,
-            ),
-        )
-        return {
-            "public_key": public_key,
-            "name": radio_data.get("adv_name"),
-            "type": radio_data.get("type", 0),
-            "flags": radio_data.get("flags", 0),
-            "last_path": last_path,
-            "last_path_len": last_path_len,
-            "out_path_hash_mode": out_path_hash_mode,
-            "lat": radio_data.get("adv_lat"),
-            "lon": radio_data.get("adv_lon"),
-            "last_advert": radio_data.get("last_advert"),
-            "on_radio": on_radio,
-        }
+        """Backward-compatible dict wrapper over ContactUpsert.from_radio_dict()."""
+        return ContactUpsert.from_radio_dict(
+            public_key,
+            radio_data,
+            on_radio=on_radio,
+        ).model_dump()
 
 
 class CreateContactRequest(BaseModel):
@@ -181,6 +223,52 @@ class ContactDetail(BaseModel):
         description="Advert observations per hour (includes multi-path arrivals of same advert)",
     )
     nearest_repeaters: list[NearestRepeater] = Field(default_factory=list)
+
+
+class NameOnlyContactDetail(BaseModel):
+    """Channel activity summary for a sender name that is not tied to a known key."""
+
+    name: str
+    channel_message_count: int = 0
+    most_active_rooms: list[ContactActiveRoom] = Field(default_factory=list)
+
+
+class ContactAnalyticsHourlyBucket(BaseModel):
+    """A single hourly activity bucket for contact analytics."""
+
+    bucket_start: int = Field(description="Unix timestamp for the start of the hour bucket")
+    last_24h_count: int = 0
+    last_week_average: float = 0
+    all_time_average: float = 0
+
+
+class ContactAnalyticsWeeklyBucket(BaseModel):
+    """A single weekly activity bucket for contact analytics."""
+
+    bucket_start: int = Field(description="Unix timestamp for the start of the 7-day bucket")
+    message_count: int = 0
+
+
+class ContactAnalytics(BaseModel):
+    """Unified contact analytics payload for keyed and name-only lookups."""
+
+    lookup_type: Literal["contact", "name"]
+    name: str
+    contact: Contact | None = None
+    name_first_seen_at: int | None = None
+    name_history: list[ContactNameHistory] = Field(default_factory=list)
+    dm_message_count: int = 0
+    channel_message_count: int = 0
+    includes_direct_messages: bool = False
+    most_active_rooms: list[ContactActiveRoom] = Field(default_factory=list)
+    advert_paths: list[ContactAdvertPath] = Field(default_factory=list)
+    advert_frequency: float | None = Field(
+        default=None,
+        description="Advert observations per hour (includes multi-path arrivals of same advert)",
+    )
+    nearest_repeaters: list[NearestRepeater] = Field(default_factory=list)
+    hourly_activity: list[ContactAnalyticsHourlyBucket] = Field(default_factory=list)
+    weekly_activity: list[ContactAnalyticsWeeklyBucket] = Field(default_factory=list)
 
 
 class Channel(BaseModel):
@@ -340,8 +428,17 @@ class RepeaterStatusResponse(BaseModel):
     full_events: int = Field(description="Full event queue count")
 
 
+class RepeaterNodeInfoResponse(BaseModel):
+    """Identity/location info from a repeater (small CLI batch)."""
+
+    name: str | None = Field(default=None, description="Repeater name")
+    lat: str | None = Field(default=None, description="Latitude")
+    lon: str | None = Field(default=None, description="Longitude")
+    clock_utc: str | None = Field(default=None, description="Repeater clock in UTC")
+
+
 class RepeaterRadioSettingsResponse(BaseModel):
-    """Radio settings from a repeater (batch CLI get commands)."""
+    """Radio settings from a repeater (radio/config CLI batch)."""
 
     firmware_version: str | None = Field(default=None, description="Firmware version string")
     radio: str | None = Field(default=None, description="Radio settings (freq,bw,sf,cr)")
@@ -349,10 +446,6 @@ class RepeaterRadioSettingsResponse(BaseModel):
     airtime_factor: str | None = Field(default=None, description="Airtime factor")
     repeat_enabled: str | None = Field(default=None, description="Repeat mode enabled")
     flood_max: str | None = Field(default=None, description="Max flood hops")
-    name: str | None = Field(default=None, description="Repeater name")
-    lat: str | None = Field(default=None, description="Latitude")
-    lon: str | None = Field(default=None, description="Longitude")
-    clock_utc: str | None = Field(default=None, description="Repeater clock in UTC")
 
 
 class RepeaterAdvertIntervalsResponse(BaseModel):
@@ -466,6 +559,9 @@ class UnreadCounts(BaseModel):
     last_message_times: dict[str, int] = Field(
         default_factory=dict, description="Map of stateKey -> last message timestamp"
     )
+    last_read_ats: dict[str, int | None] = Field(
+        default_factory=dict, description="Map of stateKey -> server-side last_read_at boundary"
+    )
 
 
 class AppSettings(BaseModel):
@@ -474,8 +570,8 @@ class AppSettings(BaseModel):
     max_radio_contacts: int = Field(
         default=200,
         description=(
-            "Maximum contacts to keep on radio for DM ACKs "
-            "(favorite contacts first, then recent non-repeaters)"
+            "Configured radio contact capacity used for maintenance thresholds; "
+            "favorites reload first, then background fill targets about 80% of this value"
         ),
     )
     favorites: list[Favorite] = Field(
@@ -523,7 +619,7 @@ class FanoutConfig(BaseModel):
     """Configuration for a single fanout integration."""
 
     id: str
-    type: str  # 'mqtt_private' | 'mqtt_community' | 'bot' | 'webhook' | 'apprise'
+    type: str  # 'mqtt_private' | 'mqtt_community' | 'bot' | 'webhook' | 'apprise' | 'sqs'
     name: str
     enabled: bool
     config: dict

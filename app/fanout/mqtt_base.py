@@ -25,7 +25,7 @@ _BACKOFF_MIN = 5
 
 def _broadcast_health() -> None:
     """Push updated health (including MQTT status) to all WS clients."""
-    from app.radio import radio_manager
+    from app.services.radio_runtime import radio_runtime as radio_manager
     from app.websocket import broadcast_health
 
     broadcast_health(radio_manager.is_connected, radio_manager.connection_info)
@@ -224,12 +224,16 @@ class BaseMqttPublisher(ABC):
                 title, detail = self._on_error()
                 broadcast_error(title, detail)
                 _broadcast_health()
+                # Avoid full traceback for expected connection failures (auth, refused, etc.)
+                exc_info = not isinstance(
+                    e, getattr(aiomqtt.exceptions, "MqttConnectError", type(None))
+                )
                 logger.warning(
                     "%s connection error: %s (reconnecting in %ds)",
                     self._log_prefix,
                     e,
                     backoff,
-                    exc_info=True,
+                    exc_info=exc_info,
                 )
 
                 try:

@@ -35,11 +35,6 @@ npm run lint:fix
 npm run format
 echo -e "${GREEN}[frontend lint]${NC} Passed!"
 
-echo -e "${BLUE}[licenses]${NC} Regenerating LICENSES.md (always run)..."
-cd "$SCRIPT_DIR"
-bash scripts/collect_licenses.sh LICENSES.md
-echo -e "${GREEN}[licenses]${NC} LICENSES.md updated"
-
 echo -e "${GREEN}=== Phase 1 complete ===${NC}"
 echo
 

@@ -1,7 +1,10 @@
 import { StrictMode, createElement, type ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useRepeaterDashboard } from '../hooks/useRepeaterDashboard';
+import {
+  resetRepeaterDashboardCacheForTests,
+  useRepeaterDashboard,
+} from '../hooks/useRepeaterDashboard';
 import type { Conversation } from '../types';
 
 // Mock the api module
@@ -9,6 +12,7 @@ vi.mock('../api', () => ({
   api: {
     repeaterLogin: vi.fn(),
     repeaterStatus: vi.fn(),
+    repeaterNodeInfo: vi.fn(),
     repeaterNeighbors: vi.fn(),
     repeaterAcl: vi.fn(),
     repeaterRadioSettings: vi.fn(),
@@ -43,6 +47,7 @@ const repeaterConversation: Conversation = {
 describe('useRepeaterDashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetRepeaterDashboardCacheForTests();
   });
 
   it('starts with logged out state', () => {
@@ -123,6 +128,7 @@ describe('useRepeaterDashboard', () => {
     expect(result.current.paneData.status).toEqual(statusData);
     expect(result.current.paneStates.status.loading).toBe(false);
     expect(result.current.paneStates.status.error).toBe(null);
+    expect(result.current.paneStates.status.fetched_at).toEqual(expect.any(Number));
   });
 
   it('refreshPane still issues requests under StrictMode remount probing', async () => {
@@ -211,7 +217,23 @@ describe('useRepeaterDashboard', () => {
     expect(result.current.consoleLoading).toBe(false);
   });
 
-  it('sendAdvert sends "advert" command', async () => {
+  it('sendZeroHopAdvert sends "advert.zerohop" command', async () => {
+    mockApi.sendRepeaterCommand.mockResolvedValueOnce({
+      command: 'advert.zerohop',
+      response: 'ok',
+      sender_timestamp: 1000,
+    });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.sendZeroHopAdvert();
+    });
+
+    expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'advert.zerohop');
+  });
+
+  it('sendFloodAdvert sends "advert" command', async () => {
     mockApi.sendRepeaterCommand.mockResolvedValueOnce({
       command: 'advert',
       response: 'ok',
@@ -221,7 +243,7 @@ describe('useRepeaterDashboard', () => {
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
     await act(async () => {
-      await result.current.sendAdvert();
+      await result.current.sendFloodAdvert();
     });
 
     expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'advert');
@@ -243,12 +265,10 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'reboot');
   });
 
-  it('syncClock sends "clock <epoch>" command', async () => {
-    const fakeNow = 1700000000000;
-    vi.spyOn(Date, 'now').mockReturnValue(fakeNow);
-
+  it('syncClock sends "time <epoch>" command', async () => {
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
     mockApi.sendRepeaterCommand.mockResolvedValueOnce({
-      command: 'clock 1700000000',
+      command: 'time 1700000000',
       response: 'ok',
       sender_timestamp: 1000,
     });
@@ -259,15 +279,18 @@ describe('useRepeaterDashboard', () => {
       await result.current.syncClock();
     });
 
-    expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'clock 1700000000');
-
-    vi.restoreAllMocks();
+    expect(mockApi.sendRepeaterCommand).toHaveBeenCalledWith(REPEATER_KEY, 'time 1700000000');
+    dateNowSpy.mockRestore();
   });
 
   it('loadAll calls refreshPane for all panes serially', async () => {
     mockApi.repeaterStatus.mockResolvedValueOnce({ battery_volts: 4.0 });
-    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
-    mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
+    mockApi.repeaterNodeInfo.mockResolvedValueOnce({
+      name: null,
+      lat: null,
+      lon: null,
+      clock_utc: null,
+    });
     mockApi.repeaterRadioSettings.mockResolvedValueOnce({
       firmware_version: 'v1.0',
       radio: null,
@@ -275,11 +298,9 @@ describe('useRepeaterDashboard', () => {
       airtime_factor: null,
       repeat_enabled: null,
       flood_max: null,
-      name: null,
-      lat: null,
-      lon: null,
-      clock_utc: null,
     });
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+    mockApi.repeaterAcl.mockResolvedValueOnce({ acl: [] });
     mockApi.repeaterAdvertIntervals.mockResolvedValueOnce({
       advert_interval: null,
       flood_advert_interval: null,
@@ -297,11 +318,93 @@ describe('useRepeaterDashboard', () => {
     });
 
     expect(mockApi.repeaterStatus).toHaveBeenCalledTimes(1);
+    expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterAcl).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterRadioSettings).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterAdvertIntervals).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterOwnerInfo).toHaveBeenCalledTimes(1);
     expect(mockApi.repeaterLppTelemetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshing neighbors fetches node info first', async () => {
+    mockApi.repeaterNodeInfo.mockResolvedValueOnce({
+      name: 'Repeater',
+      lat: '-31.9523',
+      lon: '115.8613',
+      clock_utc: null,
+    });
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.refreshPane('neighbors');
+    });
+
+    expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(1);
+    expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(1);
+    expect(mockApi.repeaterNodeInfo.mock.invocationCallOrder[0]).toBeLessThan(
+      mockApi.repeaterNeighbors.mock.invocationCallOrder[0]
+    );
+    expect(result.current.paneData.nodeInfo?.lat).toBe('-31.9523');
+    expect(result.current.paneData.neighbors).toEqual({ neighbors: [] });
+  });
+
+  it('refreshing neighbors reuses already-fetched node info', async () => {
+    mockApi.repeaterNodeInfo.mockResolvedValueOnce({
+      name: 'Repeater',
+      lat: '-31.9523',
+      lon: '115.8613',
+      clock_utc: null,
+    });
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.refreshPane('neighbors');
+    });
+    await act(async () => {
+      await result.current.refreshPane('neighbors');
+    });
+
+    expect(mockApi.repeaterNodeInfo).toHaveBeenCalledTimes(1);
+    expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(2);
+  });
+
+  it('restores dashboard state when navigating away and back to the same repeater', async () => {
+    const statusData = { battery_volts: 4.2 };
+    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok' });
+    mockApi.repeaterStatus.mockResolvedValueOnce(statusData);
+    mockApi.sendRepeaterCommand.mockResolvedValueOnce({
+      command: 'ver',
+      response: 'v2.1.0',
+      sender_timestamp: 1000,
+    });
+
+    const firstMount = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await firstMount.result.current.login('secret');
+      await firstMount.result.current.refreshPane('status');
+      await firstMount.result.current.sendConsoleCommand('ver');
+    });
+
+    expect(firstMount.result.current.loggedIn).toBe(true);
+    expect(firstMount.result.current.paneData.status).toEqual(statusData);
+    expect(firstMount.result.current.consoleHistory).toHaveLength(2);
+
+    firstMount.unmount();
+
+    const secondMount = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    expect(secondMount.result.current.loggedIn).toBe(true);
+    expect(secondMount.result.current.loginError).toBe(null);
+    expect(secondMount.result.current.paneData.status).toEqual(statusData);
+    expect(secondMount.result.current.paneStates.status.loading).toBe(false);
+    expect(secondMount.result.current.consoleHistory).toHaveLength(2);
+    expect(secondMount.result.current.consoleHistory[1].response).toBe('v2.1.0');
   });
 });

@@ -1,17 +1,37 @@
 import asyncio
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from meshcore import EventType
 from pydantic import BaseModel, Field
 
 from app.dependencies import require_connected
-from app.radio import radio_manager
 from app.radio_sync import send_advertisement as do_send_advertisement
 from app.radio_sync import sync_radio_time
+from app.services.radio_commands import (
+    KeystoreRefreshError,
+    PathHashModeUnsupportedError,
+    RadioCommandRejectedError,
+    apply_radio_config_update,
+    import_private_key_and_refresh_keystore,
+)
+from app.services.radio_runtime import radio_runtime as radio_manager
+from app.websocket import broadcast_health
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/radio", tags=["radio"])
+
+AdvertLocationSource = Literal["off", "current"]
+
+
+async def _prepare_connected(*, broadcast_on_success: bool) -> bool:
+    return await radio_manager.prepare_connected(broadcast_on_success=broadcast_on_success)
+
+
+async def _reconnect_and_prepare(*, broadcast_on_success: bool) -> bool:
+    return await radio_manager.reconnect_and_prepare(
+        broadcast_on_success=broadcast_on_success,
+    )
 
 
 class RadioSettings(BaseModel):
@@ -35,6 +55,10 @@ class RadioConfigResponse(BaseModel):
     path_hash_mode_supported: bool = Field(
         default=False, description="Whether firmware supports path hash mode setting"
     )
+    advert_location_source: AdvertLocationSource = Field(
+        default="current",
+        description="Whether adverts include the node's current location state",
+    )
 
 
 class RadioConfigUpdate(BaseModel):
@@ -48,6 +72,10 @@ class RadioConfigUpdate(BaseModel):
         ge=0,
         le=2,
         description="Path hash mode (0=1-byte, 1=2-byte, 2=3-byte)",
+    )
+    advert_location_source: AdvertLocationSource | None = Field(
+        default=None,
+        description="Whether adverts include the node's current location state",
     )
 
 
@@ -64,11 +92,18 @@ async def get_radio_config() -> RadioConfigResponse:
     if not info:
         raise HTTPException(status_code=503, detail="Radio info not available")
 
+    adv_loc_policy = info.get("adv_loc_policy", 1)
+    advert_location_source: AdvertLocationSource = "off" if adv_loc_policy == 0 else "current"
+
+    # Backend (e.g. SpiBackend) may use "lat"/"lon"; MeshCore uses "adv_lat"/"adv_lon"
+    lat = info.get("adv_lat", info.get("lat", 0.0))
+    lon = info.get("adv_lon", info.get("lon", 0.0))
+
     return RadioConfigResponse(
         public_key=info.get("public_key", ""),
         name=info.get("name", ""),
-        lat=info.get("adv_lat", 0.0),
-        lon=info.get("adv_lon", 0.0),
+        lat=lat,
+        lon=lon,
         tx_power=info.get("tx_power", 0),
         max_tx_power=info.get("max_tx_power", 0),
         radio=RadioSettings(
@@ -79,66 +114,34 @@ async def get_radio_config() -> RadioConfigResponse:
         ),
         path_hash_mode=radio_manager.path_hash_mode,
         path_hash_mode_supported=radio_manager.path_hash_mode_supported,
+        advert_location_source=advert_location_source,
     )
 
 
 @router.patch("/config", response_model=RadioConfigResponse)
+def _meshcore_from_backend(be):
+    """Return the underlying MeshCore for command services; ClientBackend has _mc, SpiBackend is passed through."""
+    return getattr(be, "_mc", be)
+
+
 async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
     """Update radio configuration. Only provided fields will be updated."""
     require_connected()
 
-    async with radio_manager.radio_operation("update_radio_config") as mc:
-        if update.name is not None:
-            logger.info("Setting radio name to %s", update.name)
-            await mc.set_name(update.name)
-
-        if update.lat is not None or update.lon is not None:
-            current_info = mc.self_info or {}
-            lat = update.lat if update.lat is not None else current_info.get("adv_lat", 0.0)
-            lon = update.lon if update.lon is not None else current_info.get("adv_lon", 0.0)
-            logger.info("Setting radio coordinates to %f, %f", lat, lon)
-            await mc.set_coords(lat=lat, lon=lon)
-
-        if update.tx_power is not None:
-            logger.info("Setting TX power to %d dBm", update.tx_power)
-            await mc.set_tx_power(val=update.tx_power)
-
-        if update.radio is not None:
-            logger.info(
-                "Setting radio params: freq=%f MHz, bw=%f kHz, sf=%d, cr=%d",
-                update.radio.freq,
-                update.radio.bw,
-                update.radio.sf,
-                update.radio.cr,
+    async with radio_manager.radio_operation("update_radio_config") as be:
+        mc = _meshcore_from_backend(be)
+        try:
+            await apply_radio_config_update(
+                mc,
+                update,
+                path_hash_mode_supported=radio_manager.path_hash_mode_supported,
+                set_path_hash_mode=lambda mode: setattr(radio_manager, "path_hash_mode", mode),
+                sync_radio_time_fn=lambda _: sync_radio_time(be),
             )
-            await mc.set_radio(
-                freq=update.radio.freq,
-                bw=update.radio.bw,
-                sf=update.radio.sf,
-                cr=update.radio.cr,
-            )
-
-        if update.path_hash_mode is not None:
-            if not radio_manager.path_hash_mode_supported:
-                raise HTTPException(
-                    status_code=400, detail="Firmware does not support path hash mode setting"
-                )
-            logger.info("Setting path hash mode to %d", update.path_hash_mode)
-            result = await mc.set_path_hash_mode(update.path_hash_mode)
-            if result is not None and result.type == EventType.ERROR:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to set path hash mode: {result.payload}",
-                )
-            radio_manager.path_hash_mode = update.path_hash_mode
-
-        # Sync time with system clock
-        await sync_radio_time(mc)
-
-        # Re-fetch self_info so the response reflects the changes we just made.
-        # Commands like set_name() write to flash but don't update the cached
-        # self_info — send_appstart() triggers a fresh SELF_INFO from the radio.
-        await mc.send_appstart()
+        except PathHashModeUnsupportedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RadioCommandRejectedError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return await get_radio_config()
 
@@ -154,31 +157,18 @@ async def set_private_key(update: PrivateKeyUpdate) -> dict:
         raise HTTPException(status_code=400, detail="Invalid hex string for private key") from None
 
     logger.info("Importing private key")
-    async with radio_manager.radio_operation("import_private_key") as mc:
-        result = await mc.import_private_key(key_bytes)
-
-        if result.type == EventType.ERROR:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to import private key: {result.payload}"
-            )
-
-        # Re-export from radio so the server-side keystore uses the new key
-        # for DM decryption immediately, rather than waiting for reconnect.
+    async with radio_manager.radio_operation("import_private_key") as be:
         from app.keystore import export_and_store_private_key
 
-        keystore_refreshed = await export_and_store_private_key(mc)
-        if not keystore_refreshed:
-            logger.warning("Keystore refresh failed after import, retrying once")
-            keystore_refreshed = await export_and_store_private_key(mc)
-
-    if not keystore_refreshed:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Private key imported on radio, but server-side keystore "
-                "refresh failed. Reconnect to apply the new key for DM decryption."
-            ),
-        )
+        mc = _meshcore_from_backend(be)
+        try:
+            await import_private_key_and_refresh_keystore(
+                mc,
+                key_bytes,
+                export_and_store_private_key_fn=export_and_store_private_key,
+            )
+        except (RadioCommandRejectedError, KeystoreRefreshError) as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {"status": "ok"}
 
@@ -202,6 +192,7 @@ async def send_advertisement() -> dict:
 
     logger.info("Sending flood advertisement")
     try:
+
         async def _do():
             async with radio_manager.radio_operation("manual_advertisement") as mc:
                 return await do_send_advertisement(mc, force=True)
@@ -222,6 +213,8 @@ async def send_advertisement() -> dict:
 
 async def _attempt_reconnect() -> dict:
     """Shared reconnection logic for reboot and reconnect endpoints."""
+    radio_manager.resume_connection()
+
     if radio_manager.is_reconnecting:
         return {
             "status": "pending",
@@ -229,14 +222,8 @@ async def _attempt_reconnect() -> dict:
             "connected": False,
         }
 
-    success = await radio_manager.reconnect()
-    if not success:
-        raise HTTPException(
-            status_code=503, detail="Failed to reconnect. Check radio connection and power."
-        )
-
     try:
-        await radio_manager.post_connect_setup()
+        success = await _reconnect_and_prepare(broadcast_on_success=True)
     except Exception as e:
         logger.exception("Post-connect setup failed after reconnect")
         raise HTTPException(
@@ -244,7 +231,26 @@ async def _attempt_reconnect() -> dict:
             detail=f"Radio connected but setup failed: {e}",
         ) from e
 
+    if not success:
+        raise HTTPException(
+            status_code=503, detail="Failed to reconnect. Check radio connection and power."
+        )
+
     return {"status": "ok", "message": "Reconnected successfully", "connected": True}
+
+
+@router.post("/disconnect")
+async def disconnect_radio() -> dict:
+    """Disconnect from the radio and pause automatic reconnect attempts."""
+    logger.info("Manual radio disconnect requested")
+    await radio_manager.pause_connection()
+    broadcast_health(False, radio_manager.connection_info)
+    return {
+        "status": "ok",
+        "message": "Disconnected. Automatic reconnect is paused.",
+        "connected": False,
+        "paused": True,
+    }
 
 
 @router.post("/reboot")
@@ -286,8 +292,11 @@ async def reconnect_radio() -> dict:
 
         logger.info("Radio connected but setup incomplete, retrying setup")
         try:
-            await radio_manager.post_connect_setup()
+            if not await _prepare_connected(broadcast_on_success=True):
+                raise HTTPException(status_code=503, detail="Radio connection is paused")
             return {"status": "ok", "message": "Setup completed", "connected": True}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("Post-connect setup failed")
             raise HTTPException(

@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 
+from app.backends.client_backend import ClientBackend
 from app.models import (
     SendChannelMessageRequest,
     SendDirectMessageRequest,
@@ -31,9 +32,17 @@ def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
     prev = radio_manager._backend
     prev_lock = radio_manager._operation_lock
+    prev_max_channels = radio_manager.max_channels
+    prev_connection_info = radio_manager._connection_info
+    prev_slot_by_key = radio_manager._channel_slot_by_key.copy()
+    prev_key_by_slot = radio_manager._channel_key_by_slot.copy()
     yield
     radio_manager._backend = prev
     radio_manager._operation_lock = prev_lock
+    radio_manager.max_channels = prev_max_channels
+    radio_manager._connection_info = prev_connection_info
+    radio_manager._channel_slot_by_key = prev_slot_by_key
+    radio_manager._channel_key_by_slot = prev_key_by_slot
 
 
 def _make_radio_result(payload=None):
@@ -48,11 +57,12 @@ def _make_mc(name="TestNode"):
     """Create a mock MeshCore connection."""
     mc = MagicMock()
     mc.self_info = {"name": name}
-    mc.set_flood_scope = AsyncMock(return_value=_make_radio_result())
-    mc.send_msg = AsyncMock(return_value=_make_radio_result())
-    mc.send_chan_msg = AsyncMock(return_value=_make_radio_result())
-    mc.add_contact = AsyncMock(return_value=_make_radio_result())
-    mc.set_channel = AsyncMock(return_value=_make_radio_result())
+    mc.commands = MagicMock()
+    mc.commands.set_flood_scope = AsyncMock(return_value=_make_radio_result())
+    mc.commands.send_msg = AsyncMock(return_value=_make_radio_result())
+    mc.commands.send_chan_msg = AsyncMock(return_value=_make_radio_result())
+    mc.commands.add_contact = AsyncMock(return_value=_make_radio_result())
+    mc.commands.set_channel = AsyncMock(return_value=_make_radio_result())
     mc.get_contact_by_key_prefix = MagicMock(return_value=None)
     return mc
 
@@ -94,7 +104,7 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="!lasttime Alice")
@@ -141,13 +151,13 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
             await send_direct_message(request)
 
-        contact_payload = mc.add_contact.call_args.args[0]
+        contact_payload = mc.commands.add_contact.call_args.args[0]
         assert contact_payload["public_key"] == pub_key
         assert contact_payload["out_path"] == "aa00bb00"
         assert contact_payload["out_path_len"] == 2
@@ -170,13 +180,13 @@ class TestOutgoingDMBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendDirectMessageRequest(destination=pub_key, text="Hello")
             await send_direct_message(request)
 
-        contact_payload = mc.add_contact.call_args.args[0]
+        contact_payload = mc.commands.add_contact.call_args.args[0]
         assert contact_payload["out_path"] == "cc00dd00"
         assert contact_payload["out_path_len"] == 2
         assert contact_payload["out_path_hash_mode"] == 1
@@ -199,8 +209,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="!lasttime5 someone")
@@ -224,8 +233,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="acked now")
@@ -252,8 +260,7 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event", side_effect=capture_broadcast),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
@@ -283,14 +290,13 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
             await send_channel_message(request)
 
-        assert mc.set_flood_scope.await_args_list == [
+        assert mc.commands.set_flood_scope.await_args_list == [
             call("#Esperance"),
             call("#Baseline"),
         ]
@@ -307,14 +313,13 @@ class TestOutgoingChannelBroadcast:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             request = SendChannelMessageRequest(channel_key=chan_key, text="hello")
             await send_channel_message(request)
 
-        mc.set_flood_scope.assert_not_awaited()
+        mc.commands.set_flood_scope.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_send_channel_msg_aborts_when_override_apply_fails(self, test_db):
@@ -323,14 +328,13 @@ class TestOutgoingChannelBroadcast:
         await ChannelRepository.upsert(key=chan_key, name="#flightless")
         await ChannelRepository.update_flood_scope_override(chan_key, "#Esperance")
         await AppSettingsRepository.update(flood_scope="#Baseline")
-        mc.set_flood_scope = AsyncMock(
+        mc.commands.set_flood_scope = AsyncMock(
             return_value=MagicMock(type=EventType.ERROR, payload="unsupported")
         )
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
-            patch("app.decoder.calculate_channel_hash", return_value="abcd"),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             pytest.raises(HTTPException) as exc_info,
         ):
@@ -339,8 +343,150 @@ class TestOutgoingChannelBroadcast:
 
         assert exc_info.value.status_code == 500
         assert "regional override" in exc_info.value.detail.lower()
-        mc.set_channel.assert_not_awaited()
-        mc.send_chan_msg.assert_not_awaited()
+        mc.commands.set_channel.assert_not_awaited()
+        mc.commands.send_chan_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_channel_msg_reuses_cached_slot_for_same_channel(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key = "b1" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#cached")
+        radio_manager.max_channels = 4
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="first send")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="second send")
+            )
+
+        assert mc.commands.set_channel.await_count == 1
+        assert mc.commands.send_chan_msg.await_count == 2
+        assert [call.kwargs["chan"] for call in mc.commands.send_chan_msg.await_args_list] == [0, 0]
+
+    @pytest.mark.asyncio
+    async def test_send_channel_msg_uses_lru_slot_eviction(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key_a = "c1" * 16
+        chan_key_b = "c2" * 16
+        chan_key_c = "c3" * 16
+        await ChannelRepository.upsert(key=chan_key_a, name="#alpha")
+        await ChannelRepository.upsert(key=chan_key_b, name="#bravo")
+        await ChannelRepository.upsert(key=chan_key_c, name="#charlie")
+        radio_manager.max_channels = 2
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key_a, text="to alpha")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key_b, text="to bravo")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key_a, text="alpha again")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key_c, text="to charlie")
+            )
+
+        assert [call.kwargs["channel_idx"] for call in mc.commands.set_channel.await_args_list] == [
+            0,
+            1,
+            1,
+        ]
+        assert [call.kwargs["chan"] for call in mc.commands.send_chan_msg.await_args_list] == [
+            0,
+            1,
+            0,
+            1,
+        ]
+        assert radio_manager.get_cached_channel_slot(chan_key_a) == 0
+        assert radio_manager.get_cached_channel_slot(chan_key_b) is None
+        assert radio_manager.get_cached_channel_slot(chan_key_c) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_channel_msg_tcp_always_reconfigures_slot(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key = "d1" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#tcp")
+        radio_manager.max_channels = 4
+        radio_manager._connection_info = "TCP: 127.0.0.1:4000"
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="first send")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="second send")
+            )
+
+        assert mc.commands.set_channel.await_count == 2
+        assert mc.commands.send_chan_msg.await_count == 2
+        assert radio_manager.get_cached_channel_slot(chan_key) is None
+
+    @pytest.mark.asyncio
+    async def test_send_channel_msg_force_reconfigure_env_disables_reuse(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key = "e1" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#forced")
+        radio_manager.max_channels = 4
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+            patch("app.radio.settings.force_channel_slot_reconfigure", True),
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="first send")
+            )
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="second send")
+            )
+
+        assert mc.commands.set_channel.await_count == 2
+        assert radio_manager.get_cached_channel_slot(chan_key) is None
+
+    @pytest.mark.asyncio
+    async def test_send_channel_msg_error_invalidates_cached_slot(self, test_db):
+        mc = _make_mc(name="MyNode")
+        chan_key = "f1" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#stale")
+        radio_manager.max_channels = 4
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+
+        mc.commands.send_chan_msg = AsyncMock(
+            return_value=MagicMock(type=EventType.ERROR, payload="bad slot")
+        )
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="this will fail")
+            )
+
+        assert exc_info.value.status_code == 500
+        assert radio_manager.get_cached_channel_slot(chan_key) is None
 
 
 class TestResendChannelMessage:
@@ -366,7 +512,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
 
@@ -374,8 +520,8 @@ class TestResendChannelMessage:
         assert result["message_id"] == msg_id
 
         # Verify radio was called with correct timestamp bytes
-        mc.send_chan_msg.assert_awaited_once()
-        call_kwargs = mc.send_chan_msg.await_args.kwargs
+        mc.commands.send_chan_msg.assert_awaited_once()
+        call_kwargs = mc.commands.send_chan_msg.await_args.kwargs
         assert call_kwargs["timestamp"] == now.to_bytes(4, "little")
         assert call_kwargs["msg"] == "hello"  # Sender prefix stripped
 
@@ -427,11 +573,11 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
-        assert mc.set_flood_scope.await_args_list == [
+        assert mc.commands.set_flood_scope.await_args_list == [
             call("#CurrentRegion"),
             call("#Baseline"),
         ]
@@ -455,7 +601,7 @@ class TestResendChannelMessage:
         )
         assert msg_id is not None
 
-        mc.set_flood_scope = AsyncMock(
+        mc.commands.set_flood_scope = AsyncMock(
             side_effect=[
                 _make_radio_result(),
                 MagicMock(type=EventType.ERROR, payload="restore failed"),
@@ -464,7 +610,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_error") as mock_broadcast_error,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=False)
@@ -493,7 +639,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):
@@ -591,11 +737,11 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             await resend_channel_message(msg_id, new_timestamp=False)
 
-        call_kwargs = mc.send_chan_msg.await_args.kwargs
+        call_kwargs = mc.commands.send_chan_msg.await_args.kwargs
         assert call_kwargs["msg"] == "hello world"
 
     @pytest.mark.asyncio
@@ -618,7 +764,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -647,7 +793,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -682,7 +828,7 @@ class TestResendChannelMessage:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event") as mock_broadcast,
         ):
             result = await resend_channel_message(msg_id, new_timestamp=True)
@@ -727,17 +873,17 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_dm_send_radio_exception_no_orphan_message(self, test_db):
-        """When mc.send_msg() raises, no message should be stored in DB."""
+        """When mc.commands.send_msg() raises, no message should be stored in DB."""
         mc = _make_mc()
         pub_key = "ab" * 32
         await _insert_contact(pub_key, "Alice")
 
         # Make the radio command raise (simulates serial timeout / connection drop)
-        mc.send_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
+        mc.commands.send_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(ConnectionError):
                 await send_direct_message(
@@ -752,18 +898,20 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_channel_send_radio_exception_no_orphan_message(self, test_db):
-        """When mc.send_chan_msg() raises, no message should be stored in DB."""
+        """When mc.commands.send_chan_msg() raises, no message should be stored in DB."""
         from app.repository import ChannelRepository
 
         mc = _make_mc(name="TestNode")
         chan_key = "ab" * 16
         await ChannelRepository.upsert(key=chan_key, name="#test")
 
-        mc.send_chan_msg = AsyncMock(side_effect=ConnectionError("Serial port disconnected"))
+        mc.commands.send_chan_msg = AsyncMock(
+            side_effect=ConnectionError("Serial port disconnected")
+        )
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(ConnectionError):
                 await send_channel_message(
@@ -777,18 +925,18 @@ class TestRadioExceptionMidSend:
 
     @pytest.mark.asyncio
     async def test_channel_send_set_channel_exception_no_orphan(self, test_db):
-        """When mc.set_channel() raises, send is not attempted and no message stored."""
+        """When mc.commands.set_channel() raises, send is not attempted and no message stored."""
         from app.repository import ChannelRepository
 
         mc = _make_mc(name="TestNode")
         chan_key = "cd" * 16
         await ChannelRepository.upsert(key=chan_key, name="#broken")
 
-        mc.set_channel = AsyncMock(side_effect=TimeoutError("Radio not responding"))
+        mc.commands.set_channel = AsyncMock(side_effect=TimeoutError("Radio not responding"))
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
         ):
             with pytest.raises(TimeoutError):
                 await send_channel_message(
@@ -796,12 +944,75 @@ class TestRadioExceptionMidSend:
                 )
 
         # send_chan_msg should never have been called
-        mc.send_chan_msg.assert_not_called()
+        mc.commands.send_chan_msg.assert_not_called()
 
         messages = await MessageRepository.get_all(
             msg_type="CHAN", conversation_key=chan_key.upper(), limit=10
         )
         assert len(messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_channel_send_set_channel_exception_invalidates_evicted_cached_slot(
+        self, test_db
+    ):
+        """Eviction-path configure exceptions drop the stale cached slot owner."""
+        from app.repository import ChannelRepository
+
+        mc = _make_mc(name="TestNode")
+        chan_key_a = "de" * 16
+        chan_key_b = "ef" * 16
+        await ChannelRepository.upsert(key=chan_key_a, name="#alpha")
+        await ChannelRepository.upsert(key=chan_key_b, name="#bravo")
+
+        radio_manager.max_channels = 1
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+        radio_manager.note_channel_slot_loaded(chan_key_a, 0)
+
+        mc.commands.set_channel = AsyncMock(side_effect=TimeoutError("Radio not responding"))
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+        ):
+            with pytest.raises(TimeoutError):
+                await send_channel_message(
+                    SendChannelMessageRequest(channel_key=chan_key_b, text="Never sent")
+                )
+
+        assert radio_manager.get_cached_channel_slot(chan_key_a) is None
+        assert radio_manager.get_cached_channel_slot(chan_key_b) is None
+        mc.commands.send_chan_msg.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_channel_send_set_channel_error_invalidates_evicted_cached_slot(self, test_db):
+        """Eviction-path configure error results also drop the stale cached slot owner."""
+        mc = _make_mc(name="TestNode")
+        chan_key_a = "fa" * 16
+        chan_key_b = "fb" * 16
+        await ChannelRepository.upsert(key=chan_key_a, name="#alpha")
+        await ChannelRepository.upsert(key=chan_key_b, name="#bravo")
+
+        radio_manager.max_channels = 1
+        radio_manager._connection_info = "Serial: /dev/ttyUSB0"
+        radio_manager.note_channel_slot_loaded(chan_key_a, 0)
+
+        mc.commands.set_channel = AsyncMock(
+            return_value=MagicMock(type=EventType.ERROR, payload="radio busy")
+        )
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key_b, text="Never sent")
+            )
+
+        assert exc_info.value.status_code == 500
+        assert radio_manager.get_cached_channel_slot(chan_key_a) is None
+        assert radio_manager.get_cached_channel_slot(chan_key_b) is None
+        mc.commands.send_chan_msg.assert_not_called()
 
 
 class TestConcurrentChannelSends:
@@ -824,7 +1035,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
         ):
             results = await asyncio.gather(
@@ -842,10 +1053,10 @@ class TestConcurrentChannelSends:
         assert results[1].conversation_key == chan_key_b.upper()
 
         # set_channel should have been called twice (once per send, serialized)
-        assert mc.set_channel.await_count == 2
+        assert mc.commands.set_channel.await_count == 2
 
         # send_chan_msg should have been called twice
-        assert mc.send_chan_msg.await_count == 2
+        assert mc.commands.send_chan_msg.await_count == 2
 
         # Both messages should be in DB
         msgs_a = await MessageRepository.get_all(
@@ -878,7 +1089,7 @@ class TestConcurrentChannelSends:
 
         with (
             patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
             patch("app.routers.messages.broadcast_event"),
             patch("app.routers.messages.time") as mock_time,
         ):
@@ -901,3 +1112,35 @@ class TestConcurrentChannelSends:
             msg_type="CHAN", conversation_key=chan_key.upper(), limit=10
         )
         assert len(msgs) == 2
+
+
+class TestChannelSendLockScope:
+    """Channel send should release the radio lock before DB persistence work."""
+
+    @pytest.mark.asyncio
+    async def test_channel_message_row_created_after_radio_lock_released(self, test_db):
+        mc = _make_mc(name="TestNode")
+        chan_key = "de" * 16
+        await ChannelRepository.upsert(key=chan_key, name="#lockscope")
+
+        observed_lock_states: list[bool] = []
+        original_create = MessageRepository.create
+
+        async def _assert_lock_then_create(*args, **kwargs):
+            observed_lock_states.append(bool(radio_manager._operation_lock.locked()))
+            return await original_create(*args, **kwargs)
+
+        with (
+            patch("app.routers.messages.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.broadcast_event"),
+            patch(
+                "app.services.message_send.MessageRepository.create",
+                side_effect=_assert_lock_then_create,
+            ),
+        ):
+            await send_channel_message(
+                SendChannelMessageRequest(channel_key=chan_key, text="Lock scope test")
+            )
+
+        assert observed_lock_states == [False]

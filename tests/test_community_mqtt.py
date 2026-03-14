@@ -10,7 +10,6 @@ import nacl.bindings
 import pytest
 
 from app.fanout.community_mqtt import (
-    _CLIENT_ID,
     _DEFAULT_BROKER,
     _STATS_REFRESH_INTERVAL,
     CommunityMqttPublisher,
@@ -69,6 +68,7 @@ def _make_community_settings(**overrides) -> SimpleNamespace:
         "community_mqtt_password": "",
         "community_mqtt_iata": "",
         "community_mqtt_email": "",
+        "community_mqtt_owner": "",
         "community_mqtt_token_audience": "mqtt-us-v1.letsmesh.net",
     }
     defaults.update(overrides)
@@ -119,9 +119,11 @@ class TestJwtGeneration:
         assert "exp" in payload
         assert payload["exp"] - payload["iat"] == 86400
         assert payload["aud"] == _DEFAULT_BROKER
+        # Main branch / broker format: owner = pubkey hex, client = identifier
         assert payload["owner"] == public_key.hex().upper()
-        assert payload["client"] == _CLIENT_ID
-        assert "email" not in payload  # omitted when empty
+        assert "client" in payload
+        # email only present when provided
+        assert payload.get("email", "") == ""
 
     def test_payload_includes_email_when_provided(self):
         private_key, public_key = _make_test_keys()
@@ -162,6 +164,21 @@ class TestJwtGeneration:
         signed_message = signature + signing_input
         # This will raise if the signature is invalid
         verified = nacl.bindings.crypto_sign_open(signed_message, public_key)
+        assert verified == signing_input
+
+    def test_spi_seed_jwt_returns_standard_pubkey_and_verifies(self):
+        """With 32-byte SPI seed, JWT uses standard Ed25519 and returns (token, pubkey_hex)."""
+        from nacl.signing import SigningKey
+
+        seed = b"\x00" * 31 + b"\x01"  # deterministic test seed
+        standard_pubkey = SigningKey(seed).verify_key.encode()
+        token, jwt_pubkey_hex = _generate_jwt_token(seed, standard_pubkey)
+        assert jwt_pubkey_hex == standard_pubkey.hex().upper()
+        parts = token.split(".")
+        signing_input = f"{parts[0]}.{parts[1]}".encode()
+        signature = bytes.fromhex(parts[2])
+        signed_message = signature + signing_input
+        verified = nacl.bindings.crypto_sign_open(signed_message, standard_pubkey)
         assert verified == signing_input
 
 

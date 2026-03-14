@@ -22,7 +22,7 @@ interface QueueItem {
   status: 'pending' | 'cracking' | 'cracked' | 'failed';
 }
 
-interface CrackerPanelProps {
+export interface CrackerPanelProps {
   packets: RawPacket[];
   channels: Channel[];
   onChannelCreate: (name: string, key: string) => Promise<void>;

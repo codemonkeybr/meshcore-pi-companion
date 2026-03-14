@@ -3,6 +3,7 @@ import glob
 import logging
 import platform
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
@@ -124,6 +125,7 @@ class RadioManager:
     def __init__(self):
         self._backend: RadioBackend | None = None
         self._connection_info: str | None = None
+        self._connection_desired: bool = True
         self._reconnect_task: asyncio.Task | None = None
         self._last_connected: bool = False
         self._reconnect_lock: asyncio.Lock | None = None
@@ -132,8 +134,12 @@ class RadioManager:
         self._setup_in_progress: bool = False
         self._setup_complete: bool = False
         self._suppress_reconnect_until: float = 0.0  # monotonic time; used during reboot cooldown
+        self.max_channels: int = 40
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
+        self._channel_slot_by_key: OrderedDict[str, int] = OrderedDict()
+        self._channel_key_by_slot: dict[int, str] = {}
+        self._pending_message_channel_key_by_slot: dict[int, str] = {}
 
     async def _acquire_operation_lock(
         self,
@@ -221,94 +227,136 @@ class RadioManager:
                 self._release_operation_lock(name)
 
     async def post_connect_setup(self) -> None:
-        """Full post-connection setup: handlers, key export, sync, advertisements, polling.
+        """Run shared post-connection orchestration after transport setup succeeds."""
+        from app.services.radio_lifecycle import run_post_connect_setup
 
-        Called after every successful connection or reconnection.
-        Idempotent — safe to call repeatedly (periodic tasks have start guards).
+        await run_post_connect_setup(self)
+
+    def reset_channel_send_cache(self) -> None:
+        """Forget any session-local channel-slot reuse state."""
+        self._channel_slot_by_key.clear()
+        self._channel_key_by_slot.clear()
+
+    def remember_pending_message_channel_slot(self, channel_key: str, slot: int) -> None:
+        """Remember a channel key for later queued-message recovery."""
+        self._pending_message_channel_key_by_slot[slot] = channel_key.upper()
+
+    def get_pending_message_channel_key(self, slot: int) -> str | None:
+        """Return the last remembered channel key for a radio slot."""
+        return self._pending_message_channel_key_by_slot.get(slot)
+
+    def clear_pending_message_channel_slots(self) -> None:
+        """Drop any queued-message recovery slot metadata."""
+        self._pending_message_channel_key_by_slot.clear()
+
+    def channel_slot_reuse_enabled(self) -> bool:
+        """Return whether this transport can safely reuse cached channel slots."""
+        if settings.force_channel_slot_reconfigure:
+            return False
+        if self._connection_info:
+            return not self._connection_info.startswith("TCP:")
+        return settings.connection_type != "tcp"
+
+    def get_channel_send_cache_capacity(self) -> int:
+        """Return the app-managed channel cache capacity for the current session."""
+        try:
+            return max(1, int(self.max_channels))
+        except (TypeError, ValueError):
+            return 1
+
+    def get_cached_channel_slot(self, channel_key: str) -> int | None:
+        """Return the cached radio slot for a channel key, if present."""
+        return self._channel_slot_by_key.get(channel_key.upper())
+
+    def plan_channel_send_slot(
+        self,
+        channel_key: str,
+        *,
+        preferred_slot: int = 0,
+    ) -> tuple[int, bool, str | None]:
+        """Choose a radio slot for a channel send.
+
+        Returns `(slot, needs_configure, evicted_channel_key)`.
         """
-        from app.event_handlers import register_event_handlers
-        from app.keystore import export_and_store_private_key
-        from app.radio_sync import (
-            drain_pending_messages,
-            send_advertisement,
-            start_message_polling,
-            start_periodic_advert,
-            start_periodic_sync,
-            sync_and_offload_all,
-            sync_radio_time,
-        )
+        if not self.channel_slot_reuse_enabled():
+            return preferred_slot, True, None
 
-        if not self._backend:
+        normalized_key = channel_key.upper()
+        cached_slot = self._channel_slot_by_key.get(normalized_key)
+        if cached_slot is not None:
+            return cached_slot, False, None
+
+        capacity = self.get_channel_send_cache_capacity()
+        if len(self._channel_slot_by_key) < capacity:
+            slot = self._find_first_free_channel_slot(capacity, preferred_slot)
+            return slot, True, None
+
+        evicted_key, slot = next(iter(self._channel_slot_by_key.items()))
+        return slot, True, evicted_key
+
+    def note_channel_slot_loaded(self, channel_key: str, slot: int) -> None:
+        """Record that a channel is now resident in the given radio slot."""
+        if not self.channel_slot_reuse_enabled():
             return
 
-        if self._setup_lock is None:
-            self._setup_lock = asyncio.Lock()
+        normalized_key = channel_key.upper()
+        previous_slot = self._channel_slot_by_key.pop(normalized_key, None)
+        if previous_slot is not None and previous_slot != slot:
+            self._channel_key_by_slot.pop(previous_slot, None)
 
-        async with self._setup_lock:
-            if not self._backend:
-                return
-            self._setup_in_progress = True
-            self._setup_complete = False
-            be = self._backend
-            try:
-                register_event_handlers(be)
+        displaced_key = self._channel_key_by_slot.get(slot)
+        if displaced_key is not None and displaced_key != normalized_key:
+            self._channel_slot_by_key.pop(displaced_key, None)
 
-                await self._acquire_operation_lock("post_connect_setup", blocking=True)
-                try:
-                    await export_and_store_private_key(be)
+        self._channel_key_by_slot[slot] = normalized_key
+        self._channel_slot_by_key[normalized_key] = slot
 
-                    await sync_radio_time(be)
+    def note_channel_slot_used(self, channel_key: str) -> None:
+        """Refresh LRU order for a previously loaded channel slot."""
+        if not self.channel_slot_reuse_enabled():
+            return
 
-                    from app.region_scope import normalize_region_scope
-                    from app.repository import AppSettingsRepository
+        normalized_key = channel_key.upper()
+        slot = self._channel_slot_by_key.get(normalized_key)
+        if slot is None:
+            return
+        self._channel_slot_by_key.move_to_end(normalized_key)
+        self._channel_key_by_slot[slot] = normalized_key
 
-                    app_settings = await AppSettingsRepository.get()
-                    scope = normalize_region_scope(app_settings.flood_scope)
-                    try:
-                        await be.set_flood_scope(scope if scope else "")
-                        logger.info("Applied flood_scope=%r", scope or "(disabled)")
-                    except Exception as exc:
-                        logger.warning(
-                            "set_flood_scope failed (firmware may not support it): %s", exc
-                        )
+    def invalidate_cached_channel_slot(self, channel_key: str) -> None:
+        """Drop any cached slot assignment for a channel key."""
+        normalized_key = channel_key.upper()
+        slot = self._channel_slot_by_key.pop(normalized_key, None)
+        if slot is None:
+            return
+        if self._channel_key_by_slot.get(slot) == normalized_key:
+            self._channel_key_by_slot.pop(slot, None)
 
-                    self.path_hash_mode = 0
-                    self.path_hash_mode_supported = False
-                    mode, supported = await be.query_path_hash_mode()
-                    self.path_hash_mode = mode
-                    self.path_hash_mode_supported = supported
+    def get_channel_send_cache_snapshot(self) -> list[tuple[str, int]]:
+        """Return the current channel send cache contents in LRU order."""
+        return list(self._channel_slot_by_key.items())
 
-                    logger.info("Syncing and offloading radio data...")
-                    result = await sync_and_offload_all(be)
-                    logger.info("Sync complete: %s", result)
+    def _find_first_free_channel_slot(self, capacity: int, preferred_slot: int) -> int:
+        """Pick the first unclaimed app-managed slot, preferring the requested slot."""
+        if preferred_slot < capacity and preferred_slot not in self._channel_key_by_slot:
+            return preferred_slot
 
-                    if await send_advertisement(be):
-                        logger.info("Advertisement sent")
-                    else:
-                        logger.debug("Advertisement skipped (disabled or throttled)")
+        for slot in range(capacity):
+            if slot not in self._channel_key_by_slot:
+                return slot
 
-                    drained = await drain_pending_messages(be)
-                    if drained > 0:
-                        logger.info("Drained %d pending message(s)", drained)
-
-                    await be.start_auto_message_fetching()
-                    logger.info("Auto message fetching started")
-                finally:
-                    self._release_operation_lock("post_connect_setup")
-
-                start_periodic_sync()
-                start_periodic_advert()
-                start_message_polling()
-
-                self._setup_complete = True
-            finally:
-                self._setup_in_progress = False
-
-        logger.info("Post-connect setup complete")
+        return preferred_slot
 
     @property
     def backend(self) -> RadioBackend | None:
         return self._backend
+
+    @property
+    def meshcore(self):
+        """Underlying MeshCore when using ClientBackend; None for SpiBackend or when disconnected."""
+        if self._backend is None:
+            return None
+        return getattr(self._backend, "_mc", None)
 
     @property
     def connection_info(self) -> str | None:
@@ -333,6 +381,41 @@ class RadioManager:
     @property
     def is_setup_complete(self) -> bool:
         return self._setup_complete
+
+    @property
+    def connection_desired(self) -> bool:
+        return self._connection_desired
+
+    def resume_connection(self) -> None:
+        """Allow connection monitor and manual reconnects to establish transport again."""
+        self._connection_desired = True
+
+    async def pause_connection(self) -> None:
+        """Stop automatic reconnect attempts and tear down any current transport."""
+        self._connection_desired = False
+        self._last_connected = False
+        await self.disconnect()
+
+    async def _disable_meshcore_auto_reconnect(self, mc: MeshCore) -> None:
+        """Disable library-managed reconnects so manual teardown fully releases transport."""
+        connection_manager = getattr(mc, "connection_manager", None)
+        if connection_manager is None:
+            return
+
+        if hasattr(connection_manager, "auto_reconnect"):
+            connection_manager.auto_reconnect = False
+
+        reconnect_task = getattr(connection_manager, "_reconnect_task", None)
+        if reconnect_task is None or not isinstance(reconnect_task, asyncio.Task | asyncio.Future):
+            return
+
+        reconnect_task.cancel()
+        try:
+            await reconnect_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            connection_manager._reconnect_task = None
 
     async def connect(self) -> None:
         """Connect to the radio using the configured transport."""
@@ -359,7 +442,7 @@ class RadioManager:
             port = await find_radio_port(settings.serial_baudrate)
             if not port:
                 logger.warning("No MeshCore radio found. Please specify MESHCORE_SERIAL_PORT.")
-                return
+                raise RuntimeError("No MeshCore radio found")
 
         logger.debug(
             "Connecting to radio at %s (baud %d)",
@@ -465,11 +548,17 @@ class RadioManager:
         """Disconnect from the radio."""
         if self._backend is not None:
             logger.debug("Disconnecting from radio")
+            mc = getattr(self._backend, "_mc", None)
             await self._backend.disconnect()
+            if mc is not None:
+                await self._disable_meshcore_auto_reconnect(mc)
             self._backend = None
             self._setup_complete = False
+            self.max_channels = 40
             self.path_hash_mode = 0
             self.path_hash_mode_supported = False
+            self.reset_channel_send_cache()
+            self.clear_pending_message_channel_slots()
             logger.debug("Radio disconnected")
 
     async def reconnect(self, *, broadcast_on_success: bool = True) -> bool:
@@ -485,6 +574,10 @@ class RadioManager:
             self._reconnect_lock = asyncio.Lock()
 
         async with self._reconnect_lock:
+            if not self._connection_desired:
+                logger.info("Reconnect skipped because connection is paused by operator")
+                return False
+
             # If we became connected while waiting for the lock (another
             # reconnect succeeded ahead of us), skip the redundant attempt.
             if self.is_connected:
@@ -505,6 +598,11 @@ class RadioManager:
                 # Try to connect (will auto-detect if no port specified)
                 await self.connect()
 
+                if not self._connection_desired:
+                    logger.info("Reconnect completed after pause request; disconnecting transport")
+                    await self.disconnect()
+                    return False
+
                 if self.is_connected:
                     logger.info("Radio reconnected successfully at %s", self._connection_info)
                     if broadcast_on_success:
@@ -521,106 +619,12 @@ class RadioManager:
 
     async def start_connection_monitor(self) -> None:
         """Start background task to monitor connection and auto-reconnect."""
+        from app.services.radio_lifecycle import connection_monitor_loop
+
         if self._reconnect_task is not None:
             return
 
-        async def monitor_loop():
-            from app.websocket import broadcast_health
-
-            CHECK_INTERVAL_SECONDS = 5
-            BACKOFF_INTERVAL_SECONDS = 60
-            BACKOFF_AFTER_FAILURES = 6
-            UNRESPONSIVE_THRESHOLD = 3
-            consecutive_setup_failures = 0
-            consecutive_reconnect_failures = 0
-            backoff_logged = False
-            check_interval = CHECK_INTERVAL_SECONDS
-
-            while True:
-                try:
-                    await asyncio.sleep(check_interval)
-
-                    current_connected = self.is_connected
-
-                    # Detect status change
-                    if self._last_connected and not current_connected:
-                        # Connection lost
-                        logger.warning("Radio connection lost, broadcasting status change")
-                        broadcast_health(False, self._connection_info)
-                        self._last_connected = False
-                        consecutive_setup_failures = 0
-
-                    if not current_connected:
-                        # During reboot cooldown, do not reconnect so GPIO can be released
-                        if time.monotonic() < self._suppress_reconnect_until:
-                            remaining = self._suppress_reconnect_until - time.monotonic()
-                            logger.info(
-                                "Suppressing reconnect (reboot cooldown, %.1fs remaining)",
-                                remaining,
-                            )
-                        # Attempt reconnection on every loop while disconnected
-                        elif not self.is_reconnecting and await self.reconnect(
-                            broadcast_on_success=False
-                        ):
-                            await self.post_connect_setup()
-                            broadcast_health(True, self._connection_info)
-                            self._last_connected = True
-                            consecutive_setup_failures = 0
-                            consecutive_reconnect_failures = 0
-                            backoff_logged = False
-                            check_interval = CHECK_INTERVAL_SECONDS
-                        else:
-                            consecutive_reconnect_failures += 1
-                            if consecutive_reconnect_failures >= BACKOFF_AFTER_FAILURES:
-                                check_interval = BACKOFF_INTERVAL_SECONDS
-                                if not backoff_logged:
-                                    logger.info(
-                                        "No radio found; retrying every %ds. "
-                                        "Set MESHCORE_SERIAL_PORT or plug in a radio.",
-                                        BACKOFF_INTERVAL_SECONDS,
-                                    )
-                                    backoff_logged = True
-
-                    elif not self._last_connected and current_connected:
-                        # Connection restored (might have reconnected automatically).
-                        # Always run setup before reporting healthy.
-                        logger.info("Radio connection restored")
-                        await self.post_connect_setup()
-                        broadcast_health(True, self._connection_info)
-                        self._last_connected = True
-                        consecutive_setup_failures = 0
-                        consecutive_reconnect_failures = 0
-                        backoff_logged = False
-                        check_interval = CHECK_INTERVAL_SECONDS
-
-                    elif current_connected and not self._setup_complete:
-                        # Transport connected but setup incomplete — retry
-                        logger.info("Retrying post-connect setup...")
-                        await self.post_connect_setup()
-                        broadcast_health(True, self._connection_info)
-                        consecutive_setup_failures = 0
-
-                except asyncio.CancelledError:
-                    # Task is being cancelled, exit cleanly
-                    break
-                except Exception as e:
-                    consecutive_setup_failures += 1
-                    if consecutive_setup_failures == UNRESPONSIVE_THRESHOLD:
-                        logger.error(
-                            "Post-connect setup has failed %d times in a row. "
-                            "The radio port appears open but the radio is not "
-                            "responding to commands. Common causes: another "
-                            "process has the serial port open (check for other "
-                            "RemoteTerm instances, serial monitors, etc.), the "
-                            "firmware is in repeater mode (not client), or the "
-                            "radio needs a power cycle. Will keep retrying.",
-                            consecutive_setup_failures,
-                        )
-                    elif consecutive_setup_failures < UNRESPONSIVE_THRESHOLD:
-                        logger.exception("Error in connection monitor, continuing: %s", e)
-                    # After the threshold, silently retry (avoid log spam)
-
-        self._reconnect_task = asyncio.create_task(monitor_loop())
+        self._reconnect_task = asyncio.create_task(connection_monitor_loop(self))
         logger.info("Radio connection monitor started")
 
     async def stop_connection_monitor(self) -> None:

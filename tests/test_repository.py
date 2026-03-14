@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.models import Contact, ContactUpsert
 from app.repository import (
     ContactAdvertPathRepository,
     ContactNameHistoryRepository,
@@ -524,6 +525,49 @@ class TestContactRepositoryResolvePrefixes:
         assert result == {}
 
 
+class TestContactRepositoryRecentQueries:
+    """Test recent-contact selection helpers used for radio fill."""
+
+    @pytest.mark.asyncio
+    async def test_recently_advertised_includes_contacted_contacts(self, test_db):
+        stale_contacted_fresh_advert = "ab" * 32
+        advert_only = "cd" * 32
+        repeater = "ef" * 32
+
+        await ContactRepository.upsert(
+            {
+                "public_key": stale_contacted_fresh_advert,
+                "name": "SeenAgain",
+                "type": 1,
+                "last_contacted": 100,
+                "last_advert": 5000,
+            }
+        )
+        await ContactRepository.upsert(
+            {
+                "public_key": advert_only,
+                "name": "AdvertOnly",
+                "type": 1,
+                "last_advert": 4000,
+            }
+        )
+        await ContactRepository.upsert(
+            {
+                "public_key": repeater,
+                "name": "Repeater",
+                "type": 2,
+                "last_advert": 6000,
+            }
+        )
+
+        contacts = await ContactRepository.get_recently_advertised_non_repeaters()
+
+        assert [contact.public_key for contact in contacts] == [
+            stale_contacted_fresh_advert,
+            advert_only,
+        ]
+
+
 class TestAppSettingsRepository:
     """Test AppSettingsRepository parsing and migration edge cases."""
 
@@ -643,3 +687,34 @@ class TestMessageRepositoryGetById:
         result = await MessageRepository.get_by_id(999999)
 
         assert result is None
+
+
+class TestContactRepositoryUpsertContracts:
+    @pytest.mark.asyncio
+    async def test_accepts_contact_upsert_model(self, test_db):
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, name="Alice", type=1, on_radio=False)
+        )
+
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.name == "Alice"
+        assert contact.type == 1
+
+    @pytest.mark.asyncio
+    async def test_accepts_contact_model(self, test_db):
+        await ContactRepository.upsert(
+            Contact(
+                public_key="bb" * 32,
+                name="Bob",
+                type=2,
+                on_radio=True,
+                out_path_hash_mode=-1,
+            )
+        )
+
+        contact = await ContactRepository.get_by_key("bb" * 32)
+        assert contact is not None
+        assert contact.name == "Bob"
+        assert contact.type == 2
+        assert contact.on_radio is True

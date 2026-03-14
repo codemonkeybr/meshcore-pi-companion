@@ -7,7 +7,11 @@ import type {
   RadioConfigUpdate,
 } from '../types';
 import type { LocalLabel } from '../utils/localLabel';
-import { SETTINGS_SECTION_LABELS, type SettingsSection } from './settings/settingsConstants';
+import {
+  SETTINGS_SECTION_ICONS,
+  SETTINGS_SECTION_LABELS,
+  type SettingsSection,
+} from './settings/settingsConstants';
 
 import { SettingsRadioSection } from './settings/SettingsRadioSection';
 import { SettingsLocalSection } from './settings/SettingsLocalSection';
@@ -27,6 +31,8 @@ interface SettingsModalBaseProps {
   onSaveAppSettings: (update: AppSettingsUpdate) => Promise<void>;
   onSetPrivateKey: (key: string) => Promise<void>;
   onReboot: () => Promise<void>;
+  onDisconnect: () => Promise<void>;
+  onReconnect: () => Promise<void>;
   onAdvertise: () => Promise<void>;
   onHealthRefresh: () => Promise<void>;
   onRefreshAppSettings: () => Promise<void>;
@@ -37,7 +43,7 @@ interface SettingsModalBaseProps {
   onToggleBlockedName?: (name: string) => void;
 }
 
-type SettingsModalProps = SettingsModalBaseProps &
+export type SettingsModalProps = SettingsModalBaseProps &
   (
     | { externalSidebarNav: true; desktopSection: SettingsSection }
     | { externalSidebarNav?: false; desktopSection?: never }
@@ -55,6 +61,8 @@ export function SettingsModal(props: SettingsModalProps) {
     onSaveAppSettings,
     onSetPrivateKey,
     onReboot,
+    onDisconnect,
+    onReconnect,
     onAdvertise,
     onHealthRefresh,
     onRefreshAppSettings,
@@ -138,6 +146,7 @@ export function SettingsModal(props: SettingsModalProps) {
 
   const renderSectionHeader = (section: SettingsSection): ReactNode => {
     if (!showSectionButton) return null;
+    const Icon = SETTINGS_SECTION_ICONS[section];
     return (
       <button
         type="button"
@@ -145,8 +154,9 @@ export function SettingsModal(props: SettingsModalProps) {
         aria-expanded={expandedSections[section]}
         onClick={() => toggleSection(section)}
       >
-        <span className="font-medium" role="heading" aria-level={3}>
-          {SETTINGS_SECTION_LABELS[section]}
+        <span className="inline-flex items-center gap-2 font-medium" role="heading" aria-level={3}>
+          <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+          <span>{SETTINGS_SECTION_LABELS[section]}</span>
         </span>
         <span className="text-muted-foreground md:hidden" aria-hidden="true">
           {expandedSections[section] ? '−' : '+'}
@@ -176,6 +186,8 @@ export function SettingsModal(props: SettingsModalProps) {
               onSaveAppSettings={onSaveAppSettings}
               onSetPrivateKey={onSetPrivateKey}
               onReboot={onReboot}
+              onDisconnect={onDisconnect}
+              onReconnect={onReconnect}
               onAdvertise={onAdvertise}
               onClose={onClose}
               className={sectionContentClass}

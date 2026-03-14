@@ -3,7 +3,7 @@
 import pytest
 
 from app.radio import radio_manager
-from app.repository import MessageRepository
+from app.repository import ChannelRepository, ContactRepository, MessageRepository
 
 CHAN_KEY = "ABC123DEF456ABC123DEF456ABC12345"
 DM_KEY = "aa" * 32
@@ -135,6 +135,181 @@ class TestMessageSearch:
         results = await MessageRepository.get_all(q="hello")
         assert len(results) == 1
         assert results[0].sender_name == "Alice"
+
+    @pytest.mark.asyncio
+    async def test_search_user_operator_matches_channel_sender_name(self, test_db):
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello from alice",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=100,
+            received_at=100,
+            sender_name="Alice",
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello from bob",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+            sender_name="Bob",
+        )
+
+        results = await MessageRepository.get_all(q='user:"Alice"')
+        assert [message.text for message in results] == ["hello from alice"]
+
+    @pytest.mark.asyncio
+    async def test_search_user_operator_matches_dm_contact_name(self, test_db):
+        await ContactRepository.upsert(
+            {
+                "public_key": DM_KEY,
+                "name": "Alice Smith",
+                "type": 1,
+            }
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello from dm",
+            conversation_key=DM_KEY,
+            sender_timestamp=100,
+            received_at=100,
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello from other dm",
+            conversation_key=("bb" * 32),
+            sender_timestamp=101,
+            received_at=101,
+        )
+
+        results = await MessageRepository.get_all(q='user:"Alice Smith"')
+        assert [message.text for message in results] == ["hello from dm"]
+
+    @pytest.mark.asyncio
+    async def test_search_user_operator_matches_key_prefix(self, test_db):
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="dm by key prefix",
+            conversation_key=DM_KEY,
+            sender_timestamp=100,
+            received_at=100,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="chan by key prefix",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+            sender_key=DM_KEY,
+            sender_name="Alice",
+        )
+        await MessageRepository.create(
+            msg_type="PRIV",
+            text="other dm",
+            conversation_key=("bb" * 32),
+            sender_timestamp=102,
+            received_at=102,
+        )
+
+        results = await MessageRepository.get_all(q=f"user:{DM_KEY[:12]}")
+        assert [message.text for message in results] == ["chan by key prefix", "dm by key prefix"]
+
+    @pytest.mark.asyncio
+    async def test_search_channel_operator_matches_channel_name(self, test_db):
+        await ChannelRepository.upsert(key=CHAN_KEY, name="#flightless", is_hashtag=True)
+        await ChannelRepository.upsert(key=OTHER_CHAN_KEY, name="#other", is_hashtag=True)
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello flightless",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=100,
+            received_at=100,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello elsewhere",
+            conversation_key=OTHER_CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+        )
+
+        results = await MessageRepository.get_all(q='channel:"#flightless"')
+        assert [message.text for message in results] == ["hello flightless"]
+
+    @pytest.mark.asyncio
+    async def test_search_channel_operator_matches_quoted_name_with_spaces(self, test_db):
+        await ChannelRepository.upsert(key=CHAN_KEY, name="#Ops Room", is_hashtag=True)
+        await ChannelRepository.upsert(key=OTHER_CHAN_KEY, name="#Other Room", is_hashtag=True)
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello ops room",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=100,
+            received_at=100,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello other room",
+            conversation_key=OTHER_CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+        )
+
+        results = await MessageRepository.get_all(q='channel:"#Ops Room"')
+        assert [message.text for message in results] == ["hello ops room"]
+
+    @pytest.mark.asyncio
+    async def test_search_channel_operator_matches_channel_key_prefix(self, test_db):
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="chan by key",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=100,
+            received_at=100,
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="other channel",
+            conversation_key=OTHER_CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+        )
+
+        results = await MessageRepository.get_all(q=f"channel:{CHAN_KEY[:8]}")
+        assert [message.text for message in results] == ["chan by key"]
+
+    @pytest.mark.asyncio
+    async def test_search_scope_operators_and_free_text_are_combined(self, test_db):
+        await ChannelRepository.upsert(key=CHAN_KEY, name="#flightless", is_hashtag=True)
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello operator",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=100,
+            received_at=100,
+            sender_name="Alice",
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="goodbye operator",
+            conversation_key=CHAN_KEY,
+            sender_timestamp=101,
+            received_at=101,
+            sender_name="Alice",
+        )
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="hello operator",
+            conversation_key=OTHER_CHAN_KEY,
+            sender_timestamp=102,
+            received_at=102,
+            sender_name="Bob",
+        )
+
+        results = await MessageRepository.get_all(
+            q='user:Alice channel:"#flightless" hello operator'
+        )
+        assert [message.text for message in results] == ["hello operator"]
 
 
 class TestMessagesAround:

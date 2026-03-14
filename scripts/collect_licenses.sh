@@ -7,7 +7,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO_ROOT/LICENSES.md}"
-FRONTEND_DOCKER_LOCK="$REPO_ROOT/frontend/package-lock.docker.json"
 FRONTEND_LICENSE_IMAGE="${FRONTEND_LICENSE_IMAGE:-node:20-slim}"
 FRONTEND_LICENSE_NPM="${FRONTEND_LICENSE_NPM:-10.9.5}"
 
@@ -72,7 +71,6 @@ frontend_licenses_docker() {
             set -euo pipefail
             cp -a /src/frontend ./frontend
             cd frontend
-            cp package-lock.docker.json package-lock.json
             npm i -g npm@$FRONTEND_LICENSE_NPM >/dev/null
             npm ci --ignore-scripts >/dev/null
             node /src/scripts/print_frontend_licenses.cjs
@@ -80,11 +78,7 @@ frontend_licenses_docker() {
 }
 
 frontend_licenses() {
-    if [ -f "$FRONTEND_DOCKER_LOCK" ]; then
-        frontend_licenses_docker
-    else
-        frontend_licenses_local
-    fi
+    frontend_licenses_docker
 }
 
 # ── Assemble ─────────────────────────────────────────────────────────

@@ -51,7 +51,9 @@ vi.mock('../hooks', async (importOriginal) => {
       unreadCounts: {},
       mentions: {},
       lastMessageTimes: {},
+      unreadLastReadAts: {},
       incrementUnread: vi.fn(),
+      renameConversationState: vi.fn(),
       markAllRead: vi.fn(),
       trackNewMessage: vi.fn(),
       refreshUnreads: vi.fn(),
@@ -132,6 +134,7 @@ vi.mock('../components/NewMessageModal', () => ({
 vi.mock('../components/SearchView', () => ({
   SearchView: ({
     onNavigateToMessage,
+    prefillRequest,
   }: {
     onNavigateToMessage: (target: {
       id: number;
@@ -139,20 +142,24 @@ vi.mock('../components/SearchView', () => ({
       conversation_key: string;
       conversation_name: string;
     }) => void;
+    prefillRequest?: { query: string; nonce: number } | null;
   }) => (
-    <button
-      type="button"
-      onClick={() =>
-        onNavigateToMessage({
-          id: 321,
-          type: 'CHAN',
-          conversation_key: PUBLIC_CHANNEL_KEY,
-          conversation_name: 'Public',
-        })
-      }
-    >
-      Jump Result
-    </button>
+    <div>
+      <div data-testid="search-prefill">{prefillRequest?.query ?? ''}</div>
+      <button
+        type="button"
+        onClick={() =>
+          onNavigateToMessage({
+            id: 321,
+            type: 'CHAN',
+            conversation_key: PUBLIC_CHANNEL_KEY,
+            conversation_name: 'Public',
+          })
+        }
+      >
+        Jump Result
+      </button>
+    </div>
   ),
 }));
 
@@ -165,7 +172,15 @@ vi.mock('../components/RawPacketList', () => ({
 }));
 
 vi.mock('../components/ContactInfoPane', () => ({
-  ContactInfoPane: () => null,
+  ContactInfoPane: ({
+    onSearchMessagesByKey,
+  }: {
+    onSearchMessagesByKey?: (publicKey: string) => void;
+  }) => (
+    <button type="button" onClick={() => onSearchMessagesByKey?.('aa'.repeat(32))}>
+      Search Contact By Key
+    </button>
+  ),
 }));
 
 vi.mock('../components/ChannelInfoPane', () => ({
@@ -256,6 +271,25 @@ describe('App search jump target handling', () => {
           mocks.useConversationMessagesCalls.mock.calls.length - 1
         ];
       expect(lastCall?.[1]).toBeNull();
+    });
+  });
+
+  it('opens search with a prefilled query from the contact pane', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Search Contact By Key')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Search Contact By Key'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('search-prefill')).toHaveTextContent(`user:${'aa'.repeat(32)}`);
+      expect(
+        screen
+          .getAllByTestId('active-conversation')
+          .some((node) => node.textContent === 'search:search')
+      ).toBe(true);
     });
   });
 });

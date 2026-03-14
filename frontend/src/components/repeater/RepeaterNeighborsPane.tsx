@@ -2,7 +2,13 @@ import { useMemo, lazy, Suspense } from 'react';
 import { cn } from '@/lib/utils';
 import { RepeaterPane, NotFetched, formatDuration } from './repeaterPaneShared';
 import { isValidLocation, calculateDistance, formatDistance } from '../../utils/pathUtils';
-import type { Contact, RepeaterNeighborsResponse, PaneState, NeighborInfo } from '../../types';
+import type {
+  Contact,
+  RepeaterNeighborsResponse,
+  PaneState,
+  NeighborInfo,
+  RepeaterNodeInfoResponse,
+} from '../../types';
 
 const NeighborsMiniMap = lazy(() =>
   import('../NeighborsMiniMap').then((m) => ({ default: m.NeighborsMiniMap }))
@@ -14,19 +20,35 @@ export function NeighborsPane({
   onRefresh,
   disabled,
   contacts,
-  radioLat,
-  radioLon,
-  radioName,
+  nodeInfo,
+  nodeInfoState,
+  repeaterName,
 }: {
   data: RepeaterNeighborsResponse | null;
   state: PaneState;
   onRefresh: () => void;
   disabled?: boolean;
   contacts: Contact[];
-  radioLat: number | null;
-  radioLon: number | null;
-  radioName: string | null;
+  nodeInfo: RepeaterNodeInfoResponse | null;
+  nodeInfoState: PaneState;
+  repeaterName: string | null;
 }) {
+  const radioLat = useMemo(() => {
+    const parsed = nodeInfo?.lat != null ? parseFloat(nodeInfo.lat) : null;
+    return Number.isFinite(parsed) ? parsed : null;
+  }, [nodeInfo?.lat]);
+
+  const radioLon = useMemo(() => {
+    const parsed = nodeInfo?.lon != null ? parseFloat(nodeInfo.lon) : null;
+    return Number.isFinite(parsed) ? parsed : null;
+  }, [nodeInfo?.lon]);
+
+  const radioName = nodeInfo?.name || repeaterName;
+  const hasValidRepeaterGps = isValidLocation(radioLat, radioLon);
+  const showGpsUnavailableMessage =
+    !hasValidRepeaterGps &&
+    (nodeInfoState.error !== null || nodeInfoState.fetched_at != null || nodeInfo !== null);
+
   // Resolve contact data for each neighbor in a single pass — used for
   // coords (mini-map), distances (table column), and sorted display order.
   const { neighborsWithCoords, sorted, hasDistances } = useMemo(() => {
@@ -48,7 +70,7 @@ export function NeighborsPane({
       const nLon = contact?.lon ?? null;
 
       let dist: string | null = null;
-      if (isValidLocation(radioLat, radioLon) && isValidLocation(nLat, nLon)) {
+      if (hasValidRepeaterGps && isValidLocation(nLat, nLon)) {
         const distKm = calculateDistance(radioLat, radioLon, nLat, nLon);
         if (distKm != null) {
           dist = formatDistance(distKm);
@@ -69,7 +91,7 @@ export function NeighborsPane({
       sorted: enriched,
       hasDistances: anyDist,
     };
-  }, [data, contacts, radioLat, radioLon]);
+  }, [contacts, data, hasValidRepeaterGps, radioLat, radioLon]);
 
   return (
     <RepeaterPane
@@ -120,7 +142,7 @@ export function NeighborsPane({
               </tbody>
             </table>
           </div>
-          {(neighborsWithCoords.length > 0 || isValidLocation(radioLat, radioLon)) && (
+          {hasValidRepeaterGps && (neighborsWithCoords.length > 0 || hasValidRepeaterGps) ? (
             <Suspense
               fallback={
                 <div className="h-48 flex items-center justify-center text-xs text-muted-foreground">
@@ -136,7 +158,13 @@ export function NeighborsPane({
                 radioName={radioName}
               />
             </Suspense>
-          )}
+          ) : showGpsUnavailableMessage ? (
+            <div className="rounded border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              GPS info failed to fetch; map and distance data not available. This may be due to
+              missing or zero-zero GPS data on the repeater, or due to transient fetch failure. Try
+              refreshing.
+            </div>
+          ) : null}
         </div>
       )}
     </RepeaterPane>

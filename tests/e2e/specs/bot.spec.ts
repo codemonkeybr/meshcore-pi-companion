@@ -59,7 +59,7 @@ test.describe('Bot functionality', () => {
     const triggerMessage = `!e2etest ${Date.now()}`;
     const input = page.getByPlaceholder(/type a message|message #flightless/i);
     await input.fill(triggerMessage);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
 
     // --- Step 4: Verify bot response appears ---
     // Bot has ~2s delay before responding, plus radio send time

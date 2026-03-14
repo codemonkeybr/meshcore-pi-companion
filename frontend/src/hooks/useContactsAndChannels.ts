@@ -58,7 +58,7 @@ export function useContactsAndChannels({
       setActiveConversation({
         type: 'contact',
         id: created.public_key,
-        name: getContactDisplayName(created.name, created.public_key),
+        name: getContactDisplayName(created.name, created.public_key, created.last_advert),
       });
     },
     [fetchAllContacts, setActiveConversation]

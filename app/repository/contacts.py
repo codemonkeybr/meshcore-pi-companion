@@ -1,4 +1,5 @@
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from app.database import db
@@ -7,6 +8,7 @@ from app.models import (
     ContactAdvertPath,
     ContactAdvertPathSummary,
     ContactNameHistory,
+    ContactUpsert,
 )
 from app.path_utils import first_hop_hex, normalize_contact_route, normalize_route_override
 
@@ -22,17 +24,28 @@ class AmbiguousPublicKeyPrefixError(ValueError):
 
 class ContactRepository:
     @staticmethod
-    async def upsert(contact: dict[str, Any]) -> None:
+    def _coerce_contact_upsert(
+        contact: ContactUpsert | Contact | Mapping[str, Any],
+    ) -> ContactUpsert:
+        if isinstance(contact, ContactUpsert):
+            return contact
+        if isinstance(contact, Contact):
+            return contact.to_upsert()
+        return ContactUpsert.model_validate(contact)
+
+    @staticmethod
+    async def upsert(contact: ContactUpsert | Contact | Mapping[str, Any]) -> None:
+        contact_row = ContactRepository._coerce_contact_upsert(contact)
         last_path, last_path_len, out_path_hash_mode = normalize_contact_route(
-            contact.get("last_path"),
-            contact.get("last_path_len", -1),
-            contact.get("out_path_hash_mode"),
+            contact_row.last_path,
+            contact_row.last_path_len,
+            contact_row.out_path_hash_mode,
         )
         route_override_path, route_override_len, route_override_hash_mode = (
             normalize_route_override(
-                contact.get("route_override_path"),
-                contact.get("route_override_len"),
-                contact.get("route_override_hash_mode"),
+                contact_row.route_override_path,
+                contact_row.route_override_len,
+                contact_row.route_override_hash_mode,
             )
         )
 
@@ -70,23 +83,23 @@ class ContactRepository:
                 first_seen = COALESCE(contacts.first_seen, excluded.first_seen)
             """,
             (
-                contact.get("public_key", "").lower(),
-                contact.get("name"),
-                contact.get("type", 0),
-                contact.get("flags", 0),
+                contact_row.public_key.lower(),
+                contact_row.name,
+                contact_row.type,
+                contact_row.flags,
                 last_path,
                 last_path_len,
                 out_path_hash_mode,
                 route_override_path,
                 route_override_len,
                 route_override_hash_mode,
-                contact.get("last_advert"),
-                contact.get("lat"),
-                contact.get("lon"),
-                contact.get("last_seen", int(time.time())),
-                contact.get("on_radio"),
-                contact.get("last_contacted"),
-                contact.get("first_seen"),
+                contact_row.last_advert,
+                contact_row.lat,
+                contact_row.lon,
+                contact_row.last_seen if contact_row.last_seen is not None else int(time.time()),
+                contact_row.on_radio,
+                contact_row.last_contacted,
+                contact_row.first_seen,
             ),
         )
         await db.conn.commit()
@@ -155,6 +168,9 @@ class ContactRepository:
         the prefix (to avoid silently selecting the wrong contact).
         """
         normalized_prefix = prefix.lower()
+        exact = await ContactRepository.get_by_key(normalized_prefix)
+        if exact:
+            return exact
         cursor = await db.conn.execute(
             "SELECT * FROM contacts WHERE public_key LIKE ? ORDER BY public_key LIMIT 2",
             (f"{normalized_prefix}%",),
@@ -240,17 +256,28 @@ class ContactRepository:
         return [ContactRepository._row_to_contact(row) for row in rows]
 
     @staticmethod
-    async def get_recent_non_repeaters(limit: int = 200) -> list[Contact]:
-        """Get the most recently active non-repeater contacts.
-
-        Orders by most recent activity (last_contacted or last_advert),
-        excluding repeaters (type=2).
-        """
+    async def get_recently_contacted_non_repeaters(limit: int = 200) -> list[Contact]:
+        """Get recently interacted-with non-repeater contacts."""
         cursor = await db.conn.execute(
             """
             SELECT * FROM contacts
-            WHERE type != 2
-            ORDER BY COALESCE(last_contacted, 0) DESC, COALESCE(last_advert, 0) DESC
+            WHERE type != 2 AND last_contacted IS NOT NULL AND length(public_key) = 64
+            ORDER BY last_contacted DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [ContactRepository._row_to_contact(row) for row in rows]
+
+    @staticmethod
+    async def get_recently_advertised_non_repeaters(limit: int = 200) -> list[Contact]:
+        """Get recently advert-heard non-repeater contacts."""
+        cursor = await db.conn.execute(
+            """
+            SELECT * FROM contacts
+            WHERE type != 2 AND last_advert IS NOT NULL AND length(public_key) = 64
+            ORDER BY last_advert DESC
             LIMIT ?
             """,
             (limit,),
@@ -327,9 +354,10 @@ class ContactRepository:
 
     @staticmethod
     async def set_on_radio(public_key: str, on_radio: bool) -> None:
+        """Set on_radio flag for a single contact."""
         await db.conn.execute(
             "UPDATE contacts SET on_radio = ? WHERE public_key = ?",
-            (on_radio, public_key.lower()),
+            (1 if on_radio else 0, public_key.lower()),
         )
         await db.conn.commit()
 
@@ -381,6 +409,103 @@ class ContactRepository:
         )
         await db.conn.commit()
         return cursor.rowcount > 0
+
+    @staticmethod
+    async def promote_prefix_placeholders(full_key: str) -> list[str]:
+        """Promote prefix-only placeholder contacts to a resolved full key.
+
+        Returns the placeholder public keys that were merged into the full key.
+        """
+        normalized_full_key = full_key.lower()
+        cursor = await db.conn.execute(
+            """
+            SELECT public_key, last_seen, last_contacted, first_seen, last_read_at
+            FROM contacts
+            WHERE length(public_key) < 64
+              AND ? LIKE public_key || '%'
+            ORDER BY length(public_key) DESC, public_key
+            """,
+            (normalized_full_key,),
+        )
+        rows = list(await cursor.fetchall())
+        if not rows:
+            return []
+
+        promoted_keys: list[str] = []
+        full_exists = await ContactRepository.get_by_key(normalized_full_key) is not None
+
+        for row in rows:
+            old_key = row["public_key"]
+            if old_key == normalized_full_key:
+                continue
+
+            match_cursor = await db.conn.execute(
+                """
+                SELECT COUNT(*) AS match_count
+                FROM contacts
+                WHERE length(public_key) = 64
+                  AND public_key LIKE ? || '%'
+                """,
+                (old_key,),
+            )
+            match_row = await match_cursor.fetchone()
+            if (match_row["match_count"] if match_row is not None else 0) != 1:
+                continue
+
+            if full_exists:
+                await db.conn.execute(
+                    """
+                    UPDATE contacts
+                    SET last_seen = CASE
+                            WHEN contacts.last_seen IS NULL THEN ?
+                            WHEN ? IS NULL THEN contacts.last_seen
+                            WHEN ? > contacts.last_seen THEN ?
+                            ELSE contacts.last_seen
+                        END,
+                        last_contacted = CASE
+                            WHEN contacts.last_contacted IS NULL THEN ?
+                            WHEN ? IS NULL THEN contacts.last_contacted
+                            WHEN ? > contacts.last_contacted THEN ?
+                            ELSE contacts.last_contacted
+                        END,
+                        first_seen = CASE
+                            WHEN contacts.first_seen IS NULL THEN ?
+                            WHEN ? IS NULL THEN contacts.first_seen
+                            WHEN ? < contacts.first_seen THEN ?
+                            ELSE contacts.first_seen
+                        END,
+                        last_read_at = COALESCE(contacts.last_read_at, ?)
+                    WHERE public_key = ?
+                    """,
+                    (
+                        row["last_seen"],
+                        row["last_seen"],
+                        row["last_seen"],
+                        row["last_seen"],
+                        row["last_contacted"],
+                        row["last_contacted"],
+                        row["last_contacted"],
+                        row["last_contacted"],
+                        row["first_seen"],
+                        row["first_seen"],
+                        row["first_seen"],
+                        row["first_seen"],
+                        row["last_read_at"],
+                        normalized_full_key,
+                    ),
+                )
+                await db.conn.execute("DELETE FROM contacts WHERE public_key = ?", (old_key,))
+            else:
+                await db.conn.execute(
+                    "UPDATE contacts SET public_key = ? WHERE public_key = ?",
+                    (normalized_full_key, old_key),
+                )
+                full_exists = True
+
+            promoted_keys.append(old_key)
+
+        await db.conn.commit()
+        return promoted_keys
 
     @staticmethod
     async def mark_all_read(timestamp: int) -> None:

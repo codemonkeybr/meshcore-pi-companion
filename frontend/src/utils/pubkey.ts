@@ -21,6 +21,20 @@ function getPubkeyPrefix(key: string): string {
 /**
  * Get a display name for a contact, falling back to pubkey prefix.
  */
-export function getContactDisplayName(name: string | null | undefined, pubkey: string): string {
-  return name || getPubkeyPrefix(pubkey);
+export function getContactDisplayName(
+  name: string | null | undefined,
+  pubkey: string,
+  lastAdvert?: number | null
+): string {
+  if (name) return name;
+  if (isUnknownFullKeyContact(pubkey, lastAdvert)) return '[unknown sender]';
+  return getPubkeyPrefix(pubkey);
+}
+
+export function isPrefixOnlyContact(pubkey: string): boolean {
+  return pubkey.length < 64;
+}
+
+export function isUnknownFullKeyContact(pubkey: string, lastAdvert?: number | null): boolean {
+  return pubkey.length === 64 && !lastAdvert;
 }

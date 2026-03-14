@@ -30,8 +30,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BROKER = "mqtt-us-v1.letsmesh.net"
 _DEFAULT_PORT = 443  # Community protocol uses WSS on port 443 by default
-_CLIENT_ID = "RemoteTerm (github.com/jkingsman/Remote-Terminal-for-MeshCore)"
-
+_CLIENT_ID = "MeshCorePiCompanion (github.com/codemonkeybr/meshcore-pi-companion)"
 # Proactive JWT renewal: reconnect 1 hour before the 24h token expires
 _TOKEN_LIFETIME = 86400  # 24 hours (must match _generate_jwt_token exp)
 _TOKEN_RENEWAL_THRESHOLD = _TOKEN_LIFETIME - 3600  # 23 hours
@@ -61,6 +60,7 @@ class CommunityMqttSettings(Protocol):
     community_mqtt_password: str
     community_mqtt_iata: str
     community_mqtt_email: str
+    community_mqtt_owner: str
     community_mqtt_token_audience: str
 
 
@@ -98,47 +98,26 @@ def _generate_jwt_token(
     audience: str = _DEFAULT_BROKER,
     email: str = "",
 ) -> tuple[str, str]:
-    """Generate a JWT token for community MQTT authentication.
+    """Generate a JWT token for community MQTT (LetsMesh) authentication.
 
-    When private_key is 32 bytes (SPI/pymc_core seed), uses standard Ed25519
-    (nacl SigningKey) so LetsMesh accepts the token. When 64 bytes (MeshCore
-    expanded from firmware), uses expanded-key signing.
-
-    Returns:
-        (token, pubkey_hex) so the caller can set username to v1_{pubkey_hex}.
+    Returns (token, pubkey_hex) so the caller can use the same pubkey for the
+    MQTT username (v1_{pubkey_hex}). Payload: publicKey, iat, exp, aud, owner, client.
+    Signed with standard Ed25519 when key is 32-byte seed (SPI), else MeshCore expanded.
     """
+    from nacl.signing import SigningKey
+
     header = {"alg": "Ed25519", "typ": "JWT"}
     now = int(time.time())
 
     if len(private_key) == 32:
-        # Standard Ed25519 seed (SPI/pymc_core) — LetsMesh expects this
-        signing_key = nacl.signing.SigningKey(private_key)
-        real_public = signing_key.verify_key.encode()
-        pubkey_hex = real_public.hex().upper()
-        payload: dict[str, object] = {
-            "publicKey": pubkey_hex,
-            "iat": now,
-            "exp": now + _TOKEN_LIFETIME,
-            "aud": audience,
-            "owner": pubkey_hex,
-            "client": _CLIENT_ID,
-        }
-        if email:
-            payload["email"] = email
-        header_b64 = _base64url_encode(
-            json.dumps(header, separators=(",", ":")).encode()
-        )
-        payload_b64 = _base64url_encode(
-            json.dumps(payload, separators=(",", ":")).encode()
-        )
-        signing_input = f"{header_b64}.{payload_b64}".encode()
-        signature = signing_key.sign(signing_input).signature
-        token = f"{header_b64}.{payload_b64}.{signature.hex()}"
-        return (token, pubkey_hex)
+        signer = SigningKey(private_key)
+        pubkey_for_jwt = signer.verify_key.encode()
+        pubkey_hex = pubkey_for_jwt.hex().upper()
+    else:
+        pubkey_hex = public_key.hex().upper()
+        pubkey_for_jwt = public_key
 
-    # 64-byte MeshCore expanded key (firmware export)
-    pubkey_hex = public_key.hex().upper()
-    payload = {
+    payload: dict[str, object] = {
         "publicKey": pubkey_hex,
         "iat": now,
         "exp": now + _TOKEN_LIFETIME,
@@ -151,9 +130,14 @@ def _generate_jwt_token(
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
     signing_input = f"{header_b64}.{payload_b64}".encode()
-    scalar = private_key[:32]
-    prefix = private_key[32:]
-    signature = _ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
+
+    if len(private_key) == 32:
+        signature = signer.sign(signing_input).signature
+    else:
+        scalar = private_key[:32]
+        prefix = private_key[32:]
+        signature = _ed25519_sign_expanded(signing_input, scalar, prefix, pubkey_for_jwt)
+
     token = f"{header_b64}.{payload_b64}.{signature.hex()}"
     return (token, pubkey_hex)
 
@@ -270,7 +254,7 @@ def _build_radio_info() -> str:
     Matches the reference format: ``"freq,bw,sf,cr"`` (comma-separated raw
     values).  Falls back to ``"0,0,0,0"`` when unavailable.
     """
-    from app.radio import radio_manager
+    from app.services.radio_runtime import radio_runtime as radio_manager
 
     try:
         if radio_manager.backend and radio_manager.backend.self_info:
@@ -355,13 +339,12 @@ class CommunityMqttPublisher(BaseMqttPublisher):
     def _build_client_kwargs(self, settings: object) -> dict[str, Any]:
         s: CommunityMqttSettings = settings  # type: ignore[assignment]
         from app.keystore import get_private_key, get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         private_key = get_private_key()
         public_key = get_public_key()
         assert public_key is not None  # guaranteed by _pre_connect
 
-        pubkey_hex = public_key.hex().upper()
         broker_host = s.community_mqtt_broker_host or _DEFAULT_BROKER
         broker_port = s.community_mqtt_broker_port or _DEFAULT_PORT
         transport = s.community_mqtt_transport or "websockets"
@@ -369,6 +352,20 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         tls_verify = bool(s.community_mqtt_tls_verify)
         auth_mode = s.community_mqtt_auth_mode or "token"
         secure_connection = use_tls and tls_verify
+
+        if auth_mode == "token":
+            assert private_key is not None
+            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
+            email_val = (s.community_mqtt_email or "").strip() if secure_connection else ""
+            jwt_token, jwt_pubkey_hex = _generate_jwt_token(
+                private_key,
+                public_key,
+                audience=token_audience,
+                email=email_val,
+            )
+            pubkey_hex = jwt_pubkey_hex
+        else:
+            pubkey_hex = public_key.hex().upper()
 
         tls_context: ssl.SSLContext | None = None
         if use_tls:
@@ -399,15 +396,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             "will": aiomqtt.Will(status_topic, offline_payload, retain=True),
         }
         if auth_mode == "token":
-            assert private_key is not None
-            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
-            jwt_token, jwt_pubkey_hex = _generate_jwt_token(
-                private_key,
-                public_key,
-                audience=token_audience,
-                email=(s.community_mqtt_email or "") if secure_connection else "",
-            )
-            kwargs["username"] = f"v1_{jwt_pubkey_hex}"
+            kwargs["username"] = f"v1_{pubkey_hex}"
             kwargs["password"] = jwt_token
         elif auth_mode == "password":
             kwargs["username"] = s.community_mqtt_username or None
@@ -427,7 +416,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         if self._cached_device_info is not None:
             return self._cached_device_info
 
-        from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
+        from app.radio import RadioDisconnectedError, RadioOperationBusyError
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         fallback = {"model": "unknown", "firmware_version": "unknown"}
         try:
@@ -474,7 +464,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         ) < _STATS_MIN_CACHE_SECS and self._cached_stats is not None:
             return self._cached_stats
 
-        from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
+        from app.radio import RadioDisconnectedError, RadioOperationBusyError
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         try:
             async with radio_manager.radio_operation("community_stats_fetch", blocking=False) as mc:
@@ -515,7 +506,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
     ) -> None:
         """Build and publish the enriched retained status message."""
         from app.keystore import get_public_key
-        from app.radio import radio_manager
+        from app.services.radio_runtime import radio_runtime as radio_manager
 
         public_key = get_public_key()
         if public_key is None:

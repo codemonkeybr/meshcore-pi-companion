@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Star } from 'lucide-react';
 import { api } from '../api';
 import { formatTime } from '../utils/messageParser';
 import { isFavorite } from '../utils/favorites';
@@ -125,12 +126,12 @@ export function ChannelInfoPane({
               >
                 {isFavorite(favorites, 'channel', channel.key) ? (
                   <>
-                    <span className="text-favorite text-lg">&#9733;</span>
+                    <Star className="h-4.5 w-4.5 fill-current text-favorite" aria-hidden="true" />
                     <span>Remove from favorites</span>
                   </>
                 ) : (
                   <>
-                    <span className="text-muted-foreground text-lg">&#9734;</span>
+                    <Star className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
                     <span>Add to favorites</span>
                   </>
                 )}

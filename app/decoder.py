@@ -85,15 +85,6 @@ class PacketInfo:
     path_hash_size: int = 1  # Bytes per hop: 1, 2, or 3
 
 
-def calculate_channel_hash(channel_key: bytes) -> str:
-    """
-    Calculate the channel hash from a 16-byte channel key.
-    Returns the first byte of SHA256(key) as hex.
-    """
-    hash_bytes = hashlib.sha256(channel_key).digest()
-    return format(hash_bytes[0], "02x")
-
-
 def extract_payload(raw_packet: bytes) -> bytes | None:
     """
     Extract just the payload from a raw packet, skipping header and path.
@@ -233,7 +224,7 @@ def try_decrypt_packet_with_channel_key(
         return None
 
     packet_channel_hash = format(packet_info.payload[0], "02x")
-    expected_hash = calculate_channel_hash(channel_key)
+    expected_hash = format(hashlib.sha256(channel_key).digest()[0], "02x")
 
     if packet_channel_hash != expected_hash:
         return None
@@ -367,26 +358,29 @@ def _clamp_scalar(k: bytes) -> bytes:
 
 def derive_public_key(private_key: bytes, *, from_seed: bool = False) -> bytes:
     """
-    Derive the Ed25519 public key from a MeshCore or standard private key.
+    Derive the Ed25519 public key from a MeshCore private key or seed.
 
-    **32-byte key with from_seed=True (SPI / pymc_core):**
-    Treated as standard Ed25519 seed. Public key from nacl SigningKey.
+    **MeshCore Key Format (from_seed=False):**
+    MeshCore stores a non-standard Ed25519 private key format:
+    - First 32 bytes: The scalar (already post-SHA-512 and clamped)
+    - Last 32 bytes: The signing prefix (used during signature generation)
+    We use direct scalar × basepoint with noclamp.
 
-    **32-byte key with from_seed=False (e.g. first 32 bytes of MeshCore key):**
-    Treated as MeshCore scalar; returns scalar × basepoint (noclamp).
-
-    **64-byte key (MeshCore expanded from firmware):**
-    First 32 bytes are the scalar; returns scalar × basepoint (noclamp).
+    **Seed Format (from_seed=True, 32-byte key):**
+    SPI/pymc_core use a 32-byte Ed25519 seed. Standard Ed25519 expands it via
+    SHA-512. Use nacl SigningKey(seed).verify_key so JWT/LetsMesh verification matches.
 
     Args:
-        private_key: 32-byte Ed25519 seed/scalar or 64-byte MeshCore private key
-        from_seed: If True and len 32, treat as standard Ed25519 seed.
+        private_key: 64-byte MeshCore private key, or 32-byte seed when from_seed=True
+        from_seed: If True and private_key is 32 bytes, treat as seed (standard Ed25519)
 
     Returns:
         32-byte Ed25519 public key
     """
-    if len(private_key) == 32 and from_seed:
-        return nacl.signing.SigningKey(private_key).verify_key.encode()
+    if from_seed and len(private_key) == 32:
+        from nacl.signing import SigningKey
+
+        return SigningKey(private_key).verify_key.encode()
     scalar = private_key[:32]
     return nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
 
@@ -396,34 +390,27 @@ def derive_shared_secret(our_private_key: bytes, their_public_key: bytes) -> byt
     Derive ECDH shared secret from Ed25519 keys.
 
     MeshCore uses Ed25519 keys, but ECDH requires X25519. This function:
-    1. Clamps our private key scalar for X25519 (idempotent since already clamped)
+    1. Derives our X25519 scalar (clamped): from 64-byte MeshCore key use first 32;
+       from 32-byte SPI seed use SHA-512 expansion then clamp (standard Ed25519).
     2. Converts their Ed25519 public key to X25519
     3. Performs X25519 scalar multiplication to get the shared secret
 
-    **MeshCore Key Format:**
-    MeshCore private keys store the scalar directly (not a seed), so the first
-    32 bytes are already the post-SHA-512 clamped scalar. See `derive_public_key`
-    for details.
-
     Args:
-        our_private_key: 32-byte Ed25519 seed (SPI) or 64-byte MeshCore private key
+        our_private_key: 64-byte MeshCore private key or 32-byte SPI seed
         their_public_key: Their 32-byte Ed25519 public key
 
     Returns:
         32-byte shared secret
     """
-    # 32-byte seed (SPI): derive X25519 scalar via SHA-512; 64-byte (MeshCore): use first 32
     if len(our_private_key) == 32:
-        # Standard Ed25519 seed; expand for X25519
-        scalar = hashlib.sha512(our_private_key).digest()[:32]
+        # SPI seed: standard Ed25519 expansion (SHA-512), then clamp for X25519
+        expanded = hashlib.sha512(our_private_key).digest()
+        scalar = expanded[:32]
+        clamped = _clamp_scalar(scalar)
     else:
-        scalar = our_private_key[:32]
-    clamped = _clamp_scalar(scalar)
+        clamped = _clamp_scalar(our_private_key[:32])
 
-    # Convert their Ed25519 public key to X25519
     x25519_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(their_public_key)
-
-    # Perform X25519 ECDH
     return nacl.bindings.crypto_scalarmult(clamped, x25519_pub)
 
 

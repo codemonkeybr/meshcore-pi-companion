@@ -1,5 +1,7 @@
 """REST API for fanout config CRUD."""
 
+import ast
+import inspect
 import logging
 import re
 import string
@@ -8,12 +10,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import settings as server_settings
+from app.fanout.bot_exec import _analyze_bot_signature
 from app.repository.fanout import FanoutConfigRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fanout", tags=["fanout"])
 
-_VALID_TYPES = {"mqtt_private", "mqtt_community", "bot", "webhook", "apprise"}
+_VALID_TYPES = {"mqtt_private", "mqtt_community", "bot", "webhook", "apprise", "sqs"}
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _DEFAULT_COMMUNITY_MQTT_TOPIC_TEMPLATE = "meshcore/{IATA}/{PUBLIC_KEY}/packets"
@@ -144,17 +147,77 @@ def _validate_mqtt_community_config(config: dict) -> None:
 
 
 def _validate_bot_config(config: dict) -> None:
-    """Validate bot config blob (syntax-check the code)."""
+    """Validate bot config blob (syntax-check the code and supported signature)."""
     code = config.get("code", "")
     if not code or not code.strip():
         raise HTTPException(status_code=400, detail="Bot code cannot be empty")
     try:
-        compile(code, "<bot_code>", "exec")
+        tree = ast.parse(code, filename="<bot_code>", mode="exec")
     except SyntaxError as e:
         raise HTTPException(
             status_code=400,
             detail=f"Bot code has syntax error at line {e.lineno}: {e.msg}",
         ) from None
+
+    bot_def = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "bot"
+        ),
+        None,
+    )
+    if bot_def is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bot code must define a callable bot() function. "
+                "Use the default bot template as a reference."
+            ),
+        )
+
+    try:
+        parameters: list[inspect.Parameter] = []
+        positional_args = [
+            *((arg, inspect.Parameter.POSITIONAL_ONLY) for arg in bot_def.args.posonlyargs),
+            *((arg, inspect.Parameter.POSITIONAL_OR_KEYWORD) for arg in bot_def.args.args),
+        ]
+        positional_defaults_start = len(positional_args) - len(bot_def.args.defaults)
+        sentinel_default = object()
+
+        for index, (arg, kind) in enumerate(positional_args):
+            has_default = index >= positional_defaults_start
+            parameters.append(
+                inspect.Parameter(
+                    arg.arg,
+                    kind=kind,
+                    default=sentinel_default if has_default else inspect.Parameter.empty,
+                )
+            )
+        if bot_def.args.vararg is not None:
+            parameters.append(
+                inspect.Parameter(bot_def.args.vararg.arg, kind=inspect.Parameter.VAR_POSITIONAL)
+            )
+        for kwonly_arg, kw_default in zip(
+            bot_def.args.kwonlyargs, bot_def.args.kw_defaults, strict=True
+        ):
+            parameters.append(
+                inspect.Parameter(
+                    kwonly_arg.arg,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    default=(
+                        sentinel_default if kw_default is not None else inspect.Parameter.empty
+                    ),
+                )
+            )
+        if bot_def.args.kwarg is not None:
+            parameters.append(
+                inspect.Parameter(bot_def.args.kwarg.arg, kind=inspect.Parameter.VAR_KEYWORD)
+            )
+
+        _analyze_bot_signature(inspect.Signature(parameters))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 def _validate_apprise_config(config: dict) -> None:
@@ -179,6 +242,39 @@ def _validate_webhook_config(config: dict) -> None:
         raise HTTPException(status_code=400, detail="headers must be a JSON object")
 
 
+def _validate_sqs_config(config: dict) -> None:
+    """Validate sqs config blob."""
+    queue_url = str(config.get("queue_url", "")).strip()
+    if not queue_url:
+        raise HTTPException(status_code=400, detail="queue_url is required for sqs")
+    if not queue_url.startswith(("https://", "http://")):
+        raise HTTPException(status_code=400, detail="queue_url must start with http:// or https://")
+
+    endpoint_url = str(config.get("endpoint_url", "")).strip()
+    if endpoint_url and not endpoint_url.startswith(("https://", "http://")):
+        raise HTTPException(
+            status_code=400,
+            detail="endpoint_url must start with http:// or https://",
+        )
+
+    access_key_id = str(config.get("access_key_id", "")).strip()
+    secret_access_key = str(config.get("secret_access_key", "")).strip()
+    session_token = str(config.get("session_token", "")).strip()
+    has_static_keypair = bool(access_key_id) and bool(secret_access_key)
+    has_partial_keypair = bool(access_key_id) != bool(secret_access_key)
+
+    if has_partial_keypair:
+        raise HTTPException(
+            status_code=400,
+            detail="access_key_id and secret_access_key must be set together for sqs",
+        )
+    if session_token and not has_static_keypair:
+        raise HTTPException(
+            status_code=400,
+            detail="session_token requires access_key_id and secret_access_key for sqs",
+        )
+
+
 def _enforce_scope(config_type: str, scope: dict) -> dict:
     """Enforce type-specific scope constraints. Returns normalized scope."""
     if config_type == "mqtt_community":
@@ -193,7 +289,7 @@ def _enforce_scope(config_type: str, scope: dict) -> dict:
                 detail="scope.messages must be 'all', 'none', or a filter object",
             )
         return {"messages": messages, "raw_packets": "none"}
-    # For mqtt_private, validate scope values
+    # For mqtt_private and sqs, validate scope values
     messages = scope.get("messages", "all")
     if messages not in ("all", "none") and not isinstance(messages, dict):
         raise HTTPException(
@@ -240,6 +336,8 @@ async def create_fanout_config(body: FanoutConfigCreate) -> dict:
             _validate_webhook_config(body.config)
         elif body.type == "apprise":
             _validate_apprise_config(body.config)
+        elif body.type == "sqs":
+            _validate_sqs_config(body.config)
 
     scope = _enforce_scope(body.type, body.scope)
 
@@ -295,6 +393,8 @@ async def update_fanout_config(config_id: str, body: FanoutConfigUpdate) -> dict
             _validate_webhook_config(config_to_validate)
         elif existing["type"] == "apprise":
             _validate_apprise_config(config_to_validate)
+        elif existing["type"] == "sqs":
+            _validate_sqs_config(config_to_validate)
 
     updated = await FanoutConfigRepository.update(config_id, **kwargs)
     if updated is None:

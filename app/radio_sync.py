@@ -4,31 +4,38 @@ Radio sync and offload management.
 This module handles syncing contacts and channels from the radio to the database,
 then removing them from the radio to free up space for new discoveries.
 
-Also handles loading recent non-repeater contacts TO the radio for DM ACK support.
+Also handles loading favorites plus recently active contacts TO the radio for DM ACK support.
 Also handles periodic message polling as a fallback for platforms where push events
 don't work reliably.
 """
 
 import asyncio
 import logging
+import math
 import time
 from contextlib import asynccontextmanager
 
 from meshcore import EventType
 
+from app.config import settings
 from app.event_handlers import cleanup_expired_acks
-from app.models import Contact
-from app.radio import RadioOperationBusyError, radio_manager
+from app.models import Contact, ContactUpsert
+from app.radio import RadioOperationBusyError
 from app.radio_backend import RadioBackend
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     AppSettingsRepository,
     ChannelRepository,
     ContactRepository,
-    MessageRepository,
 )
+from app.services.contact_reconciliation import reconcile_contact_messages
+from app.services.messages import create_fallback_channel_message
+from app.services.radio_runtime import radio_runtime as radio_manager
+from app.websocket import broadcast_error, broadcast_event
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_CHANNELS = 40
 
 
 def _contact_sync_debug_fields(contact: Contact) -> dict[str, object]:
@@ -45,8 +52,27 @@ def _contact_sync_debug_fields(contact: Contact) -> dict[str, object]:
         "last_advert": contact.last_advert,
         "lat": contact.lat,
         "lon": contact.lon,
-        "on_radio": contact.on_radio,
     }
+
+
+async def _reconcile_contact_messages_background(
+    public_key: str,
+    contact_name: str | None,
+) -> None:
+    """Run contact/message reconciliation outside the radio critical path."""
+    try:
+        await reconcile_contact_messages(
+            public_key=public_key,
+            contact_name=contact_name,
+            log=logger,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Background contact reconciliation failed for %s: %s",
+            public_key[:12],
+            exc,
+            exc_info=True,
+        )
 
 
 async def upsert_channel_from_radio_slot(payload: dict, *, on_radio: bool) -> str | None:
@@ -75,11 +101,28 @@ async def upsert_channel_from_radio_slot(payload: dict, *, on_radio: bool) -> st
     return key_hex
 
 
+def get_radio_channel_limit(max_channels: int | None = None) -> int:
+    """Return the effective channel-slot limit for the connected firmware."""
+    discovered = getattr(radio_manager, "max_channels", DEFAULT_MAX_CHANNELS)
+    try:
+        limit = max(1, int(discovered))
+    except (TypeError, ValueError):
+        limit = DEFAULT_MAX_CHANNELS
+
+    if max_channels is not None:
+        return min(limit, max(1, int(max_channels)))
+
+    return limit
+
+
 # Message poll task handle
 _message_poll_task: asyncio.Task | None = None
 
-# Message poll interval in seconds (10s gives DM ACKs plenty of time to arrive)
+# Message poll interval in seconds when aggressive fallback is enabled.
 MESSAGE_POLL_INTERVAL = 10
+
+# Always-on audit interval when aggressive fallback is disabled.
+MESSAGE_POLL_AUDIT_INTERVAL = 3600
 
 # Periodic advertisement task handle
 _advert_task: asyncio.Task | None = None
@@ -119,8 +162,57 @@ async def pause_polling():
 # Background task handle
 _sync_task: asyncio.Task | None = None
 
-# Sync interval in seconds (5 minutes)
+# Periodic maintenance check interval in seconds (5 minutes)
 SYNC_INTERVAL = 300
+
+# Reload non-favorite contacts up to 80% of configured radio capacity after offload.
+RADIO_CONTACT_REFILL_RATIO = 0.80
+
+# Trigger a full offload/reload once occupancy reaches 95% of configured capacity.
+RADIO_CONTACT_FULL_SYNC_RATIO = 0.95
+
+
+def _compute_radio_contact_limits(max_contacts: int) -> tuple[int, int]:
+    """Return (refill_target, full_sync_trigger) for the configured capacity."""
+    capacity = max(1, max_contacts)
+    refill_target = max(1, min(capacity, int((capacity * RADIO_CONTACT_REFILL_RATIO) + 0.5)))
+    full_sync_trigger = max(
+        refill_target,
+        min(capacity, math.ceil(capacity * RADIO_CONTACT_FULL_SYNC_RATIO)),
+    )
+    return refill_target, full_sync_trigger
+
+
+async def should_run_full_periodic_sync(be: RadioBackend) -> bool:
+    """Check current radio occupancy and decide whether to offload/reload."""
+    app_settings = await AppSettingsRepository.get()
+    capacity = app_settings.max_radio_contacts
+    refill_target, full_sync_trigger = _compute_radio_contact_limits(capacity)
+
+    result = await be.get_contacts()
+    if result is None or result.type == EventType.ERROR:
+        logger.warning("Periodic sync occupancy check failed: %s", result)
+        return False
+
+    current_contacts = len(result.payload or {})
+    if current_contacts >= full_sync_trigger:
+        logger.info(
+            "Running full radio sync: %d/%d contacts on radio (trigger=%d, refill_target=%d)",
+            current_contacts,
+            capacity,
+            full_sync_trigger,
+            refill_target,
+        )
+        return True
+
+    logger.debug(
+        "Skipping full radio sync: %d/%d contacts on radio (trigger=%d, refill_target=%d)",
+        current_contacts,
+        capacity,
+        full_sync_trigger,
+        refill_target,
+    )
+    return False
 
 
 async def sync_and_offload_contacts(be: RadioBackend) -> dict:
@@ -155,26 +247,14 @@ async def sync_and_offload_contacts(be: RadioBackend) -> dict:
         for public_key, contact_data in contacts.items():
             # Save to database
             await ContactRepository.upsert(
-                Contact.from_radio_dict(public_key, contact_data, on_radio=False)
+                ContactUpsert.from_radio_dict(public_key, contact_data, on_radio=False)
             )
-            claimed = await MessageRepository.claim_prefix_messages(public_key.lower())
-            if claimed > 0:
-                logger.info(
-                    "Claimed %d prefix DM message(s) for contact %s",
-                    claimed,
-                    public_key[:12],
+            asyncio.create_task(
+                _reconcile_contact_messages_background(
+                    public_key,
+                    contact_data.get("adv_name"),
                 )
-            adv_name = contact_data.get("adv_name")
-            if adv_name:
-                backfilled = await MessageRepository.backfill_channel_sender_key(
-                    public_key, adv_name
-                )
-                if backfilled > 0:
-                    logger.info(
-                        "Backfilled sender_key on %d channel message(s) for %s",
-                        backfilled,
-                        adv_name,
-                    )
+            )
             synced += 1
 
             # Remove from radio
@@ -218,7 +298,7 @@ async def sync_and_offload_contacts(be: RadioBackend) -> dict:
     return {"synced": synced, "removed": removed}
 
 
-async def sync_and_offload_channels(be: RadioBackend) -> dict:
+async def sync_and_offload_channels(be: RadioBackend, max_channels: int | None = None) -> dict:
     """
     Sync channels from radio to database, then clear them from radio.
     Returns counts of synced and cleared channels.
@@ -227,8 +307,11 @@ async def sync_and_offload_channels(be: RadioBackend) -> dict:
     cleared = 0
 
     try:
-        # Check all 40 channel slots
-        for idx in range(40):
+        radio_manager.reset_channel_send_cache()
+        channel_limit = get_radio_channel_limit(max_channels)
+
+        # Check all available channel slots for this firmware variant
+        for idx in range(channel_limit):
             result = await be.get_channel(idx)
 
             if result.type != EventType.CHANNEL_INFO:
@@ -241,6 +324,7 @@ async def sync_and_offload_channels(be: RadioBackend) -> dict:
             if key_hex is None:
                 continue
 
+            radio_manager.remember_pending_message_channel_slot(key_hex, idx)
             synced += 1
             logger.debug("Synced channel %s: %s", key_hex[:8], result.payload.get("channel_name"))
 
@@ -267,12 +351,94 @@ async def sync_and_offload_channels(be: RadioBackend) -> dict:
     return {"synced": synced, "cleared": cleared}
 
 
+def _split_channel_sender_and_text(text: str) -> tuple[str | None, str]:
+    """Parse the canonical MeshCore "<sender>: <message>" channel text format."""
+    sender = None
+    message_text = text
+    colon_idx = text.find(": ")
+    if 0 < colon_idx < 50:
+        potential_sender = text[:colon_idx]
+        if not any(char in potential_sender for char in ":[]\x00"):
+            sender = potential_sender
+            message_text = text[colon_idx + 2 :]
+    return sender, message_text
+
+
+async def _resolve_channel_for_pending_message(
+    be: RadioBackend,
+    channel_idx: int,
+) -> tuple[str | None, str | None]:
+    """Resolve a pending channel message's slot to a channel key and name."""
+    try:
+        result = await be.get_channel(channel_idx)
+    except Exception as exc:
+        logger.debug("Failed to fetch channel slot %s for pending message: %s", channel_idx, exc)
+    else:
+        if result.type == EventType.CHANNEL_INFO:
+            key_hex = await upsert_channel_from_radio_slot(result.payload, on_radio=False)
+            if key_hex is not None:
+                radio_manager.remember_pending_message_channel_slot(key_hex, channel_idx)
+                return key_hex, result.payload.get("channel_name") or None
+
+    current_slot_map = getattr(radio_manager, "_channel_key_by_slot", {})
+    cached_key = current_slot_map.get(channel_idx)
+    if cached_key is None:
+        cached_key = radio_manager.get_pending_message_channel_key(channel_idx)
+    if cached_key is None:
+        return None, None
+
+    channel = await ChannelRepository.get_by_key(cached_key)
+    return cached_key, channel.name if channel else None
+
+
+async def _store_pending_channel_message(be: RadioBackend, payload: dict) -> None:
+    """Persist a CHANNEL_MSG_RECV event pulled via get_msg()."""
+    channel_idx = payload.get("channel_idx")
+    if channel_idx is None:
+        logger.warning("Pending channel message missing channel_idx; dropping payload")
+        return
+
+    try:
+        normalized_channel_idx = int(channel_idx)
+    except (TypeError, ValueError):
+        logger.warning("Pending channel message had invalid channel_idx=%r", channel_idx)
+        return
+
+    channel_key, channel_name = await _resolve_channel_for_pending_message(
+        be, normalized_channel_idx
+    )
+    if channel_key is None:
+        logger.warning(
+            "Could not resolve channel slot %d for pending message; message cannot be stored",
+            normalized_channel_idx,
+        )
+        return
+
+    received_at = int(time.time())
+    sender_timestamp = payload.get("sender_timestamp") or received_at
+    sender_name, message_text = _split_channel_sender_and_text(payload.get("text", ""))
+
+    await create_fallback_channel_message(
+        conversation_key=channel_key,
+        message_text=message_text,
+        sender_timestamp=sender_timestamp,
+        received_at=received_at,
+        path=payload.get("path"),
+        path_len=payload.get("path_len"),
+        txt_type=payload.get("txt_type", 0),
+        sender_name=sender_name,
+        channel_name=channel_name,
+        broadcast_fn=broadcast_event,
+    )
+
+
 async def ensure_default_channels() -> None:
     """
     Ensure default channels exist in the database.
     These will be configured on the radio when needed for sending.
 
-    The Public channel is protected - it always exists with the canonical name.
+    This seeds the canonical Public channel row in the database if it is missing
+    or misnamed. It does not make the channel undeletable through the router.
     """
     # Public channel - no hashtag, specific well-known key
     PUBLIC_CHANNEL_KEY_HEX = "8B3387E9C5CDEA6AC9E5EDBAA115CD72"
@@ -293,16 +459,19 @@ async def sync_and_offload_all(be: RadioBackend) -> dict:
     """Sync and offload both contacts and channels, then ensure defaults exist."""
     logger.info("Starting full radio sync and offload")
 
+    # Contact on_radio is legacy/stale metadata. Clear it during the offload/reload
+    # cycle so old rows stop claiming radio residency we do not actively track.
+    await ContactRepository.clear_on_radio_except([])
+
     contacts_result = await sync_and_offload_contacts(be)
     channels_result = await sync_and_offload_channels(be)
 
     # Ensure default channels exist
     await ensure_default_channels()
 
-    # Reload favorites and recent contacts back onto the radio immediately
-    # so favorited contacts don't stay in the on_radio=False limbo until the
-    # next advertisement arrives.  Pass be directly since the caller already
-    # holds the radio operation lock (asyncio.Lock is not reentrant).
+    # Reload favorites plus a working-set fill back onto the radio immediately.
+    # Pass be directly since the caller already holds the radio operation lock
+    # (asyncio.Lock is not reentrant).
     reload_result = await sync_recent_contacts_to_radio(force=True, be=be)
 
     return {
@@ -332,6 +501,8 @@ async def drain_pending_messages(be: RadioBackend) -> int:
                 logger.debug("Error during message drain: %s", result.payload)
                 break
             elif result.type in (EventType.CONTACT_MSG_RECV, EventType.CHANNEL_MSG_RECV):
+                if result.type == EventType.CHANNEL_MSG_RECV:
+                    await _store_pending_channel_message(be, result.payload)
                 count += 1
 
             # Small delay between fetches
@@ -367,6 +538,8 @@ async def poll_for_messages(be: RadioBackend) -> int:
         elif result.type == EventType.ERROR:
             return 0
         elif result.type in (EventType.CONTACT_MSG_RECV, EventType.CHANNEL_MSG_RECV):
+            if result.type == EventType.CHANNEL_MSG_RECV:
+                await _store_pending_channel_message(be, result.payload)
             count += 1
             # If we got a message, there might be more - drain them
             count += await drain_pending_messages(be)
@@ -379,15 +552,71 @@ async def poll_for_messages(be: RadioBackend) -> int:
     return count
 
 
+def _normalize_channel_secret(payload: dict) -> bytes:
+    """Return a normalized bytes representation of a radio channel secret."""
+    secret = payload.get("channel_secret", b"")
+    if isinstance(secret, bytes):
+        return secret
+    return bytes(secret)
+
+
+async def audit_channel_send_cache(be: RadioBackend) -> bool:
+    """Verify cached send-slot expectations still match radio channel contents.
+
+    If a mismatch is detected, the app's send-slot cache is reset so future sends
+    fall back to reloading channels before reuse resumes.
+    """
+    if not radio_manager.channel_slot_reuse_enabled():
+        return True
+
+    cached_slots = radio_manager.get_channel_send_cache_snapshot()
+    if not cached_slots:
+        return True
+
+    mismatches: list[str] = []
+    for channel_key, slot in cached_slots:
+        result = await be.get_channel(slot)
+        if result.type != EventType.CHANNEL_INFO:
+            mismatches.append(
+                f"slot {slot}: expected {channel_key[:8]} but radio returned {result.type}"
+            )
+            continue
+
+        observed_name = result.payload.get("channel_name") or ""
+        observed_key = _normalize_channel_secret(result.payload).hex().upper()
+        expected_channel = await ChannelRepository.get_by_key(channel_key)
+        expected_name = expected_channel.name if expected_channel is not None else None
+
+        if observed_key != channel_key or expected_name is None or observed_name != expected_name:
+            mismatches.append(
+                f"slot {slot}: expected {expected_name or '(missing db row)'} "
+                f"{channel_key[:8]}, got {observed_name or '(empty)'} {observed_key[:8]}"
+            )
+
+    if not mismatches:
+        return True
+
+    logger.error(
+        "[RADIO SYNC ERROR] A periodic radio audit discovered that the channel send-slot cache fell out of sync with radio state. This indicates that some other system, internal or external to the radio, has updated the channel slots on the radio (which the app assumes it has exclusive rights to, except on TCP-linked devices). The cache is resetting now, but you should review the README.md and consider using the environment variable MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true to make the radio use non-optimistic channel management and force-write the channel to radio before each send. This is a minor performance hit, but guarantees consistency. Mismatches found: %s",
+        "; ".join(mismatches),
+    )
+    radio_manager.reset_channel_send_cache()
+    broadcast_error(
+        "A periodic poll task has discovered radio inconsistencies.",
+        "Please check the logs for recommendations (search "
+        "'MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE').",
+    )
+    return False
+
+
 async def _message_poll_loop():
     """Background task that periodically polls for messages."""
     while True:
         try:
-            await asyncio.sleep(MESSAGE_POLL_INTERVAL)
-
-            # Clean up expired pending ACKs every poll cycle so they don't
-            # accumulate when no ACKs arrive (e.g. all recipients out of range).
-            cleanup_expired_acks()
+            aggressive_fallback = settings.enable_message_poll_fallback
+            await asyncio.sleep(
+                MESSAGE_POLL_INTERVAL if aggressive_fallback else MESSAGE_POLL_AUDIT_INTERVAL
+            )
 
             if radio_manager.is_connected and not is_polling_paused():
                 try:
@@ -397,11 +626,26 @@ async def _message_poll_loop():
                         suspend_auto_fetch=True,
                     ) as be:
                         count = await poll_for_messages(be)
+                        await audit_channel_send_cache(be)
                         if count > 0:
-                            logger.warning(
-                                "Poll loop caught %d message(s) missed by auto-fetch",
-                                count,
-                            )
+                            if aggressive_fallback:
+                                logger.warning(
+                                    "Poll loop caught %d message(s) missed by auto-fetch",
+                                    count,
+                                )
+                            else:
+                                logger.error(
+                                    "[RADIO SYNC ERROR] Periodic radio audit caught %d message(s) that were not "
+                                    "surfaced via event subscription. This means that the method of event (new contacts, messages, etc.) awareness we want isn't giving us everything. There is a fallback method available; see README.md and consider "
+                                    "setting MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true to "
+                                    "enable active radio polling every few seconds.",
+                                    count,
+                                )
+                                broadcast_error(
+                                    "A periodic poll task has discovered radio inconsistencies.",
+                                    "Please check the logs for recommendations (search "
+                                    "'MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK').",
+                                )
                 except RadioOperationBusyError:
                     logger.debug("Skipping message poll: radio busy")
 
@@ -416,7 +660,16 @@ def start_message_polling():
     global _message_poll_task
     if _message_poll_task is None or _message_poll_task.done():
         _message_poll_task = asyncio.create_task(_message_poll_loop())
-        logger.info("Started periodic message polling (interval: %ds)", MESSAGE_POLL_INTERVAL)
+        if settings.enable_message_poll_fallback:
+            logger.info(
+                "Started periodic message polling task (aggressive fallback, interval: %ds)",
+                MESSAGE_POLL_INTERVAL,
+            )
+        else:
+            logger.info(
+                "Started periodic message audit task (interval: %ds)",
+                MESSAGE_POLL_AUDIT_INTERVAL,
+            )
 
 
 async def stop_message_polling():
@@ -515,7 +768,6 @@ async def _periodic_advert_loop():
             break
         except Exception as e:
             logger.error("Error in periodic advertisement loop: %s", e, exc_info=True)
-            await asyncio.sleep(ADVERT_CHECK_INTERVAL)
 
 
 def start_periodic_advert():
@@ -563,6 +815,7 @@ async def _periodic_sync_loop():
     while True:
         try:
             await asyncio.sleep(SYNC_INTERVAL)
+            cleanup_expired_acks()
             if not radio_manager.is_connected:
                 continue
 
@@ -571,8 +824,8 @@ async def _periodic_sync_loop():
                     "periodic_sync",
                     blocking=False,
                 ) as be:
-                    logger.debug("Running periodic radio sync")
-                    await sync_and_offload_all(be)
+                    if await should_run_full_periodic_sync(be):
+                        await sync_and_offload_all(be)
                     await sync_radio_time(be)
             except RadioOperationBusyError:
                 logger.debug("Skipping periodic sync: radio busy")
@@ -609,17 +862,11 @@ _last_contact_sync: float = 0.0
 CONTACT_SYNC_THROTTLE_SECONDS = 30  # Don't sync more than once per 30 seconds
 
 
-async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
-    """
-    Core logic for loading contacts onto the radio.
-
-    Favorite contacts are prioritized first, then recent non-repeater contacts
-    fill remaining slots up to max_radio_contacts.
-
-    Caller must hold the radio operation lock and pass a valid backend instance.
-    """
+async def get_contacts_selected_for_radio_sync() -> list[Contact]:
+    """Return the contacts that would be loaded onto the radio right now."""
     app_settings = await AppSettingsRepository.get()
     max_contacts = app_settings.max_radio_contacts
+    refill_target, _full_sync_trigger = _compute_radio_contact_limits(max_contacts)
     selected_contacts: list[Contact] = []
     selected_keys: set[str] = set()
 
@@ -637,6 +884,12 @@ async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
             continue
         if not contact:
             continue
+        if len(contact.public_key) < 64:
+            logger.debug(
+                "Skipping unresolved prefix-only favorite contact '%s' for radio sync",
+                favorite.id,
+            )
+            continue
         key = contact.public_key.lower()
         if key in selected_keys:
             continue
@@ -646,36 +899,126 @@ async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
         if len(selected_contacts) >= max_contacts:
             break
 
-    if len(selected_contacts) < max_contacts:
-        recent_contacts = await ContactRepository.get_recent_non_repeaters(limit=max_contacts)
-        for contact in recent_contacts:
+    if len(selected_contacts) < refill_target:
+        for contact in await ContactRepository.get_recently_contacted_non_repeaters(
+            limit=max_contacts
+        ):
             key = contact.public_key.lower()
             if key in selected_keys:
                 continue
             selected_keys.add(key)
             selected_contacts.append(contact)
-            if len(selected_contacts) >= max_contacts:
+            if len(selected_contacts) >= refill_target:
+                break
+
+    if len(selected_contacts) < refill_target:
+        for contact in await ContactRepository.get_recently_advertised_non_repeaters(
+            limit=max_contacts
+        ):
+            key = contact.public_key.lower()
+            if key in selected_keys:
+                continue
+            selected_keys.add(key)
+            selected_contacts.append(contact)
+            if len(selected_contacts) >= refill_target:
                 break
 
     logger.debug(
-        "Selected %d contacts to sync (%d favorite contacts first, limit=%d)",
+        "Selected %d contacts to sync (%d favorites, refill_target=%d, capacity=%d)",
         len(selected_contacts),
         favorite_contacts_loaded,
+        refill_target,
         max_contacts,
     )
+    return selected_contacts
 
+
+async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
+    """
+    Core logic for loading contacts onto the radio.
+
+    Fill order is:
+    1. Favorite contacts
+    2. Most recently interacted-with non-repeaters
+    3. Most recently advert-heard non-repeaters without interaction history
+
+    Favorite contacts are always reloaded first, up to the configured capacity.
+    Additional non-favorite fill stops at the refill target (80% of capacity).
+
+    Caller must hold the radio operation lock and pass a valid backend instance.
+    """
+    selected_contacts = await get_contacts_selected_for_radio_sync()
+    return await _load_contacts_to_radio(be, selected_contacts)
+
+
+async def ensure_contact_on_radio(
+    public_key: str,
+    *,
+    force: bool = False,
+    be: RadioBackend | None = None,
+) -> dict:
+    """Ensure one contact is loaded on the radio for ACK/routing support."""
+    global _last_contact_sync
+
+    now = time.time()
+    if not force and (now - _last_contact_sync) < CONTACT_SYNC_THROTTLE_SECONDS:
+        logger.debug(
+            "Single-contact sync throttled (last sync %ds ago)",
+            int(now - _last_contact_sync),
+        )
+        return {"loaded": 0, "throttled": True}
+
+    try:
+        contact = await ContactRepository.get_by_key_or_prefix(public_key)
+    except AmbiguousPublicKeyPrefixError:
+        logger.warning("Cannot sync favorite contact '%s': ambiguous key prefix", public_key)
+        return {"loaded": 0, "error": "Ambiguous contact key prefix"}
+
+    if not contact:
+        logger.debug("Cannot sync favorite contact %s: not found", public_key[:12])
+        return {"loaded": 0, "error": "Contact not found"}
+    if len(contact.public_key) < 64:
+        logger.debug("Cannot sync unresolved prefix-only contact %s to radio", public_key)
+        return {"loaded": 0, "error": "Full contact key not yet known"}
+
+    if be is not None:
+        _last_contact_sync = now
+        return await _load_contacts_to_radio(be, [contact])
+
+    if not radio_manager.is_connected or radio_manager.backend is None:
+        logger.debug("Cannot sync favorite contact to radio: not connected")
+        return {"loaded": 0, "error": "Radio not connected"}
+
+    try:
+        async with radio_manager.radio_operation(
+            "ensure_contact_on_radio",
+            blocking=False,
+        ) as be_inner:
+            _last_contact_sync = now
+            return await _load_contacts_to_radio(be_inner, [contact])
+    except RadioOperationBusyError:
+        logger.debug("Skipping favorite contact sync: radio busy")
+        return {"loaded": 0, "busy": True}
+    except Exception as e:
+        logger.error("Error syncing favorite contact to radio: %s", e, exc_info=True)
+        return {"loaded": 0, "error": str(e)}
+
+
+async def _load_contacts_to_radio(be: RadioBackend, contacts: list[Contact]) -> dict:
+    """Load the provided contacts onto the radio."""
     loaded = 0
     already_on_radio = 0
     failed = 0
 
-    for contact in selected_contacts:
-        # Check if already on radio
+    for contact in contacts:
+        if len(contact.public_key) < 64:
+            logger.debug(
+                "Skipping unresolved prefix-only contact %s during radio load", contact.public_key
+            )
+            continue
         radio_contact = be.get_contact_by_key_prefix(contact.public_key[:12])
         if radio_contact:
             already_on_radio += 1
-            # Update DB if not marked as on_radio
-            if not contact.on_radio:
-                await ContactRepository.set_on_radio(contact.public_key, True)
             continue
 
         try:
@@ -683,7 +1026,6 @@ async def _sync_contacts_to_radio_inner(be: RadioBackend) -> dict:
             result = await be.add_contact(radio_contact_payload)
             if result.type == EventType.OK:
                 loaded += 1
-                await ContactRepository.set_on_radio(contact.public_key, True)
                 logger.debug("Loaded contact %s to radio", contact.public_key[:12])
             else:
                 failed += 1
@@ -733,8 +1075,10 @@ async def sync_recent_contacts_to_radio(
     """
     Load contacts to the radio for DM ACK support.
 
-    Favorite contacts are prioritized first, then recent non-repeater contacts
-    fill remaining slots up to max_radio_contacts.
+    Fill order is favorites, then recently contacted non-repeaters,
+    then recently advert-heard non-repeaters. Favorites are always reloaded
+    up to the configured capacity; additional non-favorite fill stops at the
+    80% refill target.
     Only runs at most once every CONTACT_SYNC_THROTTLE_SECONDS unless forced.
 
     Args:

@@ -79,6 +79,14 @@ Push notifications via Apprise library. Config blob:
 - `preserve_identity` — suppress Discord webhook name/avatar override
 - `include_path` — include routing path in notification body
 
+### sqs (sqs.py)
+Amazon SQS delivery. Config blob:
+- `queue_url` — target queue URL
+- `region_name` (optional; inferred from standard AWS SQS queue URLs when omitted), `endpoint_url` (optional)
+- `access_key_id`, `secret_access_key`, `session_token` (all optional; blank uses the normal AWS credential chain)
+- Publishes a JSON envelope of the form `{"event_type":"message"|"raw_packet","data":...}`
+- Supports both decoded messages and raw packets via normal scope selection
+
 ## Adding a New Integration Type
 
 ### Step-by-step checklist
@@ -132,7 +140,7 @@ Three changes needed:
 
 **a)** Add to `_VALID_TYPES` set:
 ```python
-_VALID_TYPES = {"mqtt_private", "mqtt_community", "bot", "webhook", "apprise", "my_type"}
+_VALID_TYPES = {"mqtt_private", "mqtt_community", "bot", "webhook", "apprise", "sqs", "my_type"}
 ```
 
 **b)** Add a validation function:
@@ -280,6 +288,7 @@ Migrations:
 - `app/fanout/bot_exec.py` — Bot code execution, response processing, rate limiting
 - `app/fanout/webhook.py` — Webhook fanout module
 - `app/fanout/apprise_mod.py` — Apprise fanout module
+- `app/fanout/sqs.py` — Amazon SQS fanout module
 - `app/repository/fanout.py` — Database CRUD
 - `app/routers/fanout.py` — REST API
 - `app/websocket.py` — `broadcast_event()` dispatches to fanout

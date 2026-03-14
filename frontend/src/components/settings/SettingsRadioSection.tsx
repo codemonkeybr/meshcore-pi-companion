@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { MapPinned } from 'lucide-react';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Button } from '../ui/button';
@@ -23,6 +24,8 @@ export function SettingsRadioSection({
   onSaveAppSettings,
   onSetPrivateKey,
   onReboot,
+  onDisconnect,
+  onReconnect,
   onAdvertise,
   onClose,
   className,
@@ -35,6 +38,8 @@ export function SettingsRadioSection({
   onSaveAppSettings: (update: AppSettingsUpdate) => Promise<void>;
   onSetPrivateKey: (key: string) => Promise<void>;
   onReboot: () => Promise<void>;
+  onDisconnect: () => Promise<void>;
+  onReconnect: () => Promise<void>;
   onAdvertise: () => Promise<void>;
   onClose: () => void;
   className?: string;
@@ -49,6 +54,7 @@ export function SettingsRadioSection({
   const [sf, setSf] = useState('');
   const [cr, setCr] = useState('');
   const [pathHashMode, setPathHashMode] = useState('0');
+  const [advertLocationSource, setAdvertLocationSource] = useState<'off' | 'current'>('current');
   const [gettingLocation, setGettingLocation] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rebooting, setRebooting] = useState(false);
@@ -69,6 +75,7 @@ export function SettingsRadioSection({
 
   // Advertise state
   const [advertising, setAdvertising] = useState(false);
+  const [connectionBusy, setConnectionBusy] = useState(false);
 
   useEffect(() => {
     setName(config.name);
@@ -80,6 +87,7 @@ export function SettingsRadioSection({
     setSf(String(config.radio.sf));
     setCr(String(config.radio.cr));
     setPathHashMode(String(config.path_hash_mode));
+    setAdvertLocationSource(config.advert_location_source ?? 'current');
   }, [config]);
 
   useEffect(() => {
@@ -169,6 +177,9 @@ export function SettingsRadioSection({
       lat: parsedLat,
       lon: parsedLon,
       tx_power: parsedTxPower,
+      ...(advertLocationSource !== (config.advert_location_source ?? 'current')
+        ? { advert_location_source: advertLocationSource }
+        : {}),
       radio: {
         freq: parsedFreq,
         bw: parsedBw,
@@ -284,24 +295,82 @@ export function SettingsRadioSection({
     }
   };
 
+  const radioState =
+    health?.radio_state ?? (health?.radio_initializing ? 'initializing' : 'disconnected');
+  const connectionActionLabel =
+    radioState === 'paused'
+      ? 'Reconnect'
+      : radioState === 'connected' || radioState === 'initializing'
+        ? 'Disconnect'
+        : 'Stop Trying';
+
+  const connectionStatusLabel =
+    radioState === 'connected'
+      ? health?.connection_info || 'Connected'
+      : radioState === 'initializing'
+        ? `Initializing ${health?.connection_info || 'radio'}`
+        : radioState === 'connecting'
+          ? `Attempting to connect${health?.connection_info ? ` to ${health.connection_info}` : ''}`
+          : radioState === 'paused'
+            ? `Connection paused${health?.connection_info ? ` (${health.connection_info})` : ''}`
+            : 'Not connected';
+
+  const handleConnectionAction = async () => {
+    setConnectionBusy(true);
+    try {
+      if (radioState === 'paused') {
+        await onReconnect();
+        toast.success('Reconnect requested');
+      } else {
+        await onDisconnect();
+        toast.success('Radio connection paused');
+      }
+    } catch (err) {
+      toast.error('Failed to change radio connection state', {
+        description: err instanceof Error ? err.message : 'Check radio connection and try again',
+      });
+    } finally {
+      setConnectionBusy(false);
+    }
+  };
+
   return (
     <div className={className}>
       {/* Connection display */}
-      <div className="space-y-2">
+      <div className="space-y-3">
         <Label>Connection</Label>
-        {health?.connection_info ? (
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-status-connected" />
-            <code className="px-2 py-1 bg-muted rounded text-foreground text-sm">
-              {health.connection_info}
-            </code>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <div className="w-2 h-2 rounded-full bg-status-disconnected" />
-            <span>Not connected</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          <div
+            className={`w-2 h-2 rounded-full ${
+              radioState === 'connected'
+                ? 'bg-status-connected'
+                : radioState === 'initializing' || radioState === 'connecting'
+                  ? 'bg-warning'
+                  : 'bg-status-disconnected'
+            }`}
+          />
+          <span
+            className={
+              radioState === 'paused' || radioState === 'disconnected'
+                ? 'text-muted-foreground'
+                : ''
+            }
+          >
+            {connectionStatusLabel}
+          </span>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={handleConnectionAction}
+          disabled={connectionBusy}
+          className="w-full"
+        >
+          {connectionBusy ? `${connectionActionLabel}...` : connectionActionLabel}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Disconnect pauses automatic reconnect attempts so another device can use the radio.
+        </p>
       </div>
 
       {/* Radio Name */}
@@ -406,7 +475,14 @@ export function SettingsRadioSection({
             onClick={handleGetLocation}
             disabled={gettingLocation}
           >
-            {gettingLocation ? 'Getting...' : '📍 Use My Location'}
+            {gettingLocation ? (
+              'Getting...'
+            ) : (
+              <>
+                <MapPinned className="mr-1.5 h-4 w-4" aria-hidden="true" />
+                Use My Location
+              </>
+            )}
           </Button>
         </div>
         <div className="grid grid-cols-2 gap-4">
@@ -435,6 +511,25 @@ export function SettingsRadioSection({
             />
           </div>
         </div>
+        <div className="space-y-2">
+          <Label htmlFor="advert-location-source">Advert Location Source</Label>
+          <select
+            id="advert-location-source"
+            value={advertLocationSource}
+            onChange={(e) => setAdvertLocationSource(e.target.value as 'off' | 'current')}
+            className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          >
+            <option value="off">Off</option>
+            <option value="current">Include Node Location</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Companion-radio firmware does not distinguish between saved coordinates and live GPS
+            here. When enabled, adverts include the node&apos;s current location state. That may be
+            the last coordinates you set from RemoteTerm or live GPS coordinates if the node itself
+            is already updating them. RemoteTerm cannot enable GPS on the node through the interface
+            library.
+          </p>
+        </div>
       </div>
 
       {config.path_hash_mode_supported && (
@@ -452,7 +547,7 @@ export function SettingsRadioSection({
               <option value="1">2 bytes</option>
               <option value="2">3 bytes</option>
             </select>
-            <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-200">
+            <div className="rounded-md border border-warning/50 bg-warning/10 p-3 text-xs text-warning">
               <p className="font-semibold mb-1">Compatibility Warning</p>
               <p>
                 ALL nodes along a message&apos;s route &mdash; your radio, every repeater, and the
@@ -575,8 +670,8 @@ export function SettingsRadioSection({
           onChange={(e) => setMaxRadioContacts(e.target.value)}
         />
         <p className="text-xs text-muted-foreground">
-          Favorite contacts load first, then recent non-repeater contacts until this limit is
-          reached (1-1000)
+          Configured radio contact capacity. Favorites reload first, then background maintenance
+          refills to about 80% of this value and offloads once occupancy reaches about 95%.
         </p>
       </div>
 

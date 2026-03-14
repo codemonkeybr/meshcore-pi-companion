@@ -56,6 +56,7 @@ class TestHealthFanoutStatus:
         assert data["status"] == "ok"
         assert data["radio_connected"] is True
         assert data["radio_initializing"] is False
+        assert data["radio_state"] == "connected"
         assert data["connection_info"] == "Serial: /dev/ttyUSB0"
 
     @pytest.mark.asyncio
@@ -69,6 +70,7 @@ class TestHealthFanoutStatus:
         assert data["status"] == "degraded"
         assert data["radio_connected"] is False
         assert data["radio_initializing"] is False
+        assert data["radio_state"] == "disconnected"
         assert data["connection_info"] is None
 
     @pytest.mark.asyncio
@@ -87,34 +89,40 @@ class TestHealthFanoutStatus:
         assert data["status"] == "degraded"
         assert data["radio_connected"] is True
         assert data["radio_initializing"] is True
+        assert data["radio_state"] == "initializing"
 
     @pytest.mark.asyncio
-    async def test_health_setup_required_false_when_not_spi(self, test_db):
-        """setup_required is False when not in SPI mode."""
-        with patch("app.routers.health.settings") as mock_settings:
-            mock_settings.connection_type = "serial"
-            mock_settings.database_path = "data/meshcore.db"
-            mock_settings.disable_bots = False
-            with patch(
-                "app.routers.health.RawPacketRepository.get_oldest_undecrypted",
-                return_value=None,
-            ):
-                data = await build_health_data(True, "Serial: /dev/ttyUSB0")
-        assert data["setup_required"] is False
-
-    @pytest.mark.asyncio
-    async def test_health_setup_required_true_when_spi_config_invalid(self, test_db):
-        """setup_required is True when SPI mode is selected but config is invalid."""
+    async def test_health_state_paused_when_operator_disabled_connection(self, test_db):
+        """Health reports paused when the operator has disabled reconnect attempts."""
         with (
-            patch("app.routers.health.settings") as mock_settings,
-            patch("app.routers.setup.get_setup_required", return_value=True),
+            patch(
+                "app.routers.health.RawPacketRepository.get_oldest_undecrypted", return_value=None
+            ),
+            patch("app.routers.health.radio_manager") as mock_rm,
         ):
-            mock_settings.connection_type = "spi"
-            mock_settings.database_path = "data/meshcore.db"
-            mock_settings.disable_bots = False
-            with patch(
-                "app.routers.health.RawPacketRepository.get_oldest_undecrypted",
-                return_value=None,
-            ):
-                data = await build_health_data(True, "SPI")
-        assert data["setup_required"] is True
+            mock_rm.is_setup_in_progress = False
+            mock_rm.is_setup_complete = False
+            mock_rm.connection_desired = False
+            mock_rm.is_reconnecting = False
+            data = await build_health_data(False, "BLE: AA:BB:CC:DD:EE:FF")
+
+        assert data["radio_state"] == "paused"
+        assert data["radio_connected"] is False
+
+    @pytest.mark.asyncio
+    async def test_health_state_connecting_while_reconnect_in_progress(self, test_db):
+        """Health reports connecting while retries are active but transport is not up yet."""
+        with (
+            patch(
+                "app.routers.health.RawPacketRepository.get_oldest_undecrypted", return_value=None
+            ),
+            patch("app.routers.health.radio_manager") as mock_rm,
+        ):
+            mock_rm.is_setup_in_progress = False
+            mock_rm.is_setup_complete = False
+            mock_rm.connection_desired = True
+            mock_rm.is_reconnecting = True
+            data = await build_health_data(False, None)
+
+        assert data["radio_state"] == "connecting"
+        assert data["radio_connected"] is False

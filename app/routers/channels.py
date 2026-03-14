@@ -7,14 +7,18 @@ from pydantic import BaseModel, Field
 
 from app.dependencies import require_connected
 from app.models import Channel, ChannelDetail, ChannelMessageCounts, ChannelTopSender
-from app.radio import radio_manager
 from app.radio_sync import upsert_channel_from_radio_slot
 from app.region_scope import normalize_region_scope
 from app.repository import ChannelRepository, MessageRepository
+from app.services.radio_runtime import radio_runtime as radio_manager
 from app.websocket import broadcast_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/channels", tags=["channels"])
+
+
+def _broadcast_channel_update(channel: Channel) -> None:
+    broadcast_event("channel", channel.model_dump())
 
 
 class CreateChannelRequest(BaseModel):
@@ -55,15 +59,6 @@ async def get_channel_detail(key: str) -> ChannelDetail:
     )
 
 
-@router.get("/{key}", response_model=Channel)
-async def get_channel(key: str) -> Channel:
-    """Get a specific channel by key (32-char hex string)."""
-    channel = await ChannelRepository.get_by_key(key)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    return channel
-
-
 @router.post("", response_model=Channel)
 async def create_channel(request: CreateChannelRequest) -> Channel:
     """Create a channel in the database.
@@ -98,13 +93,12 @@ async def create_channel(request: CreateChannelRequest) -> Channel:
         on_radio=False,
     )
 
-    return Channel(
-        key=key_hex,
-        name=request.name,
-        is_hashtag=is_hashtag,
-        on_radio=False,
-        flood_scope_override=None,
-    )
+    stored = await ChannelRepository.get_by_key(key_hex)
+    if stored is None:
+        raise HTTPException(status_code=500, detail="Channel was created but could not be reloaded")
+
+    _broadcast_channel_update(stored)
+    return stored
 
 
 @router.post("/sync")
@@ -115,9 +109,9 @@ async def sync_channels_from_radio(max_channels: int = Query(default=40, ge=1, l
     logger.info("Syncing channels from radio (checking %d slots)", max_channels)
     count = 0
 
-    async with radio_manager.radio_operation("sync_channels_from_radio") as mc:
+    async with radio_manager.radio_operation("sync_channels_from_radio") as be:
         for idx in range(max_channels):
-            result = await mc.get_channel(idx)
+            result = await be.get_channel(idx)
 
             if result.type == EventType.CHANNEL_INFO:
                 key_hex = await upsert_channel_from_radio_slot(result.payload, on_radio=True)

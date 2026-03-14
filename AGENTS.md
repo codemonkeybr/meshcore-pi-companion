@@ -14,52 +14,54 @@ This runs all linting, formatting, type checking, tests, and builds for both bac
 
 ## Overview
 
-A web interface for MeshCore mesh radio networks. The backend connects to a MeshCore-compatible radio over Serial, TCP, or BLE and exposes REST/WebSocket APIs. The React frontend provides real-time messaging and radio configuration.
+A web interface for MeshCore mesh radio networks. The backend connects to a MeshCore-compatible radio over Serial, TCP, or BLE — or, on Raspberry Pi with a LoRa HAT, drives the radio directly over **SPI** (no external device). It exposes REST/WebSocket APIs. The React frontend provides real-time messaging and radio configuration.
 
 **For detailed component documentation, see these primary AGENTS.md files:**
 - `app/AGENTS.md` - Backend (FastAPI, database, radio connection, packet decryption)
 - `frontend/AGENTS.md` - Frontend (React, state management, WebSocket, components)
 
 Ancillary AGENTS.md files which should generally not be reviewed unless specific work is being performed on those features include:
-- `app/fanout/AGENTS_fanout.md` - Fanout bus architecture (MQTT, bots, webhooks, Apprise)
-- `frontend/src/components/AGENTS_packet_visualizer.md` - Packet visualizer (force-directed graph, advert-path identity, layout engine)
+- `app/fanout/AGENTS_fanout.md` - Fanout bus architecture (MQTT, bots, webhooks, Apprise, SQS)
+- `frontend/src/components/visualizer/AGENTS_packet_visualizer.md` - Packet visualizer (force-directed graph, advert-path identity, layout engine)
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Frontend (React)                         │
+│                         Frontend (React)                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
 │  │ StatusBar│  │ Sidebar  │  │MessageList│  │  MessageInput   │ │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘ │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │      CrackerPanel (global collapsible, WebGPU cracking)    │ │
 │  └────────────────────────────────────────────────────────────┘ │
-│                           │                                      │
-│                    useWebSocket ←──── Real-time updates          │
-│                           │                                      │
-│                      api.ts ←──── REST API calls                 │
-└───────────────────────────┼──────────────────────────────────────┘
+│                           │                                     │
+│                    useWebSocket ←──── Real-time updates         │
+│                           │                                     │
+│                      api.ts ←──── REST API calls                │
+└───────────────────────────┼─────────────────────────────────────┘
                             │ HTTP + WebSocket (/api/*)
 ┌───────────────────────────┼──────────────────────────────────────┐
 │                      Backend (FastAPI)                           │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │ Routers  │→ │ Repositories │→ │  SQLite DB │  │ WebSocket │  │
-│  └──────────┘  └──────────────┘  └────────────┘  │  Manager  │  │
-│        ↓                                          └───────────┘  │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              RadioManager + Event Handlers               │   │
-│  └─────────────────────────────┬────────────────────────────┘   │
-│                                │ RadioBackend (abstract)         │
-│                    ┌────────────┴────────────┐                    │
-│                    │ ClientBackend | SpiBackend (meshcore|pymc_core) │
-│                    └────────────┬────────────┘                    │
-└────────────────────────────────┼────────────────────────────────┘
-                                 │ Serial/TCP/BLE    │ SPI (Pi+HAT)
-                          ┌──────┴──────┐     ┌──────┴──────┐
-                          │ MeshCore    │     │ LoRa radio   │
-                          │   Radio     │     │ (e.g. SX1262)│
-                          └─────────────┘     └─────────────┘
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌────────────┐    │
+│  │ Routers  │→ │ Services │→ │ Repositories │→ │  SQLite DB │    │
+│  └──────────┘  └──────────┘  └──────────────┘  └────────────┘    │
+│        ↓                         │                ┌───────────┐  │
+│  ┌──────────────────────────┐    └──────────────→ │ WebSocket │  │
+│  │ Radio runtime seam +     │                     │  Manager  │  │
+│  │ RadioManager lifecycle   │                     └───────────┘  │
+│  │ / event adapters         │                                    │
+│  └─────────────────────────┬────────────────────────────────────┘
+│                            │ RadioBackend (abstract)             │
+│                ┌───────────┴───────────┐                         │
+│                │ ClientBackend | SpiBackend (meshcore | pymc_core)│
+│                └───────────┬───────────┘                         │
+└────────────────────────────┼─────────────────────────────────────┘
+                             │ Serial/TCP/BLE    │ SPI (Pi + LoRa HAT)
+                      ┌──────┴──────┐     ┌──────┴──────┐
+                      │ MeshCore    │     │ LoRa radio  │
+                      │   Radio     │     │ (e.g. SX1262)│
+                      └─────────────┘     └─────────────┘
 ```
 
 **Radio backends:** One transport is active at a time. When `data/config.yaml` (or `config.yaml`) exists, **SPI mode** is used: `RadioManager` uses `SpiBackend` (pymc_core + LoRa HAT). Otherwise serial/TCP/BLE use `ClientBackend` (meshcore library). Setup API (`GET/POST /api/setup/*`) and CLI (`python -m app.setup_cli`) provision SPI config; see `app/AGENTS.md` and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
@@ -81,12 +83,14 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 - Raw packet feed — a debug/observation tool ("radio aquarium"); interesting to watch or copy packets from, but not critical infrastructure
 - Map view — visual display of node locations from advertisements
 - Network visualizer — force-directed graph of mesh topology
-- Fanout integrations (MQTT, bots, webhooks, Apprise) — see `app/fanout/AGENTS_fanout.md`
+- Fanout integrations (MQTT, bots, webhooks, Apprise, SQS) — see `app/fanout/AGENTS_fanout.md`
 - Read state tracking / mark-all-read — convenience feature for unread badges; no need for transactional atomicity or race-condition hardening
 
 ## Error Handling Philosophy
 
 **Background tasks** (WebSocket broadcasts, periodic sync, contact auto-loading, etc.) use fire-and-forget `asyncio.create_task`. Exceptions in these tasks are logged to the backend logs, which is sufficient for debugging. There is no need to track task references or add done-callbacks purely for error visibility. If there's a convenient way to bubble an error to the frontend (e.g., via `broadcast_error` for user-actionable problems), do so, but this is minor and best-effort.
+
+Radio startup/setup is one place where that frontend bubbling is intentional: if post-connect setup hangs past its timeout, the backend both logs the failure and pushes a toast instructing the operator to reboot the radio and restart the server.
 
 ## Key Design Principles
 
@@ -97,12 +101,21 @@ Ancillary AGENTS.md files which should generally not be reviewed unless specific
 5. **Offline-capable**: Radio operates independently; server syncs when connected
 6. **Auto-reconnect**: Background monitor detects disconnection and attempts reconnection
 
+## Code Ethos
+
+- Prefer fewer, stronger modules over many tiny wrapper files.
+- Split code only when the new module owns a real invariant, workflow, or contract.
+- Avoid "enterprise" indirection layers whose main job is forwarding, renaming, or prop bundling.
+- For this repo, "locally dense but semantically obvious" is better than context scattered across many files.
+- Use typed contracts at important boundaries such as API payloads, WebSocket events, and repository writes.
+- Refactors should be behavior-preserving slices with tests around the moved seam, not aesthetic reshuffles.
+
 ## Intentional Security Design Decisions
 
 The following are **deliberate design choices**, not bugs. They are documented in the README with appropriate warnings. Do not "fix" these or flag them as vulnerabilities.
 
 1. **No CORS restrictions**: The backend allows all origins (`allow_origins=["*"]`). This lets users access their radio from any device/origin on their network without configuration hassle.
-2. **No authentication or authorization**: There is no login, no API keys, no session management. The app is designed for trusted networks (home LAN, VPN). The README warns users not to expose it to untrusted networks.
+2. **Minimal optional access control only**: The app has no user accounts, sessions, authorization model, or per-feature permissions. Operators may optionally set `MESHCORE_BASIC_AUTH_USERNAME` and `MESHCORE_BASIC_AUTH_PASSWORD` for app-wide HTTP Basic auth, but this is only a coarse gate and still requires HTTPS plus a trusted network posture.
 3. **Arbitrary bot code execution**: The bot system (`app/fanout/bot_exec.py`) executes user-provided Python via `exec()` with full `__builtins__`. This is intentional — bots are a power-user feature for automation. The README explicitly warns that anyone on the network can execute arbitrary code through this. Operators can set `MESHCORE_DISABLE_BOTS=true` to completely disable the bot system at startup — this skips all bot execution, returns 403 on bot settings updates, and shows a disabled message in the frontend.
 
 ## Intentional Packet Handling Decision
@@ -122,7 +135,7 @@ To improve repeater disambiguation in the network visualizer, the backend stores
 - This is independent of raw-packet payload deduplication.
 - Paths are keyed per contact + path + hop count, with `heard_count`, `first_seen`, and `last_seen`.
 - Only the N most recent unique paths are retained per contact (currently 10).
-- See `frontend/src/components/AGENTS_packet_visualizer.md` § "Advert-Path Identity Hints" for how the visualizer consumes this data.
+- See `frontend/src/components/visualizer/AGENTS_packet_visualizer.md` § "Advert-Path Identity Hints" for how the visualizer consumes this data.
 
 ## Path Hash Modes
 
@@ -148,7 +161,7 @@ MeshCore firmware can encode path hops as 1-byte, 2-byte, or 3-byte identifiers.
 
 1. User types message → clicks send
 2. `api.sendChannelMessage()` → POST to backend
-3. Backend calls `radio_manager.meshcore.commands.send_chan_msg()`
+3. Backend route delegates to service-layer send orchestration, which acquires the radio lock and calls MeshCore commands
 4. Message stored in database with `outgoing=true`
 5. For direct messages: ACK tracked; for channel: repeat detection
 
@@ -168,16 +181,17 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   ├── AGENTS.md           # Backend documentation
 │   ├── main.py             # App entry, lifespan
 │   ├── routers/            # API endpoints
+│   ├── services/           # Shared backend orchestration/domain services, including radio_runtime access seam
 │   ├── packet_processor.py # Raw packet pipeline, dedup, path handling
 │   ├── repository/         # Database CRUD (contacts, channels, messages, raw_packets, settings, fanout)
 │   ├── event_handlers.py   # Radio events
 │   ├── decoder.py          # Packet decryption
 │   ├── websocket.py        # Real-time broadcasts
-│   └── fanout/             # Fanout bus: MQTT, bots, webhooks, Apprise (see fanout/AGENTS_fanout.md)
+│   └── fanout/             # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
 ├── frontend/               # React frontend
 │   ├── AGENTS.md           # Frontend documentation
 │   ├── src/
-│   │   ├── App.tsx         # Main component
+│   │   ├── App.tsx         # Frontend composition entry (hooks → AppShell)
 │   │   ├── api.ts          # REST client
 │   │   ├── useWebSocket.ts # WebSocket hook
 │   │   └── components/
@@ -186,14 +200,10 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   │       └── ...
 │   └── vite.config.ts
 ├── scripts/
-│   ├── all_quality.sh         # Run all lint, format, typecheck, tests, build (sequential)
-│   ├── install_remoterm_pi.sh # Pi install + optional SPI config wizard (--spi-config = wizard only)
-│   ├── run_remoterm.sh        # Run backend (venv + PYTHONPATH); use for Pi/SPI
-│   ├── collect_licenses.sh    # Gather third-party license attributions
-│   ├── e2e.sh                 # End-to-end test runner
-│   └── publish.sh             # Version bump, changelog, docker build & push
-├── docs/
-│   └── PI_DEPLOYMENT.md       # Short Pi + SPI deployment guide
+│   ├── all_quality.sh      # Run all lint, format, typecheck, tests, build (sequential)
+│   ├── collect_licenses.sh # Gather third-party license attributions
+│   ├── e2e.sh              # End-to-end test runner
+│   └── publish.sh          # Version bump, changelog, docker build & push
 ├── remoteterm.service      # Systemd unit file for production deployment
 ├── tests/                  # Backend tests (pytest)
 ├── data/                   # SQLite database (runtime)
@@ -219,7 +229,7 @@ MESHCORE_SERIAL_PORT=/dev/cu.usbserial-0001 uv run uvicorn app.main:app --reload
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev    # http://localhost:5173, proxies /api to :8000
 ```
 
@@ -233,34 +243,13 @@ Terminal 2: `cd frontend && npm run dev`
 In production, the FastAPI backend serves the compiled frontend. Build the frontend first:
 
 ```bash
-cd frontend && npm install && npm run build && cd ..
+cd frontend && npm ci && npm run build && cd ..
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Access at `http://localhost:8000`. All API routes are prefixed with `/api`.
 
 If `frontend/dist` (or `frontend/dist/index.html`) is missing, backend startup now logs an explicit error and continues serving API routes. In that case, frontend static routes are not mounted until a frontend build is present.
-
-### Future: Prebuilt Frontend `dist` for Pi
-
-For low-memory Raspberry Pi deployments, running `npm install` locally is fragile (OOM kills). The long-term plan is:
-
-- Ship **prebuilt `frontend/dist` assets** as part of release artifacts (e.g. tarball, Docker image), or
-- Have the Pi install script download a versioned `dist.tar.gz` from a release URL when `frontend/dist` is missing.
-
-Goals:
-
-- Pi users should be able to run a **single install script** (`scripts/install_remoterm_pi.sh`) that only needs Python + radio SPI deps on-device.
-- No `npm install` or Vite build should be required on the Pi; all Node-based tooling runs on CI/dev machines.
-
-Implementation notes (for future work):
-
-- CI pipeline should:
-  - Build frontend using `frontend/package-lock.docker.json` (deterministic deps).
-  - Run `npm test` / `npm run build` and then publish `frontend/dist` into:
-    - A release artifact (e.g. `remoteterm-<version>-pi.tar.gz`), and/or
-    - A downloadable `dist-<version>.tar.gz` used by `install_remoterm_pi.sh`.
-- Backend already serves static files from `frontend/dist`; no code changes are required once `dist` is present on disk.
 
 ## Testing
 
@@ -281,6 +270,8 @@ Key test files:
 - `tests/test_messages_search.py` - Message search, around endpoint, forward pagination
 - `tests/test_rx_log_data.py` - on_rx_log_data event handler integration
 - `tests/test_ack_tracking_wiring.py` - DM ACK tracking extraction and wiring
+- `tests/test_radio_lifecycle_service.py` - Radio reconnect/setup orchestration helpers
+- `tests/test_radio_commands_service.py` - Radio config/private-key service workflows
 - `tests/test_health_mqtt_status.py` - Health endpoint MQTT status field
 - `tests/test_community_mqtt.py` - Community MQTT publisher (JWT, packet format, hash, broadcast)
 - `tests/test_radio_sync.py` - Radio sync, periodic tasks, and contact offload back to the radio
@@ -305,22 +296,23 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Connection status, fanout statuses, bots_disabled, setup_required (SPI) |
-| GET | `/api/radio/config` | Radio configuration, including `path_hash_mode` and `path_hash_mode_supported` |
-| PATCH | `/api/radio/config` | Update name, location, radio params, and `path_hash_mode` when supported |
+| GET | `/api/setup/status` | SPI: whether provisioning is required and config path |
+| GET | `/api/setup/hardware-profiles` | SPI: list supported LoRa HAT profiles |
+| GET | `/api/setup/radio-presets` | SPI: region/radio presets |
+| POST | `/api/setup/provision` | SPI: write or update config.yaml (node, radio, hardware) |
+| GET | `/api/debug` | Support snapshot: recent logs, live radio probe, contact/channel drift audit, and running version/git info |
+| GET | `/api/radio/config` | Radio configuration, including `path_hash_mode`, `path_hash_mode_supported`, and whether adverts include current node location |
+| PATCH | `/api/radio/config` | Update name, location, advert-location on/off, radio params, and `path_hash_mode` when supported |
 | PUT | `/api/radio/private-key` | Import private key to radio |
 | POST | `/api/radio/advertise` | Send advertisement |
 | POST | `/api/radio/reboot` | Reboot radio or reconnect if disconnected |
+| POST | `/api/radio/disconnect` | Disconnect from radio and pause automatic reconnect attempts |
 | POST | `/api/radio/reconnect` | Manual radio reconnection |
 | GET | `/api/contacts` | List contacts |
+| GET | `/api/contacts/analytics` | Unified keyed-or-name contact analytics payload |
 | GET | `/api/contacts/repeaters/advert-paths` | List recent unique advert paths for all contacts |
-| GET | `/api/contacts/{public_key}` | Get contact by public key or prefix |
-| GET | `/api/contacts/{public_key}/detail` | Comprehensive contact profile (stats, name history, paths) |
-| GET | `/api/contacts/{public_key}/advert-paths` | List recent unique advert paths for a contact |
 | POST | `/api/contacts` | Create contact (optionally trigger historical DM decrypt) |
 | DELETE | `/api/contacts/{public_key}` | Delete contact |
-| POST | `/api/contacts/sync` | Pull from radio |
-| POST | `/api/contacts/{public_key}/add-to-radio` | Push contact to radio |
-| POST | `/api/contacts/{public_key}/remove-from-radio` | Remove contact from radio |
 | POST | `/api/contacts/{public_key}/mark-read` | Mark contact conversation as read |
 | POST | `/api/contacts/{public_key}/command` | Send CLI command to repeater |
 | POST | `/api/contacts/{public_key}/routing-override` | Set or clear a forced routing override |
@@ -330,16 +322,15 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/contacts/{public_key}/repeater/lpp-telemetry` | Fetch CayenneLPP sensor data |
 | POST | `/api/contacts/{public_key}/repeater/neighbors` | Fetch repeater neighbors |
 | POST | `/api/contacts/{public_key}/repeater/acl` | Fetch repeater ACL |
-| POST | `/api/contacts/{public_key}/repeater/radio-settings` | Fetch radio settings via CLI |
+| POST | `/api/contacts/{public_key}/repeater/node-info` | Fetch repeater name, location, and clock via CLI |
+| POST | `/api/contacts/{public_key}/repeater/radio-settings` | Fetch repeater radio config via CLI |
 | POST | `/api/contacts/{public_key}/repeater/advert-intervals` | Fetch advert intervals |
 | POST | `/api/contacts/{public_key}/repeater/owner-info` | Fetch owner info |
 
 | GET | `/api/channels` | List channels |
 | GET | `/api/channels/{key}/detail` | Comprehensive channel profile (message stats, top senders) |
-| GET | `/api/channels/{key}` | Get channel by key |
 | POST | `/api/channels` | Create channel |
 | DELETE | `/api/channels/{key}` | Delete channel |
-| POST | `/api/channels/sync` | Pull from radio |
 | POST | `/api/channels/{key}/flood-scope-override` | Set or clear a per-channel regional flood-scope override |
 | POST | `/api/channels/{key}/mark-read` | Mark channel as read |
 | GET | `/api/messages` | List with filters (`q`, `after`/`after_id` for forward pagination) |
@@ -408,7 +399,7 @@ Read state (`last_read_at`) is tracked **server-side** for consistency across de
 
 **Note:** These are NOT the same as `Message.conversation_key` (the database field).
 
-### Fanout Bus (MQTT, Bots, Webhooks, Apprise)
+### Fanout Bus (MQTT, Bots, Webhooks, Apprise, SQS)
 
 All external integrations are managed through the fanout bus (`app/fanout/`). Each integration is a `FanoutModule` with scope-based event filtering, stored in the `fanout_configs` table and managed via `GET/POST/PATCH/DELETE /api/fanout`.
 
@@ -457,8 +448,12 @@ mc.subscribe(EventType.ACK, handler)
 | `MESHCORE_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`/`INFO`/`WARNING`/`ERROR`) |
 | `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | SQLite database location |
 | `MESHCORE_DISABLE_BOTS` | `false` | Disable bot system entirely (blocks execution and config) |
+| `MESHCORE_BASIC_AUTH_USERNAME` | *(none)* | Optional app-wide HTTP Basic auth username; must be set together with `MESHCORE_BASIC_AUTH_PASSWORD` |
+| `MESHCORE_BASIC_AUTH_PASSWORD` | *(none)* | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
+| `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK` | `false` | Switch the always-on radio audit task from hourly checks to aggressive 10-second polling; the audit checks both missed message drift and channel-slot cache drift |
+| `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE` | `false` | Disable channel-slot reuse and force `set_channel(...)` before every channel send, even on serial/BLE |
 
-**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `sidebar_sort_order`, `advert_interval`, `last_advert_time`, `favorites`, `last_message_times`, `flood_scope`, `blocked_keys`, and `blocked_names`. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, and Apprise configs are stored in the `fanout_configs` table, managed via `/api/fanout`.
+**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `sidebar_sort_order`, `advert_interval`, `last_advert_time`, `favorites`, `last_message_times`, `flood_scope`, `blocked_keys`, and `blocked_names`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
 
 Byte-perfect channel retries are user-triggered via `POST /api/messages/channel/{message_id}/resend` and are allowed for 30 seconds after the original send.
 
@@ -471,3 +466,9 @@ Byte-perfect channel retries are user-triggered via `POST /api/messages/channel/
 The vendored MeshCore Python reader's `LOG_DATA` advert path assumes the decoded advert payload always contains at least 101 bytes of advert body and reads the flags byte with `pk_buf.read(1)[0]` without a length guard. If a malformed or truncated RF log frame slips through, `MessageReader.handle_rx()` can fail with `IndexError: index out of range` from `meshcore/reader.py` while parsing payload type `0x04` (advert).
 
 This does not indicate database corruption or a message-store bug. It is a parser-hardening gap in `meshcore_py`: the reader does not fully mirror firmware-side packet/path validation before attempting advert decode. The practical effect is usually a one-off asyncio task failure for that packet while later packets continue processing normally.
+
+### Channel-message dedup intentionally treats same-name/same-text/same-second channel sends as indistinguishable because they are
+
+Channel message storage deduplicates on `(type, conversation_key, text, sender_timestamp)`. Reviewers often flag this as "missing sender identity," but for channel messages the stored `text` already includes the displayed sender label (for example `Alice: hello`). That means two different users only collide when they produce the same rendered sender name, the same body text, and the same sender timestamp.
+
+In that case, RemoteTerm usually does not have enough information to distinguish "two independent same-name sends" from "one message observed again as an echo/repeat." Without a reliable sender identity at ingest, treating those packets as the same message is an accepted limitation of the observable data model, not an obvious correctness bug.

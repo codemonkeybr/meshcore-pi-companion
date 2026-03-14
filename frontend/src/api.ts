@@ -5,9 +5,8 @@ import type {
   ChannelDetail,
   CommandResponse,
   Contact,
-  ContactAdvertPath,
+  ContactAnalytics,
   ContactAdvertPathSummary,
-  ContactDetail,
   FanoutConfig,
   Favorite,
   HealthStatus,
@@ -23,6 +22,7 @@ import type {
   RepeaterLoginResponse,
   RepeaterLppTelemetryResponse,
   RepeaterNeighborsResponse,
+  RepeaterNodeInfoResponse,
   RepeaterOwnerInfoResponse,
   RepeaterRadioSettingsResponse,
   RepeaterStatusResponse,
@@ -99,6 +99,13 @@ export const api = {
     fetchJson<{ status: string; message: string }>('/radio/reboot', {
       method: 'POST',
     }),
+  disconnectRadio: () =>
+    fetchJson<{ status: string; message: string; connected: boolean; paused: boolean }>(
+      '/radio/disconnect',
+      {
+        method: 'POST',
+      }
+    ),
   reconnectRadio: () =>
     fetchJson<{ status: string; message: string; connected: boolean }>('/radio/reconnect', {
       method: 'POST',
@@ -111,10 +118,12 @@ export const api = {
     fetchJson<ContactAdvertPathSummary[]>(
       `/contacts/repeaters/advert-paths?limit_per_repeater=${limitPerRepeater}`
     ),
-  getContactAdvertPaths: (publicKey: string, limit = 10) =>
-    fetchJson<ContactAdvertPath[]>(`/contacts/${publicKey}/advert-paths?limit=${limit}`),
-  getContactDetail: (publicKey: string) =>
-    fetchJson<ContactDetail>(`/contacts/${publicKey}/detail`),
+  getContactAnalytics: (params: { publicKey?: string; name?: string }) => {
+    const searchParams = new URLSearchParams();
+    if (params.publicKey) searchParams.set('public_key', params.publicKey);
+    if (params.name) searchParams.set('name', params.name);
+    return fetchJson<ContactAnalytics>(`/contacts/analytics?${searchParams.toString()}`);
+  },
   deleteContact: (publicKey: string) =>
     fetchJson<{ status: string }>(`/contacts/${publicKey}`, {
       method: 'DELETE',
@@ -333,6 +342,10 @@ export const api = {
     }),
   repeaterNeighbors: (publicKey: string) =>
     fetchJson<RepeaterNeighborsResponse>(`/contacts/${publicKey}/repeater/neighbors`, {
+      method: 'POST',
+    }),
+  repeaterNodeInfo: (publicKey: string) =>
+    fetchJson<RepeaterNodeInfoResponse>(`/contacts/${publicKey}/repeater/node-info`, {
       method: 'POST',
     }),
   repeaterAcl: (publicKey: string) =>

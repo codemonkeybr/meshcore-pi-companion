@@ -133,21 +133,35 @@ class TestToggleFavorite:
     @pytest.mark.asyncio
     async def test_adds_when_not_favorited(self, test_db):
         request = FavoriteRequest(type="contact", id="aa" * 32)
-        result = await toggle_favorite(request)
+        with (
+            patch("app.radio_sync.ensure_contact_on_radio", new_callable=AsyncMock) as mock_sync,
+            patch("app.routers.settings.asyncio.create_task") as mock_create_task,
+        ):
+            mock_create_task.side_effect = lambda coro: coro.close()
+            result = await toggle_favorite(request)
 
         assert len(result.favorites) == 1
         assert result.favorites[0].type == "contact"
         assert result.favorites[0].id == "aa" * 32
+        mock_sync.assert_called_once_with("aa" * 32, force=True)
+        mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_removes_when_already_favorited(self, test_db):
         # Pre-add a favorite
-        await AppSettingsRepository.add_favorite("channel", "ABCD")
+        await AppSettingsRepository.add_favorite("contact", "aa" * 32)
 
-        request = FavoriteRequest(type="channel", id="ABCD")
-        result = await toggle_favorite(request)
+        request = FavoriteRequest(type="contact", id="aa" * 32)
+        with (
+            patch("app.radio_sync.ensure_contact_on_radio", new_callable=AsyncMock) as mock_sync,
+            patch("app.routers.settings.asyncio.create_task") as mock_create_task,
+        ):
+            mock_create_task.side_effect = lambda coro: coro.close()
+            result = await toggle_favorite(request)
 
         assert result.favorites == []
+        mock_sync.assert_not_called()
+        mock_create_task.assert_not_called()
 
 
 class TestMigratePreferences:
