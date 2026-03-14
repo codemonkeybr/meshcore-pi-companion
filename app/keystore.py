@@ -40,6 +40,7 @@ def set_private_key(key: bytes) -> None:
     """
     global _private_key, _public_key
     if len(key) == 32:
+        # SPI/pymc_core exports 32-byte seed; keep as 32 so JWT/community MQTT use standard Ed25519
         _public_key = derive_public_key(key, from_seed=True)
         _private_key = key
     elif len(key) == 64:

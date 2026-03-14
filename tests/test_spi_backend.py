@@ -11,11 +11,12 @@ They verify:
   - Integration: packet pipeline with SPI backend (mock radio, real DB)
 """
 
+import asyncio
 import base64
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -527,3 +528,62 @@ class TestSpiBackendPacketPipelineIntegration:
         assert (
             message_broadcasts[0]["data"]["conversation_key"] == fixture["channel_key_hex"].upper()
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.4: Fanout integration for SPI — ensure SPI-originated traffic drives fanout modules
+# ---------------------------------------------------------------------------
+
+
+class TestSpiBackendFanoutIntegration:
+    """End-to-end: SpiBackend RX_LOG_DATA → packet_processor → websocket.broadcast_event → fanout."""
+
+    @pytest.mark.asyncio
+    async def test_spi_channel_message_triggers_fanout(self, test_db):
+        """SPI channel message should result in fanout_manager.broadcast_message being called."""
+        if "channel_message" not in _PIPELINE_FIXTURES:
+            pytest.skip("fixtures/websocket_events.json not found or missing channel_message")
+
+        from meshcore import EventType
+
+        from app.backends.spi_backend import SpiBackend
+        from app.event_handlers import register_event_handlers
+        from app.repository import ChannelRepository
+
+        fixture = _PIPELINE_FIXTURES["channel_message"]
+        await ChannelRepository.upsert(
+            key=fixture["channel_key_hex"].upper(),
+            name=fixture["channel_name"],
+            is_hashtag=True,
+        )
+
+        backend = SpiBackend()
+        backend._connected = True
+        register_event_handlers(backend)
+
+        with (
+            patch("app.fanout.manager.fanout_manager.broadcast_message", new_callable=AsyncMock)
+            as mock_broadcast_message,
+            patch("app.fanout.manager.fanout_manager.broadcast_raw", new_callable=AsyncMock)
+            as mock_broadcast_raw,
+        ):
+            await backend._event_bus.emit(
+                EventType.RX_LOG_DATA,
+                {
+                    "payload": fixture["raw_packet_hex"],
+                    "snr": 7.5,
+                    "rssi": -85,
+                },
+            )
+
+            # Allow broadcast_event's background tasks to run
+            await asyncio.sleep(0)
+
+        # Fanout should receive both the decoded message and the raw packet broadcast
+        mock_broadcast_message.assert_called_once()
+        mock_broadcast_raw.assert_called_once()
+
+        message_arg = mock_broadcast_message.call_args.args[0]
+        assert message_arg["type"] == "CHAN"
+        assert message_arg["conversation_key"] == fixture["channel_key_hex"].upper()
+        assert message_arg.get("channel_name") == fixture["channel_name"]

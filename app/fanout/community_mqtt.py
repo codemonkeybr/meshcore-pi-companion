@@ -127,7 +127,6 @@ def _generate_jwt_token(
     }
     if email:
         payload["email"] = email
-
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
     signing_input = f"{header_b64}.{payload_b64}".encode()
