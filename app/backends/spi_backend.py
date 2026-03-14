@@ -476,7 +476,7 @@ class SpiBackend(RadioBackend):
             return _Event(EventType.ERROR, {"error": "Contact not found"})
 
         result = await self._node.send_repeater_command(contact_name, cmd)
-        return _Event(EventType.CMD_RESPONSE, result)
+        return _Event(EventType.OK, result)
 
     async def send_chan_msg(
         self,

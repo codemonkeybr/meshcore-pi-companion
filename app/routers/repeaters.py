@@ -212,6 +212,8 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
 
     if status is None:
         raise HTTPException(status_code=504, detail="No status response from repeater")
+    # SpiBackend returns _Event(STATUS_RESPONSE, payload); unwrap so we always have a dict
+    status = getattr(status, "payload", status)
 
     return RepeaterStatusResponse(
         battery_volts=status.get("bat", 0) / 1000.0,
@@ -250,6 +252,10 @@ async def repeater_lpp_telemetry(public_key: str) -> RepeaterLppTelemetryRespons
 
     if telemetry is None:
         raise HTTPException(status_code=504, detail="No telemetry response from repeater")
+    # SpiBackend returns _Event(TELEMETRY_RESPONSE, payload); unwrap so we iterate the list
+    telemetry = getattr(telemetry, "payload", telemetry)
+    if not isinstance(telemetry, list):
+        telemetry = []
 
     sensors: list[LppSensor] = []
     for entry in telemetry:
@@ -277,6 +283,8 @@ async def repeater_neighbors(public_key: str) -> RepeaterNeighborsResponse:
         neighbors_data = await mc.fetch_all_neighbours(
             contact.public_key, timeout=10, min_timeout=5
         )
+    # SpiBackend may return _Event(..., payload); unwrap so we have a dict
+    neighbors_data = getattr(neighbors_data, "payload", neighbors_data)
 
     neighbors: list[NeighborInfo] = []
     if neighbors_data and "neighbours" in neighbors_data:
