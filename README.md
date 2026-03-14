@@ -388,4 +388,4 @@ To start the server with debug logging:
 MESHCORE_LOG_LEVEL=DEBUG uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Please include the relevant debug log output when filing an issue on GitHub.
+**Submit a bug:** [Open an issue](https://github.com/codemonkeybr/meshcore-pi-companion/issues/new) and include the relevant debug log output. Use the "Bug report" template for a structured report.
