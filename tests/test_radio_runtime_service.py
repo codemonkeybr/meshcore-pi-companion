@@ -21,6 +21,7 @@ class _Manager:
         path_hash_mode_supported=False,
     ):
         self.meshcore = meshcore
+        self.backend = meshcore  # require_connected() returns manager.backend
         self.is_connected = is_connected
         self.is_reconnecting = is_reconnecting
         self.is_setup_in_progress = is_setup_in_progress
@@ -81,6 +82,10 @@ def test_require_connected_returns_fresh_meshcore_after_connectivity_check():
 
         @property
         def meshcore(self):
+            return self._meshcore
+
+        @property
+        def backend(self):
             return self._meshcore
 
     runtime = RadioRuntime(_SwappingManager())
