@@ -562,10 +562,12 @@ class TestSpiBackendFanoutIntegration:
         register_event_handlers(backend)
 
         with (
-            patch("app.fanout.manager.fanout_manager.broadcast_message", new_callable=AsyncMock)
-            as mock_broadcast_message,
-            patch("app.fanout.manager.fanout_manager.broadcast_raw", new_callable=AsyncMock)
-            as mock_broadcast_raw,
+            patch(
+                "app.fanout.manager.fanout_manager.broadcast_message", new_callable=AsyncMock
+            ) as mock_broadcast_message,
+            patch(
+                "app.fanout.manager.fanout_manager.broadcast_raw", new_callable=AsyncMock
+            ) as mock_broadcast_raw,
         ):
             await backend._event_bus.emit(
                 EventType.RX_LOG_DATA,
