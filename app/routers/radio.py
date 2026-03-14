@@ -192,6 +192,7 @@ async def send_advertisement() -> dict:
 
     logger.info("Sending flood advertisement")
     try:
+
         async def _do():
             async with radio_manager.radio_operation("manual_advertisement") as mc:
                 return await do_send_advertisement(mc, force=True)

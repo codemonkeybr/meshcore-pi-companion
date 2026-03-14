@@ -298,9 +298,7 @@ async def sync_and_offload_contacts(be: RadioBackend) -> dict:
     return {"synced": synced, "removed": removed}
 
 
-async def sync_and_offload_channels(
-    be: RadioBackend, max_channels: int | None = None
-) -> dict:
+async def sync_and_offload_channels(be: RadioBackend, max_channels: int | None = None) -> dict:
     """
     Sync channels from radio to database, then clear them from radio.
     Returns counts of synced and cleared channels.

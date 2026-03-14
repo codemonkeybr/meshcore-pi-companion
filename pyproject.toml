@@ -58,6 +58,10 @@ ignore = [
     "SIM117", # nested with statements - can be clearer in tests
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Imports after pytestmark skipif are intentional (avoid importing app on Windows)
+"tests/test_fanout_integration.py" = ["E402"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
@@ -65,7 +69,7 @@ known-first-party = ["app"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 include = ["app"]
-exclude = ["references", ".venv", "tests"]
+exclude = ["references", ".venv", "tests", "app/backends/spi_backend.py"]
 reportMissingImports = true
 reportMissingTypeStubs = false
 

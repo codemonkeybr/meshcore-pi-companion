@@ -37,9 +37,7 @@ def _register_module_types() -> None:
         _MODULE_TYPES["sqs"] = SqsModule
     except ModuleNotFoundError as e:
         if "boto3" in str(e).lower() or "botocore" in str(e).lower():
-            logger.info(
-                "SQS fanout module not registered: optional dependency boto3 not installed"
-            )
+            logger.info("SQS fanout module not registered: optional dependency boto3 not installed")
         else:
             raise
 

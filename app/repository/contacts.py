@@ -353,6 +353,15 @@ class ContactRepository:
         await db.conn.commit()
 
     @staticmethod
+    async def set_on_radio(public_key: str, on_radio: bool) -> None:
+        """Set on_radio flag for a single contact."""
+        await db.conn.execute(
+            "UPDATE contacts SET on_radio = ? WHERE public_key = ?",
+            (1 if on_radio else 0, public_key.lower()),
+        )
+        await db.conn.commit()
+
+    @staticmethod
     async def clear_on_radio_except(keep_keys: list[str]) -> None:
         """Set on_radio=False for all contacts NOT in keep_keys."""
         if not keep_keys:

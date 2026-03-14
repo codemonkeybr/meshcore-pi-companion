@@ -128,9 +128,7 @@ async def send_channel_message_with_effective_scope(
     finally:
         if override_scope and override_scope != baseline_scope:
             try:
-                restore_result = await be.set_flood_scope(
-                    baseline_scope if baseline_scope else ""
-                )
+                restore_result = await be.set_flood_scope(baseline_scope if baseline_scope else "")
                 if restore_result is not None and restore_result.type == EventType.ERROR:
                     logger.error(
                         "Failed to restore baseline flood_scope after sending to %s: %s",

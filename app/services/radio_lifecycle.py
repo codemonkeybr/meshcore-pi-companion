@@ -132,9 +132,7 @@ async def run_post_connect_setup(radio_manager) -> None:
                     try:
                         device_query = await be.send_device_query()
                         payload = (device_query.payload or {}) if device_query else {}
-                        radio_manager.max_channels = max(
-                            1, int(payload.get("max_channels", 8))
-                        )
+                        radio_manager.max_channels = max(1, int(payload.get("max_channels", 8)))
                         if "path_hash_mode" in payload:
                             radio_manager.path_hash_mode = payload["path_hash_mode"]
                             radio_manager.path_hash_mode_supported = True
