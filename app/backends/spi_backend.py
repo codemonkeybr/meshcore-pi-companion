@@ -662,7 +662,7 @@ class SpiBackend(RadioBackend):
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
         result = await self._node.send_login(contact_name, password)
-        return _Event(EventType.LOGIN_RESPONSE, result)
+        return _Event(EventType.LOGIN_SUCCESS, result)
 
     async def req_status_sync(
         self,
