@@ -65,6 +65,19 @@ def _extract_response_text(event) -> str:
     return text
 
 
+def _unwrap_event_payload(value):
+    """Unwrap backend event objects into their payload/data when present."""
+    if value is None:
+        return None
+    payload = getattr(value, "payload", None)
+    if payload is not None:
+        return payload
+    data = getattr(value, "data", None)
+    if data is not None:
+        return data
+    return value
+
+
 async def _fetch_repeater_response(
     mc,
     target_pubkey_prefix: str,
@@ -213,6 +226,15 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
     if status is None:
         raise HTTPException(status_code=504, detail="No status response from repeater")
 
+    status = _unwrap_event_payload(status)
+    if not isinstance(status, dict):
+        logger.warning(
+            "Unexpected repeater status response type=%s value=%r",
+            type(status).__name__,
+            status,
+        )
+        raise HTTPException(status_code=502, detail="Invalid status response from repeater")
+
     return RepeaterStatusResponse(
         battery_volts=status.get("bat", 0) / 1000.0,
         tx_queue_len=status.get("tx_queue_len", 0),
@@ -250,6 +272,15 @@ async def repeater_lpp_telemetry(public_key: str) -> RepeaterLppTelemetryRespons
 
     if telemetry is None:
         raise HTTPException(status_code=504, detail="No telemetry response from repeater")
+
+    telemetry = _unwrap_event_payload(telemetry)
+    if not isinstance(telemetry, list):
+        logger.warning(
+            "Unexpected repeater telemetry response type=%s value=%r",
+            type(telemetry).__name__,
+            telemetry,
+        )
+        telemetry = []
 
     sensors: list[LppSensor] = []
     for entry in telemetry:

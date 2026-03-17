@@ -629,6 +629,42 @@ class TestRepeaterStatus:
         assert response.recv_direct == 700
 
     @pytest.mark.asyncio
+    async def test_event_payload_unwrapped(self, test_db):
+        class _DummyEvent:
+            def __init__(self, payload):
+                self.payload = payload
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value=_DummyEvent({"bat": 4100}))
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            response = await repeater_status(KEY_A)
+
+        assert response.battery_volts == 4.1
+
+    @pytest.mark.asyncio
+    async def test_502_on_invalid_shape(self, test_db):
+        class _DummyEvent:
+            def __init__(self, payload):
+                self.payload = payload
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value=_DummyEvent("Unknown command"))
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+        assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
     async def test_504_on_timeout(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
