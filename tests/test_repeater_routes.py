@@ -693,6 +693,20 @@ class TestRepeaterStatus:
         assert exc.value.status_code == 504
 
     @pytest.mark.asyncio
+    async def test_502_on_empty_status_payload(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value={})
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+        assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
     async def test_400_not_repeater(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Client", contact_type=1)

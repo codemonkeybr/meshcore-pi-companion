@@ -255,6 +255,18 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
 
     _maybe_raise_meshcore_error(status, context="status")
 
+    # Some firmware builds (notably certain repeater images) currently do not
+    # implement the binary STATUS request used by MeshCore. Those radios reply
+    # with a CLI "Unknown command" instead of structured stats, which surfaces
+    # here as an empty dict. Treat that as a protocol error instead of silently
+    # returning all-zero values.
+    if not status:
+        logger.warning("Empty repeater status payload; repeater may not support stats")
+        raise HTTPException(
+            status_code=502,
+            detail="Repeater did not return status telemetry (command not supported by firmware)",
+        )
+
     return RepeaterStatusResponse(
         battery_volts=status.get("bat", 0) / 1000.0,
         tx_queue_len=status.get("tx_queue_len", 0),
