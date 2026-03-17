@@ -344,8 +344,13 @@ async def repeater_neighbors(public_key: str) -> RepeaterNeighborsResponse:
             contact.public_key, timeout=10, min_timeout=5
         )
 
+    neighbors_data = _unwrap_event_payload(neighbors_data)
+    if isinstance(neighbors_data, dict):
+        # Translate meshcore-style error payloads, if any
+        _maybe_raise_meshcore_error(neighbors_data, context="neighbors")
+
     neighbors: list[NeighborInfo] = []
-    if neighbors_data and "neighbours" in neighbors_data:
+    if isinstance(neighbors_data, dict) and "neighbours" in neighbors_data:
         for n in neighbors_data["neighbours"]:
             pubkey_prefix = n.get("pubkey", "")
             resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)

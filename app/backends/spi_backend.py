@@ -706,11 +706,53 @@ class SpiBackend(RadioBackend):
         timeout: int = 10,
         min_timeout: int = 5,
     ) -> Any:
-        from meshcore import EventType
+        """Fetch neighbours via repeater CLI 'neighbors' command.
 
-        # pymc_core doesn't have a dedicated neighbours command;
-        # use the protocol request mechanism
-        return _Event(EventType.ERROR, {"error": "Not yet implemented for SPI backend"})
+        The repeater firmware responds with lines in the form:
+            {PUBKEY_PREFIX}:{secs_ago}:{snr_times_4}
+        """
+        if not self._node:
+            return {"error": "Not connected"}
+
+        contact_name = self._resolve_name(public_key)
+        if not contact_name:
+            return {"error": "Contact not found"}
+
+        try:
+            result = await self._node.send_repeater_command(contact_name, "neighbors")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("SPI neighbours command failed")
+            return {"error": str(exc)}
+
+        text = ""
+        if isinstance(result, dict):
+            text = str(result.get("response") or result.get("text") or "")
+        else:
+            text = str(result)
+
+        neighbours: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(":")
+            if len(parts) != 3:
+                continue
+            pubkey_prefix, secs_str, snr4_str = parts
+            try:
+                secs_ago = int(secs_str)
+                snr_db = int(snr4_str) / 4.0
+            except ValueError:
+                continue
+            neighbours.append(
+                {
+                    "pubkey": pubkey_prefix,
+                    "secs_ago": secs_ago,
+                    "snr": snr_db,
+                }
+            )
+
+        return {"neighbours": neighbours}
 
     async def req_acl_sync(
         self,
