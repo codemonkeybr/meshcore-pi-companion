@@ -562,6 +562,19 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
                 status_code=500, detail=f"Failed to send command: {send_result.payload}"
             )
 
+        # SPI backend (pymc_core) returns an immediate structured response dict from
+        # send_repeater_command(); prefer that over the get_msg polling loop.
+        payload = getattr(send_result, "payload", None)
+        if isinstance(payload, dict):
+            immediate_text = payload.get("response") or payload.get("text")
+            if isinstance(immediate_text, str) and immediate_text:
+                sender_timestamp = payload.get("sender_timestamp") or payload.get("timestamp")
+                return CommandResponse(
+                    command=request.command,
+                    response=immediate_text,
+                    sender_timestamp=sender_timestamp,
+                )
+
         # Wait for response using validated fetch loop
         response_event = await _fetch_repeater_response(mc, contact.public_key[:12])
 

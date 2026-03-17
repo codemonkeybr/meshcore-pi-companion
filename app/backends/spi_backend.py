@@ -476,7 +476,11 @@ class SpiBackend(RadioBackend):
             return _Event(EventType.ERROR, {"error": "Contact not found"})
 
         result = await self._node.send_repeater_command(contact_name, cmd)
-        return _Event(EventType.CMD_RESPONSE, result)
+        # meshcore's EventType enum does not define CMD_RESPONSE in all versions.
+        # For SPI mode we already have the full response dict from pymc_core, so
+        # return OK and let the router decide whether it needs to wait for a
+        # follow-up TXT_MSG event.
+        return _Event(EventType.OK, result)
 
     async def send_chan_msg(
         self,
