@@ -78,6 +78,24 @@ def _unwrap_event_payload(value):
     return value
 
 
+def _maybe_raise_meshcore_error(payload: dict, *, context: str) -> None:
+    """Translate meshcore-style error payloads into HTTP errors."""
+    # meshcore CommandHandlerBase returns EventType.ERROR with payload like:
+    # {"reason": "timeout"} or {"reason": "no_event_received"} or {"error": "..."}
+    reason = payload.get("reason")
+    if reason in {"timeout", "no_event_received"}:
+        raise HTTPException(
+            status_code=504,
+            detail=f"No {context} response from repeater ({reason})",
+        )
+    error = payload.get("error")
+    if error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Repeater {context} request failed: {error}",
+        )
+
+
 async def _fetch_repeater_response(
     mc,
     target_pubkey_prefix: str,
@@ -235,6 +253,8 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
         )
         raise HTTPException(status_code=502, detail="Invalid status response from repeater")
 
+    _maybe_raise_meshcore_error(status, context="status")
+
     return RepeaterStatusResponse(
         battery_volts=status.get("bat", 0) / 1000.0,
         tx_queue_len=status.get("tx_queue_len", 0),
@@ -280,6 +300,9 @@ async def repeater_lpp_telemetry(public_key: str) -> RepeaterLppTelemetryRespons
             type(telemetry).__name__,
             telemetry,
         )
+        # If this is a meshcore error payload, translate it; otherwise treat as empty.
+        if isinstance(telemetry, dict):
+            _maybe_raise_meshcore_error(telemetry, context="telemetry")
         telemetry = []
 
     sensors: list[LppSensor] = []
