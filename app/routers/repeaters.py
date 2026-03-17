@@ -432,13 +432,24 @@ async def _batch_cli_fetch(
                 logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
                 continue
 
-            response_event = await _fetch_repeater_response(
-                mc, contact.public_key[:12], timeout=10.0
-            )
-            if response_event is not None:
-                results[field] = _extract_response_text(response_event)
+            # SPI backend (pymc_core) returns the CLI response in send_cmd's payload;
+            # get_msg() does not deliver it. Use immediate response when present.
+            payload = _unwrap_event_payload(send_result)
+            immediate_text = None
+            if isinstance(payload, dict):
+                immediate_text = payload.get("response") or payload.get("text")
+            if isinstance(immediate_text, str) and immediate_text:
+                if immediate_text.startswith("> "):
+                    immediate_text = immediate_text[2:]
+                results[field] = immediate_text
             else:
-                logger.warning("No response for command '%s' (%s)", cmd, field)
+                response_event = await _fetch_repeater_response(
+                    mc, contact.public_key[:12], timeout=10.0
+                )
+                if response_event is not None:
+                    results[field] = _extract_response_text(response_event)
+                else:
+                    logger.warning("No response for command '%s' (%s)", cmd, field)
 
     return results
 
