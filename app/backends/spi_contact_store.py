@@ -41,6 +41,12 @@ class SpiContactStore:
     def contacts(self) -> list[SpiContact]:
         return self._cache
 
+    # meshcore/pymc_core may expect the contact store to expose a
+    # `list_contacts()` helper (in addition to the `contacts` iterable).
+    # For the SPI adapter we can just alias it to our in-memory cache.
+    def list_contacts(self) -> list[SpiContact]:
+        return self._cache
+
     def get_by_name(self, name: str) -> SpiContact | None:
         return self._by_name.get(name)
 

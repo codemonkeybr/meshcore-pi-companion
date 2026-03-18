@@ -146,6 +146,17 @@ class TestSpiContactStore:
         assert "A" in names
         assert "B" in names
 
+    def test_list_contacts_aliases_cache(self):
+        """pymc_core/meshcore may call list_contacts() on the contact store."""
+        from app.backends.spi_contact_store import SpiContactStore
+
+        store = SpiContactStore()
+        store.add_or_update("aa" * 32, "A")
+        store.add_or_update("bb" * 32, "B")
+        names = [c.name for c in store.list_contacts()]
+        assert "A" in names
+        assert "B" in names
+
     def test_remove(self):
         from app.backends.spi_contact_store import SpiContactStore
 
