@@ -57,12 +57,21 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _sanitize_cli_response(text: str) -> str:
+    """Strip trailing nulls and control chars from repeater CLI output (avoids replacement boxes in UI)."""
+    if not text or not isinstance(text, str):
+        return text or ""
+    while text and (ord(text[-1]) < 32 or ord(text[-1]) == 127):
+        text = text[:-1]
+    return text
+
+
 def _extract_response_text(event) -> str:
     """Extract text from a CLI response event, stripping the firmware '> ' prefix."""
     text = event.payload.get("text", str(event.payload))
     if text.startswith("> "):
         text = text[2:]
-    return text
+    return _sanitize_cli_response(text)
 
 
 def _unwrap_event_payload(value):
@@ -448,7 +457,7 @@ async def _batch_cli_fetch(
                 if isinstance(immediate_text, str) and immediate_text:
                     if immediate_text.startswith("> "):
                         immediate_text = immediate_text[2:]
-                    results[field] = immediate_text
+                    results[field] = _sanitize_cli_response(immediate_text)
                     continue
 
                 # 2) SPI: response arrives via packet pipeline and is put in cli_queue
@@ -459,7 +468,7 @@ async def _batch_cli_fetch(
                 if text is not None:
                     if text.startswith("> "):
                         text = text[2:]
-                    results[field] = text
+                    results[field] = _sanitize_cli_response(text)
                     continue
 
                 # 3) Non-SPI (e.g. meshcore): get_msg() delivers CONTACT_MSG_RECV
@@ -609,7 +618,7 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
                 sender_timestamp = payload.get("sender_timestamp") or payload.get("timestamp")
                 return CommandResponse(
                     command=request.command,
-                    response=immediate_text,
+                    response=_sanitize_cli_response(immediate_text),
                     sender_timestamp=sender_timestamp,
                 )
 
