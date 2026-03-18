@@ -264,16 +264,37 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
 
     _maybe_raise_meshcore_error(status, context="status")
 
-    # Some firmware builds (notably certain repeater images) currently do not
-    # implement the binary STATUS request used by MeshCore. Those radios reply
-    # with a CLI "Unknown command" instead of structured stats, which surfaces
-    # here as an empty dict. Treat that as a protocol error instead of silently
+    # Some firmware builds (notably certain repeater images) may not implement
+    # the binary STATUS request used by MeshCore. In that case `pyMC_core` /
+    # `meshcore` often return a non-empty dict with `success=False` and a
+    # `reason` string. Treat that as a protocol error instead of silently
     # returning all-zero values.
     if not status:
         logger.warning("Empty repeater status payload; repeater may not support stats")
         raise HTTPException(
             status_code=502,
             detail="Repeater did not return status telemetry (command not supported by firmware)",
+        )
+
+    success = status.get("success")
+    if success is False:
+        reason = status.get("reason") or status.get("error") or "Repeater status request failed"
+        reason_l = str(reason).lower()
+        http_status = 504 if "timeout" in reason_l or "no_event_received" in reason_l else 502
+        raise HTTPException(
+            status_code=http_status,
+            detail=f"Repeater did not provide status telemetry: {reason}",
+        )
+
+    # If success=true but the expected binary stats keys are absent, don't
+    # default all values to zero (that makes "unknown protocol" indistinguishable
+    # from a real but quiet repeater).
+    if success is True and not any(
+        k in status for k in ("bat", "tx_queue_len", "noise_floor", "last_rssi", "uptime", "nb_recv", "nb_sent")
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Repeater status telemetry payload missing expected stats fields",
         )
 
     return RepeaterStatusResponse(

@@ -707,6 +707,29 @@ class TestRepeaterStatus:
         assert exc.value.status_code == 502
 
     @pytest.mark.asyncio
+    async def test_504_on_binary_status_failure_success_false_reason_timeout(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        # pyMC_core / meshcore-style failure payloads include success=False + a
+        # reason containing "timeout". The API must not silently map that to zeros.
+        mc.req_status_sync = AsyncMock(
+            return_value={
+                "success": False,
+                "reason": "Protocol 0x01 timeout",
+            }
+        )
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+
+        assert exc.value.status_code == 504
+
+    @pytest.mark.asyncio
     async def test_400_not_repeater(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Client", contact_type=1)
