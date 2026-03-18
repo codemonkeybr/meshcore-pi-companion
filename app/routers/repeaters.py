@@ -57,12 +57,52 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+def _sanitize_cli_response(text: str) -> str:
+    """Strip trailing nulls and control chars from repeater CLI output (avoids replacement boxes in UI)."""
+    if not text or not isinstance(text, str):
+        return text or ""
+    while text and (ord(text[-1]) < 32 or ord(text[-1]) == 127):
+        text = text[:-1]
+    return text
+
+
 def _extract_response_text(event) -> str:
     """Extract text from a CLI response event, stripping the firmware '> ' prefix."""
     text = event.payload.get("text", str(event.payload))
     if text.startswith("> "):
         text = text[2:]
-    return text
+    return _sanitize_cli_response(text)
+
+
+def _unwrap_event_payload(value):
+    """Unwrap backend event objects into their payload/data when present."""
+    if value is None:
+        return None
+    payload = getattr(value, "payload", None)
+    if payload is not None:
+        return payload
+    data = getattr(value, "data", None)
+    if data is not None:
+        return data
+    return value
+
+
+def _maybe_raise_meshcore_error(payload: dict, *, context: str) -> None:
+    """Translate meshcore-style error payloads into HTTP errors."""
+    # meshcore CommandHandlerBase returns EventType.ERROR with payload like:
+    # {"reason": "timeout"} or {"reason": "no_event_received"} or {"error": "..."}
+    reason = payload.get("reason")
+    if reason in {"timeout", "no_event_received"}:
+        raise HTTPException(
+            status_code=504,
+            detail=f"No {context} response from repeater ({reason})",
+        )
+    error = payload.get("error")
+    if error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Repeater {context} request failed: {error}",
+        )
 
 
 async def _fetch_repeater_response(
@@ -213,6 +253,51 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
     if status is None:
         raise HTTPException(status_code=504, detail="No status response from repeater")
 
+    status = _unwrap_event_payload(status)
+    if not isinstance(status, dict):
+        logger.warning(
+            "Unexpected repeater status response type=%s value=%r",
+            type(status).__name__,
+            status,
+        )
+        raise HTTPException(status_code=502, detail="Invalid status response from repeater")
+
+    _maybe_raise_meshcore_error(status, context="status")
+
+    # Some firmware builds (notably certain repeater images) may not implement
+    # the binary STATUS request used by MeshCore. In that case `pyMC_core` /
+    # `meshcore` often return a non-empty dict with `success=False` and a
+    # `reason` string. Treat that as a protocol error instead of silently
+    # returning all-zero values.
+    if not status:
+        logger.warning("Empty repeater status payload; repeater may not support stats")
+        raise HTTPException(
+            status_code=502,
+            detail="Repeater did not return status telemetry (command not supported by firmware)",
+        )
+
+    success = status.get("success")
+    if success is False:
+        reason = status.get("reason") or status.get("error") or "Repeater status request failed"
+        reason_l = str(reason).lower()
+        http_status = 504 if "timeout" in reason_l or "no_event_received" in reason_l else 502
+        raise HTTPException(
+            status_code=http_status,
+            detail=f"Repeater did not provide status telemetry: {reason}",
+        )
+
+    # If success=true but the expected binary stats keys are absent, don't
+    # default all values to zero (that makes "unknown protocol" indistinguishable
+    # from a real but quiet repeater).
+    if success is True and not any(
+        k in status
+        for k in ("bat", "tx_queue_len", "noise_floor", "last_rssi", "uptime", "nb_recv", "nb_sent")
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Repeater status telemetry payload missing expected stats fields",
+        )
+
     return RepeaterStatusResponse(
         battery_volts=status.get("bat", 0) / 1000.0,
         tx_queue_len=status.get("tx_queue_len", 0),
@@ -251,6 +336,18 @@ async def repeater_lpp_telemetry(public_key: str) -> RepeaterLppTelemetryRespons
     if telemetry is None:
         raise HTTPException(status_code=504, detail="No telemetry response from repeater")
 
+    telemetry = _unwrap_event_payload(telemetry)
+    if not isinstance(telemetry, list):
+        logger.warning(
+            "Unexpected repeater telemetry response type=%s value=%r",
+            type(telemetry).__name__,
+            telemetry,
+        )
+        # If this is a meshcore error payload, translate it; otherwise treat as empty.
+        if isinstance(telemetry, dict):
+            _maybe_raise_meshcore_error(telemetry, context="telemetry")
+        telemetry = []
+
     sensors: list[LppSensor] = []
     for entry in telemetry:
         channel = entry.get("channel", 0)
@@ -278,8 +375,13 @@ async def repeater_neighbors(public_key: str) -> RepeaterNeighborsResponse:
             contact.public_key, timeout=10, min_timeout=5
         )
 
+    neighbors_data = _unwrap_event_payload(neighbors_data)
+    if isinstance(neighbors_data, dict):
+        # Translate meshcore-style error payloads, if any
+        _maybe_raise_meshcore_error(neighbors_data, context="neighbors")
+
     neighbors: list[NeighborInfo] = []
-    if neighbors_data and "neighbours" in neighbors_data:
+    if isinstance(neighbors_data, dict) and "neighbours" in neighbors_data:
         for n in neighbors_data["neighbours"]:
             pubkey_prefix = n.get("pubkey", "")
             resolved_contact = await ContactRepository.get_by_key_prefix(pubkey_prefix)
@@ -340,34 +442,67 @@ async def _batch_cli_fetch(
     to the radio for routing, then sends each command sequentially with a 1-second
     gap between them.
 
-    Returns a dict mapping field names to response strings (or None on timeout).
+    On SPI, pymc_core does not return the CLI response from send_cmd(); the
+    response arrives asynchronously via the packet pipeline. We register a
+    CLI response queue that create_dm_message_from_decrypted feeds when it
+    skips repeater CLI messages, and we await that queue per command.
     """
+    from app.cli_response_queue import register as cli_register
+    from app.cli_response_queue import unregister as cli_unregister
+
     results: dict[str, str | None] = {field: None for _, field in commands}
+    prefix = contact.public_key[:12]
+    cli_queue = cli_register(prefix)
+    try:
+        async with radio_manager.radio_operation(
+            operation_name,
+            pause_polling=True,
+            suspend_auto_fetch=True,
+        ) as mc:
+            await _ensure_on_radio(mc, contact)
+            await asyncio.sleep(1.0)
 
-    async with radio_manager.radio_operation(
-        operation_name,
-        pause_polling=True,
-        suspend_auto_fetch=True,
-    ) as mc:
-        await _ensure_on_radio(mc, contact)
-        await asyncio.sleep(1.0)
+            for i, (cmd, field) in enumerate(commands):
+                if i > 0:
+                    await asyncio.sleep(1.0)
 
-        for i, (cmd, field) in enumerate(commands):
-            if i > 0:
-                await asyncio.sleep(1.0)
+                send_result = await mc.send_cmd(contact.public_key, cmd)
+                if send_result.type == EventType.ERROR:
+                    logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
+                    continue
 
-            send_result = await mc.send_cmd(contact.public_key, cmd)
-            if send_result.type == EventType.ERROR:
-                logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
-                continue
+                # 1) Immediate payload (if pymc_core ever returns response in send_cmd)
+                payload = _unwrap_event_payload(send_result)
+                immediate_text = None
+                if isinstance(payload, dict):
+                    immediate_text = payload.get("response") or payload.get("text")
+                if isinstance(immediate_text, str) and immediate_text:
+                    if immediate_text.startswith("> "):
+                        immediate_text = immediate_text[2:]
+                    results[field] = _sanitize_cli_response(immediate_text)
+                    continue
 
-            response_event = await _fetch_repeater_response(
-                mc, contact.public_key[:12], timeout=10.0
-            )
-            if response_event is not None:
-                results[field] = _extract_response_text(response_event)
-            else:
-                logger.warning("No response for command '%s' (%s)", cmd, field)
+                # 2) SPI: response arrives via packet pipeline and is put in cli_queue
+                try:
+                    text = await asyncio.wait_for(cli_queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    text = None
+                if text is not None:
+                    if text.startswith("> "):
+                        text = text[2:]
+                    results[field] = _sanitize_cli_response(text)
+                    continue
+
+                # 3) Non-SPI (e.g. meshcore): get_msg() delivers CONTACT_MSG_RECV
+                response_event = await _fetch_repeater_response(
+                    mc, contact.public_key[:12], timeout=5.0
+                )
+                if response_event is not None:
+                    results[field] = _extract_response_text(response_event)
+                else:
+                    logger.warning("No response for command '%s' (%s)", cmd, field)
+    finally:
+        cli_unregister(prefix)
 
     return results
 
@@ -495,6 +630,19 @@ async def send_repeater_command(public_key: str, request: CommandRequest) -> Com
             raise HTTPException(
                 status_code=500, detail=f"Failed to send command: {send_result.payload}"
             )
+
+        # SPI backend (pymc_core) returns an immediate structured response dict from
+        # send_repeater_command(); prefer that over the get_msg polling loop.
+        payload = getattr(send_result, "payload", None)
+        if isinstance(payload, dict):
+            immediate_text = payload.get("response") or payload.get("text")
+            if isinstance(immediate_text, str) and immediate_text:
+                sender_timestamp = payload.get("sender_timestamp") or payload.get("timestamp")
+                return CommandResponse(
+                    command=request.command,
+                    response=_sanitize_cli_response(immediate_text),
+                    sender_timestamp=sender_timestamp,
+                )
 
         # Wait for response using validated fetch loop
         response_event = await _fetch_repeater_response(mc, contact.public_key[:12])

@@ -284,6 +284,10 @@ async def create_dm_message_from_decrypted(
             their_public_key[:12],
             (decrypted.message or "")[:50],
         )
+        # Deliver to batch CLI waiter (e.g. Radio Settings load) when using SPI
+        from app.cli_response_queue import put as cli_queue_put
+
+        cli_queue_put(their_public_key[:12], decrypted.message or "")
         return None
 
     received = received_at or int(time.time())

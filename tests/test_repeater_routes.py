@@ -629,6 +629,42 @@ class TestRepeaterStatus:
         assert response.recv_direct == 700
 
     @pytest.mark.asyncio
+    async def test_event_payload_unwrapped(self, test_db):
+        class _DummyEvent:
+            def __init__(self, payload):
+                self.payload = payload
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value=_DummyEvent({"bat": 4100}))
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            response = await repeater_status(KEY_A)
+
+        assert response.battery_volts == 4.1
+
+    @pytest.mark.asyncio
+    async def test_502_on_invalid_shape(self, test_db):
+        class _DummyEvent:
+            def __init__(self, payload):
+                self.payload = payload
+
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value=_DummyEvent("Unknown command"))
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+        assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
     async def test_504_on_timeout(self, test_db):
         mc = _mock_mc()
         await _insert_contact(KEY_A, name="Repeater", contact_type=2)
@@ -640,6 +676,57 @@ class TestRepeaterStatus:
         ):
             with pytest.raises(HTTPException) as exc:
                 await repeater_status(KEY_A)
+        assert exc.value.status_code == 504
+
+    @pytest.mark.asyncio
+    async def test_504_on_meshcore_error_payload_timeout(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value={"reason": "timeout"})
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+        assert exc.value.status_code == 504
+
+    @pytest.mark.asyncio
+    async def test_502_on_empty_status_payload(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+        mc.req_status_sync = AsyncMock(return_value={})
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+        assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_504_on_binary_status_failure_success_false_reason_timeout(self, test_db):
+        mc = _mock_mc()
+        await _insert_contact(KEY_A, name="Repeater", contact_type=2)
+
+        # pyMC_core / meshcore-style failure payloads include success=False + a
+        # reason containing "timeout". The API must not silently map that to zeros.
+        mc.req_status_sync = AsyncMock(
+            return_value={
+                "success": False,
+                "reason": "Protocol 0x01 timeout",
+            }
+        )
+
+        with (
+            patch("app.routers.repeaters.require_connected", return_value=mc),
+            patch.object(radio_manager, "_backend", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await repeater_status(KEY_A)
+
         assert exc.value.status_code == 504
 
     @pytest.mark.asyncio

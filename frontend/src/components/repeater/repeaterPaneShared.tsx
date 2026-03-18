@@ -77,7 +77,17 @@ export function formatAdvertInterval(val: string | null): string {
   if (val == null) return '—';
   const trimmed = val.trim();
   if (trimmed === '0') return '<disabled>';
-  return `${trimmed}h`;
+  // Firmware reports repeater advert intervals in minutes (CLI: get advert.interval).
+  // The UI is hour-based (minimum advert interval is 1 hour), so convert to h display.
+  const minutes = Number(trimmed);
+  if (!Number.isFinite(minutes)) return trimmed;
+  if (minutes >= 60) {
+    if (minutes % 60 === 0) return `${minutes / 60}h`;
+    const hours = Math.floor(minutes / 60);
+    const remMins = Math.floor(minutes % 60);
+    return `${hours}h${remMins}m`;
+  }
+  return `${minutes}m`;
 }
 
 function formatFetchedRelative(fetchedAt: number): string {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { formatDuration, formatClockDrift } from '../components/RepeaterDashboard';
+import { formatAdvertInterval } from '../components/repeater/repeaterPaneShared';
 
 describe('formatDuration', () => {
   it('formats seconds only', () => {
@@ -89,5 +90,16 @@ describe('formatClockDrift', () => {
     const result = formatClockDrift('12:30 - 9/1/2025 UTC');
     expect(result.isLarge).toBe(false);
     expect(result.text).toBe('5m10s');
+  });
+});
+
+describe('formatAdvertInterval', () => {
+  it('formats repeater advert intervals as minutes', () => {
+    expect(formatAdvertInterval(null)).toBe('—');
+    expect(formatAdvertInterval('0')).toBe('<disabled>');
+    expect(formatAdvertInterval('60')).toBe('1h');
+    expect(formatAdvertInterval('120')).toBe('2h');
+    expect(formatAdvertInterval('75')).toBe('1h15m');
+    expect(formatAdvertInterval('  15  ')).toBe('15m');
   });
 });
