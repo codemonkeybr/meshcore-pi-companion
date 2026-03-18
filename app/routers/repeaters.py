@@ -290,7 +290,8 @@ async def repeater_status(public_key: str) -> RepeaterStatusResponse:
     # default all values to zero (that makes "unknown protocol" indistinguishable
     # from a real but quiet repeater).
     if success is True and not any(
-        k in status for k in ("bat", "tx_queue_len", "noise_floor", "last_rssi", "uptime", "nb_recv", "nb_sent")
+        k in status
+        for k in ("bat", "tx_queue_len", "noise_floor", "last_rssi", "uptime", "nb_recv", "nb_sent")
     ):
         raise HTTPException(
             status_code=502,

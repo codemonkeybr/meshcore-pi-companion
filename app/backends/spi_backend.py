@@ -681,6 +681,92 @@ class SpiBackend(RadioBackend):
         contact_name = self._resolve_name(public_key)
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
+        # Prefer a binary REQ protocol request here. If we rely on higher-level
+        # helpers that may be implemented as text/CLI on some pymc_core
+        # versions/firmware builds, the repeater may respond with:
+        #   TXT_MSG "Unknown command"
+        # which then breaks the API contract for this endpoint.
+        protocol_code = 0x01  # REQ_TYPE_GET_STATUS (MeshCore)
+        try:
+            from pymc_core.node.handlers.protocol_request import (
+                REQ_TYPE_GET_STATUS as _REQ_TYPE_GET_STATUS,
+            )
+
+            protocol_code = int(_REQ_TYPE_GET_STATUS)
+        except Exception:
+            # Fall back to the MeshCore-known constant.
+            pass
+
+        raw_stats: dict[str, Any] | None = None
+        try:
+            proto_result = await self._node.send_protocol_request(contact_name, protocol_code, b"")
+            if isinstance(proto_result, dict) and proto_result.get("success") is True:
+                # Different pymc_core versions may use slightly different field
+                # names for the parsed payload.
+                parsed_data = (
+                    proto_result.get("parsed_data")
+                    or proto_result.get("parsed")
+                    or proto_result.get("parsed_response")
+                    or {}
+                )
+
+                # Expected: raw stats dict directly.
+                if isinstance(parsed_data, dict) and any(
+                    k in parsed_data
+                    for k in (
+                        "batt_milli_volts",
+                        "curr_tx_queue_len",
+                        "noise_floor",
+                        "last_rssi",
+                        "n_packets_recv",
+                        "n_packets_sent",
+                    )
+                ):
+                    raw_stats = parsed_data
+
+                # Some wrappers may nest the raw stats under a "raw" key.
+                if raw_stats is None and isinstance(parsed_data, dict):
+                    nested_raw = parsed_data.get("raw")
+                    if isinstance(nested_raw, dict) and any(
+                        k in nested_raw
+                        for k in (
+                            "batt_milli_volts",
+                            "curr_tx_queue_len",
+                            "noise_floor",
+                            "last_rssi",
+                            "n_packets_recv",
+                            "n_packets_sent",
+                        )
+                    ):
+                        raw_stats = nested_raw
+        except Exception:
+            logger.exception("SPI binary status request failed; falling back")
+
+        if raw_stats is not None:
+            mapped = {
+                "success": True,
+                "repeater": contact_name,
+                "bat": raw_stats.get("batt_milli_volts", 0),
+                "tx_queue_len": raw_stats.get("curr_tx_queue_len", 0),
+                "noise_floor": raw_stats.get("noise_floor", 0),
+                "last_rssi": raw_stats.get("last_rssi", 0),
+                "last_snr": float(raw_stats.get("last_snr", 0.0)),
+                "nb_recv": raw_stats.get("n_packets_recv", 0),
+                "nb_sent": raw_stats.get("n_packets_sent", 0),
+                "airtime": raw_stats.get("total_air_time_secs", 0),
+                "rx_airtime": raw_stats.get("total_rx_air_time_secs", 0),
+                "uptime": raw_stats.get("total_up_time_secs", 0),
+                "sent_flood": raw_stats.get("n_sent_flood", 0),
+                "sent_direct": raw_stats.get("n_sent_direct", 0),
+                "recv_flood": raw_stats.get("n_recv_flood", 0),
+                "recv_direct": raw_stats.get("n_recv_direct", 0),
+                "flood_dups": raw_stats.get("n_flood_dups", 0),
+                "direct_dups": raw_stats.get("n_direct_dups", 0),
+                "full_evts": raw_stats.get("err_events", 0),
+            }
+            return _Event(EventType.STATUS_RESPONSE, mapped)
+
+        # Last-resort fallback: use the helper on the pymc_core node object.
         result = await self._node.send_status_request(contact_name)
         return _Event(EventType.STATUS_RESPONSE, result)
 
