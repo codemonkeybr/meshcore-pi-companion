@@ -682,11 +682,6 @@ class SpiBackend(RadioBackend):
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
         result = await self._node.send_status_request(contact_name)
-        if isinstance(result, dict) and not result.get("success"):
-            return _Event(
-                EventType.ERROR,
-                {"error": result.get("reason", "Status request failed")},
-            )
         return _Event(EventType.STATUS_RESPONSE, result)
 
     async def req_telemetry_sync(
