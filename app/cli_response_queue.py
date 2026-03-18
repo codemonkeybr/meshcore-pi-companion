@@ -8,12 +8,11 @@ the response text here so _batch_cli_fetch can await it instead of timing out.
 
 import asyncio
 import logging
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 # pubkey_prefix (12-char) -> queue of response strings (one per send_cmd in batch)
-_waiters: Dict[str, asyncio.Queue[str]] = {}
+_waiters: dict[str, asyncio.Queue[str]] = {}
 
 
 def register(prefix: str) -> asyncio.Queue[str]:
