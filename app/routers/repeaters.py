@@ -411,45 +411,67 @@ async def _batch_cli_fetch(
     to the radio for routing, then sends each command sequentially with a 1-second
     gap between them.
 
-    Returns a dict mapping field names to response strings (or None on timeout).
+    On SPI, pymc_core does not return the CLI response from send_cmd(); the
+    response arrives asynchronously via the packet pipeline. We register a
+    CLI response queue that create_dm_message_from_decrypted feeds when it
+    skips repeater CLI messages, and we await that queue per command.
     """
+    from app.cli_response_queue import register as cli_register
+    from app.cli_response_queue import unregister as cli_unregister
+
     results: dict[str, str | None] = {field: None for _, field in commands}
+    prefix = contact.public_key[:12]
+    cli_queue = cli_register(prefix)
+    try:
+        async with radio_manager.radio_operation(
+            operation_name,
+            pause_polling=True,
+            suspend_auto_fetch=True,
+        ) as mc:
+            await _ensure_on_radio(mc, contact)
+            await asyncio.sleep(1.0)
 
-    async with radio_manager.radio_operation(
-        operation_name,
-        pause_polling=True,
-        suspend_auto_fetch=True,
-    ) as mc:
-        await _ensure_on_radio(mc, contact)
-        await asyncio.sleep(1.0)
+            for i, (cmd, field) in enumerate(commands):
+                if i > 0:
+                    await asyncio.sleep(1.0)
 
-        for i, (cmd, field) in enumerate(commands):
-            if i > 0:
-                await asyncio.sleep(1.0)
+                send_result = await mc.send_cmd(contact.public_key, cmd)
+                if send_result.type == EventType.ERROR:
+                    logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
+                    continue
 
-            send_result = await mc.send_cmd(contact.public_key, cmd)
-            if send_result.type == EventType.ERROR:
-                logger.debug("Command '%s' send error: %s", cmd, send_result.payload)
-                continue
+                # 1) Immediate payload (if pymc_core ever returns response in send_cmd)
+                payload = _unwrap_event_payload(send_result)
+                immediate_text = None
+                if isinstance(payload, dict):
+                    immediate_text = payload.get("response") or payload.get("text")
+                if isinstance(immediate_text, str) and immediate_text:
+                    if immediate_text.startswith("> "):
+                        immediate_text = immediate_text[2:]
+                    results[field] = immediate_text
+                    continue
 
-            # SPI backend (pymc_core) returns the CLI response in send_cmd's payload;
-            # get_msg() does not deliver it. Use immediate response when present.
-            payload = _unwrap_event_payload(send_result)
-            immediate_text = None
-            if isinstance(payload, dict):
-                immediate_text = payload.get("response") or payload.get("text")
-            if isinstance(immediate_text, str) and immediate_text:
-                if immediate_text.startswith("> "):
-                    immediate_text = immediate_text[2:]
-                results[field] = immediate_text
-            else:
+                # 2) SPI: response arrives via packet pipeline and is put in cli_queue
+                try:
+                    text = await asyncio.wait_for(cli_queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    text = None
+                if text is not None:
+                    if text.startswith("> "):
+                        text = text[2:]
+                    results[field] = text
+                    continue
+
+                # 3) Non-SPI (e.g. meshcore): get_msg() delivers CONTACT_MSG_RECV
                 response_event = await _fetch_repeater_response(
-                    mc, contact.public_key[:12], timeout=10.0
+                    mc, contact.public_key[:12], timeout=5.0
                 )
                 if response_event is not None:
                     results[field] = _extract_response_text(response_event)
                 else:
                     logger.warning("No response for command '%s' (%s)", cmd, field)
+    finally:
+        cli_unregister(prefix)
 
     return results
 
