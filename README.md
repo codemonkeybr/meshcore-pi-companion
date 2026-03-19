@@ -1,6 +1,14 @@
 # RemoteTerm for MeshCore
 
-Backend server + browser interface for MeshCore mesh radio networks. Connect your radio over Serial, TCP, or BLE, and then you can:
+Backend server + browser interface for MeshCore mesh radio networks.
+
+This fork is focused on keeping the main project working on Raspberry Pi, including all supported transports:
+- Raspberry Pi + LoRa HAT via SPI (no external MeshCore device)
+- Raspberry Pi + MeshCore over USB serial
+- Raspberry Pi + MeshCore over TCP
+- Raspberry Pi + MeshCore over BLE
+
+Connect your radio, and then you can:
 
 * Send and receive DMs and channel messages
 * Cache all received packets, decrypting as you gain keys
@@ -25,10 +33,12 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 ## Requirements
 
 - Python 3.10+
-- Node.js LTS or current (20, 22, 24, 25)
+- Node.js LTS or current (20, 22, 24, 25) (only needed if you will build the frontend; see below)
 - [UV](https://astral.sh/uv) package manager: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **Radio:** MeshCore device over USB serial, TCP, or BLE — *or* on Raspberry Pi, a supported LoRa HAT (SPI; see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode))
+- **Radio:** MeshCore device over USB serial, TCP, or BLE (supported on Raspberry Pi too). On Raspberry Pi you can also drive a supported LoRa HAT directly over SPI (no external MeshCore device; see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode))
 - **Optional (SQS fanout):** To use Amazon SQS as a fanout destination, run `pip install boto3` (or install the project with full deps; boto3 is listed in `pyproject.toml` but may be omitted in minimal installs).
+
+To use the browser UI, the frontend must be built into `frontend/dist` (Quick Start and the systemd service build it). If `frontend/dist` is already present, Node.js is not required.
 
 <details>
 <summary>Finding your serial port</summary>
@@ -71,8 +81,8 @@ usbipd attach --wsl --busid 3-8
 **This approach is recommended over Docker due to intermittent serial communications issues I've seen on \*nix systems.**
 
 ```bash
-git clone https://github.com/jkingsman/Remote-Terminal-for-MeshCore.git
-cd Remote-Terminal-for-MeshCore
+git clone https://github.com/codemonkeybr/meshcore-pi-companion.git
+cd meshcore-pi-companion
 
 # Install backend dependencies
 uv sync
@@ -105,6 +115,23 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 Access at http://localhost:8000
 
 > **Note:** WebGPU cracking requires HTTPS when not on localhost. See the HTTPS section under Additional Setup.
+
+### Running on Raspberry Pi (USB serial, TCP, or BLE)
+
+If you're using a MeshCore device directly (not a LoRa HAT), run the native install like in Quick Start, then set exactly one transport:
+
+```bash
+# USB serial
+MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# TCP
+MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=4000 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# BLE (address and PIN both required)
+MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+> Tip: SPI mode is selected when a `config.yaml` (or `data/config.yaml`) exists. If you want SPI, use the SPI section below; if you want USB/TCP/BLE, ensure no SPI config file is present.
 
 ### Running on Raspberry Pi (SPI mode)
 
@@ -327,7 +354,7 @@ cd /opt/remoteterm
 sudo -u remoteterm uv venv
 sudo -u remoteterm uv sync
 
-# Build frontend (required for the backend to serve the web UI)
+# Build frontend (required for the backend to serve the web UI; requires Node.js)
 cd /opt/remoteterm/frontend
 sudo -u remoteterm npm ci
 sudo -u remoteterm npm run build
