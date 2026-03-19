@@ -223,6 +223,16 @@ class SpiBackend(RadioBackend):
             "lat": 0.0,
             "lon": 0.0,
             "tx_power": tx_power,
+            # Keep both key families populated for compatibility with
+            # existing API/fanout consumers that read MeshCore-style radio_*.
+            "frequency": frequency,
+            "bandwidth": bandwidth,
+            "spreading_factor": spreading_factor,
+            "coding_rate": coding_rate,
+            "radio_freq": frequency,
+            "radio_bw": bandwidth,
+            "radio_sf": spreading_factor,
+            "radio_cr": coding_rate,
         }
         self._connected = True
         logger.info("SPI backend online — node %s (%s…)", node_name, pub_hex[:12])
@@ -604,6 +614,17 @@ class SpiBackend(RadioBackend):
                 self._radio.set_bandwidth(int(bw))
             if hasattr(self._radio, "set_spreading_factor"):
                 self._radio.set_spreading_factor(sf)
+            if hasattr(self._radio, "set_coding_rate"):
+                self._radio.set_coding_rate(cr)
+        if self._self_info:
+            self._self_info["frequency"] = freq
+            self._self_info["bandwidth"] = bw
+            self._self_info["spreading_factor"] = sf
+            self._self_info["coding_rate"] = cr
+            self._self_info["radio_freq"] = freq
+            self._self_info["radio_bw"] = bw
+            self._self_info["radio_sf"] = sf
+            self._self_info["radio_cr"] = cr
         return _Event(EventType.OK, {})
 
     async def set_flood_scope(self, scope: str) -> Any:

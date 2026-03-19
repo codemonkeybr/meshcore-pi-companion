@@ -393,6 +393,14 @@ class TestSpiBackendMethods:
             "lat": 0.0,
             "lon": 0.0,
             "tx_power": 22,
+            "frequency": 910525000,
+            "bandwidth": 62500,
+            "spreading_factor": 7,
+            "coding_rate": 5,
+            "radio_freq": 910525000,
+            "radio_bw": 62500,
+            "radio_sf": 7,
+            "radio_cr": 5,
         }
         be._radio = MagicMock()
         be._radio.get_last_rssi.return_value = -90
@@ -438,6 +446,18 @@ class TestSpiBackendMethods:
         await backend.set_tx_power(val=10)
         backend._radio.set_tx_power.assert_called_once_with(10)
         assert backend.self_info["tx_power"] == 10
+
+    async def test_set_radio_updates_self_info_keys(self, backend):
+        await backend.set_radio(freq=915000000, bw=125000, sf=10, cr=8)
+
+        assert backend.self_info["frequency"] == 915000000
+        assert backend.self_info["bandwidth"] == 125000
+        assert backend.self_info["spreading_factor"] == 10
+        assert backend.self_info["coding_rate"] == 8
+        assert backend.self_info["radio_freq"] == 915000000
+        assert backend.self_info["radio_bw"] == 125000
+        assert backend.self_info["radio_sf"] == 10
+        assert backend.self_info["radio_cr"] == 8
 
     async def test_send_device_query(self, backend):
         from meshcore import EventType

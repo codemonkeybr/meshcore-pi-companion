@@ -259,10 +259,13 @@ def _build_radio_info() -> str:
     try:
         if radio_manager.backend and radio_manager.backend.self_info:
             info = radio_manager.backend.self_info
-            freq = info.get("radio_freq", 0)
-            bw = info.get("radio_bw", 0)
-            sf = info.get("radio_sf", 0)
-            cr = info.get("radio_cr", 0)
+
+            # Client backend uses radio_* keys; SPI backend stores canonical
+            # frequency/bandwidth/spreading_factor/coding_rate fields.
+            freq = info.get("radio_freq", info.get("frequency", 0))
+            bw = info.get("radio_bw", info.get("bandwidth", 0))
+            sf = info.get("radio_sf", info.get("spreading_factor", 0))
+            cr = info.get("radio_cr", info.get("coding_rate", 0))
             return f"{freq},{bw},{sf},{cr}"
     except Exception:
         pass

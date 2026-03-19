@@ -1227,6 +1227,23 @@ class TestBuildRadioInfo:
 
         assert result == "0,0,0,0"
 
+    def test_uses_spi_style_radio_fields(self):
+        """SPI backend exposes canonical radio field names; exporter should honor them."""
+        mock_backend = MagicMock()
+        mock_backend.self_info = {
+            "frequency": 910525000,
+            "bandwidth": 62500,
+            "spreading_factor": 7,
+            "coding_rate": 5,
+        }
+        mock_runtime = MagicMock()
+        mock_runtime.backend = mock_backend
+
+        with patch("app.services.radio_runtime.radio_runtime", mock_runtime):
+            result = _build_radio_info()
+
+        assert result == "910525000,62500,7,5"
+
 
 class TestGetClientVersion:
     def test_returns_remoteterm_prefix(self):
