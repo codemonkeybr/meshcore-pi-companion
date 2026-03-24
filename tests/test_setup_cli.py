@@ -28,7 +28,7 @@ def _make_minimal_config_example(tmp_path: Path) -> None:
 
 
 def test_setup_cli_creates_config_from_example(tmp_path, monkeypatch):
-    """Running the wizard with defaults should create a valid config.yaml."""
+    """Running the wizard with defaults should create a valid data/config.yaml."""
     monkeypatch.chdir(tmp_path)
     _make_minimal_config_example(tmp_path)
 
@@ -61,10 +61,10 @@ def test_setup_cli_creates_config_from_example(tmp_path, monkeypatch):
 
             from app import setup_cli
 
-            rc = setup_cli.main()
+            rc = setup_cli.main([])
             assert rc == 0
 
-    cfg_path = tmp_path / "config.yaml"
+    cfg_path = tmp_path / "data" / "config.yaml"
     assert cfg_path.is_file()
 
     import yaml  # type: ignore[import-untyped]
@@ -79,11 +79,12 @@ def test_setup_cli_creates_config_from_example(tmp_path, monkeypatch):
 
 
 def test_setup_cli_uses_existing_config_when_present(tmp_path, monkeypatch):
-    """If config.yaml already exists, it should be updated in-place."""
+    """If data/config.yaml already exists, it should be updated in-place."""
     monkeypatch.chdir(tmp_path)
 
-    # Existing config.yaml with a different name and radio settings.
-    cfg = tmp_path / "config.yaml"
+    # Existing SPI config with a different name and radio settings.
+    cfg = tmp_path / "data" / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(
         "node:\n"
         "  name: ExistingNode\n"
@@ -125,7 +126,7 @@ def test_setup_cli_uses_existing_config_when_present(tmp_path, monkeypatch):
 
             from app import setup_cli
 
-            rc = setup_cli.main()
+            rc = setup_cli.main([])
             assert rc == 0
 
     import yaml  # type: ignore[import-untyped]

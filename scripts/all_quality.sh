@@ -52,6 +52,14 @@ cd "$SCRIPT_DIR"
 PYTHONPATH=. uv run pytest tests/ -v
 echo -e "${GREEN}[pytest]${NC} Passed!"
 
+if command -v shellcheck >/dev/null 2>&1; then
+  echo -e "${BLUE}[shellcheck]${NC} Checking Pi management scripts..."
+  shellcheck scripts/manage_remoterm.sh scripts/install_remoteterm_pi.sh
+  echo -e "${GREEN}[shellcheck]${NC} Passed!"
+else
+  echo -e "${YELLOW}[shellcheck]${NC} Skipped (shellcheck not installed)."
+fi
+
 echo -e "${BLUE}[frontend]${NC} Running tests + build..."
 cd "$SCRIPT_DIR/frontend"
 npm run test:run

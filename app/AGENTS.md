@@ -55,7 +55,7 @@ app/
 ├── frontend_static.py   # Mount/serve built frontend (production)
 ├── spi_config_file.py  # Load/save SPI config (data/config.yaml)
 ├── spi_identity.py      # SPI identity key (load_or_create, export, import)
-├── setup_cli.py         # CLI wizard for SPI provisioning (node, radio, hardware)
+├── setup_cli.py         # CLI wizard for SPI provisioning (default: data/config.yaml; --config-out)
 └── routers/
     ├── health.py
     ├── setup.py          # SPI provisioning (status, hardware-profiles, radio-presets, provision)

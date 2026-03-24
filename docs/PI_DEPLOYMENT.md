@@ -1,88 +1,100 @@
-# Raspberry Pi deployment (SPI mode)
+# Raspberry Pi deployment (SPI or USB LoRa)
 
-Short guide to run RemoteTerm on a Raspberry Pi with a LoRa HAT (e.g. Waveshare SX1262) using the **SPI backend** — no external MeshCore radio required.
+RemoteTerm on **Raspberry Pi OS** is best installed with the interactive manager script (same idea as pyMC Repeater’s `manage.sh`: whiptail menu, systemd, uninstall).
 
-## Prerequisites
+## Recommended: `scripts/manage_remoterm.sh`
 
-- Raspberry Pi (3/4/Zero 2 W or similar) with Raspberry Pi OS
-- LoRa HAT supported by the SPI backend (Waveshare, uConsole, PiMesh-1W, meshadv, HT-RA62, etc.)
-- **SPI enabled:** `sudo raspi-config` → Interface Options → SPI → Enable, then reboot
-- Python 3.10+ (Node.js is **not** required on the Pi if you use the prebuilt frontend from CI — see below)
-
-## 1. Install and configure
-
-From the project root on the Pi (or a machine that will copy the tree to the Pi):
+From a clone of this repo on the Pi:
 
 ```bash
-chmod +x scripts/install_remoterm_pi.sh
-./scripts/install_remoterm_pi.sh
+chmod +x scripts/manage_remoterm.sh
+sudo ./scripts/manage_remoterm.sh
 ```
 
-This script:
-
-- Creates a virtualenv (`.venv`) if missing and installs backend deps with `.[spi]`
-- If `config.yaml` does not exist, runs the **SPI setup wizard** to create it (node name, hardware profile, radio preset, location)
-- **Frontend:** Tries to **download the prebuilt frontend** from the GitHub release `frontend-latest` (no Node on the Pi). If the download fails (no network or release not yet created), it will build with `npm` if available, or tell you how to copy `frontend/dist` manually.
-
-### Prebuilt frontend (no Node on the Pi)
-
-You do **not** need Node.js or npm on the Pi. The install script automatically tries to download the prebuilt frontend from:
-
-`https://github.com/codemonkeybr/remote-terminal-fork/releases/download/frontend-latest/frontend-dist.zip`
-
-(Customize the URL by setting `FRONTEND_RELEASE_URL` before running the install script.) The CI builds the frontend when `frontend/` changes and publishes this zip on push to `main`.
-
-**Manual fallback:** If the script didn’t download it (e.g. no curl/wget or no network), get the zip from the link above or from **Actions** → latest **Frontend build** run → **Artifacts** → **frontend-dist**. Then in the project root:
+Or non-interactive:
 
 ```bash
-mkdir -p frontend/dist
-unzip -o frontend-dist.zip -d frontend/dist
+sudo ./scripts/manage_remoterm.sh install
+sudo ./scripts/manage_remoterm.sh help
 ```
 
-Then run the server as in **§2**.
+**What it does**
 
-To **only** run the SPI config wizard (e.g. to change node name or region later):
+- Targets **Raspberry Pi** only (override with `ALLOW_NON_PI=1` for debugging).
+- **Install**: choose **SPI + LoRa HAT** (writes `data/config.yaml` via `python -m app.setup_cli`) or **USB serial** MeshCore radio (writes `/etc/remoterm/environment` with `MESHCORE_SERIAL_PORT`).
+- Optionally enables **SPI** in `/boot/firmware/config.txt` or `/boot/config.txt` (`dtparam=spi=on`) and can reboot when needed.
+- Copies the tree to `/opt/remoteterm`, creates user `remoteterm`, installs Python deps with `.[spi]`, tries to fetch the **prebuilt frontend** zip (see below), installs `remoteterm.service`, enables systemd.
+- **Upgrade** / **uninstall** / **logs** / **status** from the same script.
+
+**Paths**
+
+| Path | Purpose |
+|------|---------|
+| `/opt/remoteterm` | Application and `.venv` |
+| `/etc/remoterm/environment` | Optional env for USB serial (see `remoteterm.service`) |
+| `data/config.yaml` | SPI LoRa HAT config (default `MESHCORE_CONFIG_FILE`) |
+| `data/meshcore.db` | SQLite (set in unit as `MESHCORE_DATABASE_PATH`) |
+
+**Prebuilt frontend (no Node on the Pi)**
+
+Default download URL (override with `FRONTEND_RELEASE_URL`):
+
+`https://github.com/codemonkeybr/meshcore-pi-companion/releases/download/frontend-latest/frontend-dist.zip`
+
+If download fails, place `frontend/frontend-dist.zip` next to the project or build `frontend/dist` on another machine and copy it.
+
+**SPI setup wizard only**
+
+After install, or to reconfigure:
 
 ```bash
-./scripts/install_remoterm_pi.sh --spi-config
+sudo ./scripts/manage_remoterm.sh config-spi
 ```
 
-Config is stored in **`config.yaml`** in the project root (or `data/config.yaml`). Copy from `config.yaml.example` if you prefer to edit by hand; the wizard writes the same structure.
-
-**Setup API (optional):** For automation or a future web wizard, the backend exposes `GET /api/setup/status`, `GET /api/setup/hardware-profiles`, `GET /api/setup/radio-presets`, and `POST /api/setup/provision`; see `app/AGENTS.md` for payloads.
-
-## 2. Run the server
-
-From the project root:
+Equivalent manual command from `/opt/remoteterm`:
 
 ```bash
-./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000
+cd /opt/remoteterm
+sudo -u remoteterm env HOME=/var/lib/remoteterm PYTHONPATH=/opt/remoteterm \
+  ./.venv/bin/python -m app.setup_cli --config-out data/config.yaml
 ```
 
-Or manually with the venv:
+**USB serial only**
 
 ```bash
-source .venv/bin/activate
-export PYTHONPATH="$PWD"
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+sudo ./scripts/manage_remoterm.sh config-usb
 ```
 
-Open **http://\<pi-ip\>:8000** in a browser (e.g. `http://192.168.1.191:8000`).
+Ensure no SPI `data/config.yaml` is present when using USB (the manager backs up and removes SPI configs when switching to USB).
 
-## 3. Identity and data
+**Setup API (optional)**
 
-- **Identity:** On first run with SPI, an Ed25519 key is generated and stored under `data/` (via `app/spi_identity`). This is your node’s mesh identity; back up `data/` if you need to restore the same node.
-- **Database:** SQLite is at `data/meshcore.db`; contacts, channels, and messages are stored there.
+For automation or a future web wizard: `GET/POST /api/setup/*` — see `app/AGENTS.md`.
 
-## 4. Troubleshooting
+## Lightweight: `scripts/install_remoteterm_pi.sh`
 
-- **SPI not found / permission denied:** Ensure SPI is enabled and the process has access to `/dev/spidev0.*` (or `spidev1.*` for uConsole). Run as the same user that will run the app.
-- **Wizard not starting:** Ensure `config.yaml` is missing so the install script runs the wizard, or run `./scripts/install_remoterm_pi.sh --spi-config` explicitly.
-- **No presets in wizard:** Presets are fetched from `https://api.meshcore.nz/api/v1/config`; if offline, the app uses `data/radio-presets-fallback.json` (bundled in the repo).
-- **Frontend not loading:** If `frontend/dist` is missing, build it with `cd frontend && npm install && npm run build` (or copy a prebuilt `dist` from another machine). The API and `/docs` still work without the frontend.
+Use this only for a **quick dev install** in a project root (venv + `pip install ".[spi]"` + optional local zip). It does **not** install systemd or SPI boot config. For production Pi images, use `manage_remoterm.sh` above.
 
-## 5. Optional: run as a service
+## Run without systemd
 
-Use the same systemd approach as in the main README (Systemd Service): install under e.g. `/opt/remoteterm`, point the service at the venv and set `WorkingDirectory` to the project root. SPI mode is selected automatically when `config.yaml` (or `data/config.yaml`) exists; no extra env vars are required for transport.
+```bash
+./scripts/run_remoteterm.sh --host 0.0.0.0 --port 8000
+```
 
-**SPI radio reboot:** After `POST /api/radio/reboot`, the driver may not release the GPIO pin; if reconnection fails with "GPIO already in use", restart the app manually (e.g. stop and start the service or process) to clear the pin.
+Open `http://<pi-ip>:8000`.
+
+## Identity and data
+
+- **SPI:** On first run, an Ed25519 identity is created under `data/` (`app/spi_identity`). Back up `data/` to keep the same node.
+- **Database:** `data/meshcore.db`.
+
+## Troubleshooting
+
+- **SPI not found / permission denied:** Enable SPI; ensure the process user can access `/dev/spidev*`. Add `remoteterm` to `spi` and `gpio` if needed: `sudo usermod -aG spi,gpio remoteterm`.
+- **USB not found:** Set `MESHCORE_SERIAL_PORT` via `config-usb` or `/etc/remoterm/environment`.
+- **Presets offline:** `data/radio-presets-fallback.json` is bundled.
+- **SPI radio reboot:** After `POST /api/radio/reboot`, the driver may not release GPIO; restart the service if reconnection fails.
+
+## systemd unit file
+
+See [`remoteterm.service`](../remoteterm.service): `EnvironmentFile=-/etc/remoterm/environment` for USB overrides; `MESHCORE_DATABASE_PATH` for the SQLite file.
