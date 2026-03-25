@@ -150,7 +150,10 @@ sync_source_upgrade() {
 
 create_service_user() {
   if ! id "$SERVICE_USER" &>/dev/null; then
-    useradd --system --home "$SERVICE_USER_HOME" --create-home --shell /sbin/nologin "$SERVICE_USER"
+    # Pre-create home so useradd does not run skel copy (avoids "Not copying any file from skel" noise).
+    mkdir -p "$SERVICE_USER_HOME"
+    chmod 755 "$SERVICE_USER_HOME"
+    useradd --system --home "$SERVICE_USER_HOME" --shell /sbin/nologin -M "$SERVICE_USER"
   fi
   local g
   for g in dialout spi gpio i2c; do
@@ -161,17 +164,32 @@ create_service_user() {
 }
 
 install_python_deps() {
-  sudo -u "$SERVICE_USER" bash -c "
-    set -e
-    cd '$INSTALL_DIR'
-    if [ ! -d .venv ]; then
-      python3 -m venv .venv
-    fi
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-    pip install --upgrade pip wheel
-    pip install '.[spi]'
-  "
+  # PyPI sometimes closes connections mid-download; retry with backoff. Override timeout: PIP_DEFAULT_TIMEOUT=180.
+  sudo -u "$SERVICE_USER" env INSTALL_DIR="$INSTALL_DIR" bash <<'EOS'
+set -e
+cd "$INSTALL_DIR"
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
+fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
+pip install --upgrade pip wheel
+max=5
+attempt=1
+while [ "$attempt" -le "$max" ]; do
+  if pip install --default-timeout="$PIP_DEFAULT_TIMEOUT" '.[spi]'; then
+    break
+  fi
+  if [ "$attempt" -eq "$max" ]; then
+    echo "pip install failed after $max attempts (PyPI timeouts or network). Try again later, use a stable network, or set PIP_INDEX_URL to a mirror." >&2
+    exit 1
+  fi
+  echo "pip install attempt $attempt failed; retrying in $((attempt * 10))s..." >&2
+  sleep $((attempt * 10))
+  attempt=$((attempt + 1))
+done
+EOS
 }
 
 download_frontend_zip() {
@@ -396,7 +414,7 @@ do_uninstall() {
     show_error "Uninstall requires root.\n\nRun: sudo $0 uninstall"
     exit 1
   fi
-  if ! ask_yes_no "Confirm uninstall" "Remove RemoteTerm service and $INSTALL_DIR ?\n\nConfiguration is copied to /tmp before removal."; then
+  if ! ask_yes_no "Confirm uninstall" "Remove RemoteTerm service, $INSTALL_DIR, $CONFIG_ENV_DIR, and $SERVICE_USER_HOME ?\n\nBackups are copied to /tmp before removal."; then
     exit 0
   fi
   (
@@ -409,6 +427,9 @@ do_uninstall() {
     if [ -d "$CONFIG_ENV_DIR" ]; then
       cp -a "$CONFIG_ENV_DIR" "/tmp/remoteterm_etc_backup_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
     fi
+    if [ -d "$SERVICE_USER_HOME" ]; then
+      cp -a "$SERVICE_USER_HOME" "/tmp/remoteterm_varlib_backup_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+    fi
     echo "50"
     echo "# Removing unit..."
     rm -f /etc/systemd/system/remoteterm.service
@@ -417,6 +438,7 @@ do_uninstall() {
     echo "# Removing files..."
     rm -rf "$INSTALL_DIR"
     rm -rf "$CONFIG_ENV_DIR"
+    rm -rf "$SERVICE_USER_HOME"
     echo "90"
     echo "# Removing service user (if safe)..."
     if id "$SERVICE_USER" &>/dev/null; then
@@ -424,7 +446,7 @@ do_uninstall() {
     fi
     echo "100"
   ) | $DIALOG --gauge "Uninstalling..." 8 70 0
-  show_info "Uninstall" "RemoteTerm removed.\n\nBackups under /tmp/ (if created)."
+  show_info "Uninstall" "RemoteTerm removed.\n\nBackups under /tmp/ (remoteterm_etc_backup_*, remoteterm_varlib_backup_*)."
 }
 
 do_configure_spi() {

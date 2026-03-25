@@ -31,6 +31,7 @@ sudo ./scripts/manage_remoterm.sh help
 | Path | Purpose |
 |------|---------|
 | `/opt/remoteterm` | Application and `.venv` |
+| `/var/lib/remoteterm` | Service user home (`remoteterm`); removed on uninstall (backup under `/tmp/remoteterm_varlib_backup_*` first). |
 | `/etc/remoterm/environment` | Optional env for USB serial (see `remoteterm.service`) |
 | `data/config.yaml` | SPI LoRa HAT config (default `MESHCORE_CONFIG_FILE`) |
 | `data/meshcore.db` | SQLite (set in unit as `MESHCORE_DATABASE_PATH`) |
@@ -90,6 +91,7 @@ Open `http://<pi-ip>:8000`.
 
 ## Troubleshooting
 
+- **pip / PyPI timeouts (`RemoteDisconnected`, retries on `/simple/...`):** The install script retries with a longer timeout. Use a stable network, try again, or point pip at a mirror before running the manager, for example: `export PIP_INDEX_URL=https://pypi.org/simple/` or your org mirror. You can also raise the wait with `export PIP_DEFAULT_TIMEOUT=300`.
 - **SPI not found / permission denied:** Enable SPI; ensure the process user can access `/dev/spidev*`. Add `remoteterm` to `spi` and `gpio` if needed: `sudo usermod -aG spi,gpio remoteterm`.
 - **USB not found:** Set `MESHCORE_SERIAL_PORT` via `config-usb` or `/etc/remoterm/environment`.
 - **Presets offline:** `data/radio-presets-fallback.json` is bundled.
