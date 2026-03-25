@@ -23,7 +23,7 @@ sudo ./scripts/manage_remoterm.sh help
 - Targets **Raspberry Pi** only (override with `ALLOW_NON_PI=1` for debugging).
 - **Install**: choose **SPI + LoRa HAT** (writes `data/config.yaml` via `python -m app.setup_cli`) or **USB serial** MeshCore radio (writes `/etc/remoterm/environment` with `MESHCORE_SERIAL_PORT`).
 - Optionally enables **SPI** in `/boot/firmware/config.txt` or `/boot/config.txt` (`dtparam=spi=on`) and can reboot when needed.
-- Copies the tree to `/opt/remoteterm`, creates user `remoteterm`, installs Python deps with `.[spi]`, tries to fetch the **prebuilt frontend** zip (see below), installs `remoteterm.service`, enables systemd.
+- Copies the tree to `/opt/remoteterm`, creates user `remoteterm`, installs Python deps with `.[spi]`, tries to fetch the **prebuilt frontend** zip (see below), installs `remoteterm.service` under `/etc/systemd/system/`, runs **`systemctl enable`** (starts on boot), but does **not** `systemctl start` — use **Start** in the manager or `sudo systemctl start remoteterm` for the first run.
 - **Upgrade** / **uninstall** / **logs** / **status** from the same script.
 
 **Paths**

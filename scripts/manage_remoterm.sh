@@ -66,7 +66,10 @@ ask_yes_no() {
 }
 
 service_exists() {
-  systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service"
+  # Prefer the unit file path (reliable on all systemd versions); list-unit-files grep is unreliable.
+  [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ] ||
+    [ -f "/lib/systemd/system/${SERVICE_NAME}.service" ] ||
+    [ -f "/usr/lib/systemd/system/${SERVICE_NAME}.service" ]
 }
 
 is_installed() {
@@ -322,7 +325,7 @@ do_install() {
   fi
 
   $DIALOG --backtitle "RemoteTerm Management" --title "Welcome" --msgbox \
-    "This installer sets up RemoteTerm on Raspberry Pi OS.\n\nYou will choose:\n- SPI + LoRa HAT, or\n- USB MeshCore radio\n\nThen dependencies, optional frontend zip, and systemd." 14 72
+    "This installer sets up RemoteTerm on Raspberry Pi OS.\n\nYou will choose:\n- SPI + LoRa HAT, or\n- USB MeshCore radio\n\nThen dependencies, frontend, and systemd." 14 72
 
   local transport
   transport=$($DIALOG --menu "Transport" 15 70 2 \
@@ -373,11 +376,10 @@ do_install() {
 
   install_systemd_unit
   systemctl enable "$SERVICE_NAME"
-  systemctl restart "$SERVICE_NAME" || systemctl start "$SERVICE_NAME"
 
   local ip
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  show_info "Done" "RemoteTerm installed.\n\nWeb UI: http://${ip:-localhost}:8000\n\nLogs: sudo journalctl -u $SERVICE_NAME -f"
+  show_info "Done" "RemoteTerm installed under $INSTALL_DIR.\n\nThe service is enabled for boot but was not started yet.\n\nStart it when ready:\n  sudo systemctl start $SERVICE_NAME\nor choose Start from this menu.\n\nWeb UI (after start): http://${ip:-localhost}:8000"
 }
 
 do_upgrade() {
@@ -498,7 +500,7 @@ manage_service() {
     return
   fi
   if ! service_exists; then
-    show_error "Service is not installed."
+    show_error "systemd unit not found (expected /etc/systemd/system/${SERVICE_NAME}.service).\n\nRun install first, or copy remoteterm.service and run: sudo systemctl daemon-reload"
     return
   fi
   case "$action" in
@@ -515,7 +517,7 @@ manage_service_cli() {
     exit 1
   fi
   if ! service_exists; then
-    echo "Error: ${SERVICE_NAME}.service is not installed." >&2
+    echo "Error: ${SERVICE_NAME}.service not found under /etc/systemd/system/ (run install first)." >&2
     exit 1
   fi
   systemctl "$action" "$SERVICE_NAME"
