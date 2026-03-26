@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# One-time (or occasional) install/setup script for RemoteTerm on a Pi.
+# Lightweight dev install on Raspberry Pi: venv + ".[spi]" + optional local frontend zip.
+# For production (systemd, SPI boot config, USB vs SPI, uninstall), use:
+#   sudo ./scripts/manage_remoterm.sh
+#
 # - Creates a Python venv (if missing) and installs backend deps (with SPI extras)
 # - If frontend/frontend-dist.zip exists, extracts it to frontend/dist (no download)
 #
 # Usage:
-#   chmod +x scripts/install_remoterm_pi.sh   # once
-#   ./scripts/install_remoterm_pi.sh          # run from project root
+#   chmod +x scripts/install_remoteterm_pi.sh
+#   ./scripts/install_remoteterm_pi.sh
 #
-# After this, start the app with:
-#   ./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000
+# SPI wizard (writes data/config.yaml by default):
+#   uv run python -m app.setup_cli
+#
+# Then start the app with:
+#   ./scripts/run_remoteterm.sh --host 0.0.0.0 --port 8000
 
 set -e
 

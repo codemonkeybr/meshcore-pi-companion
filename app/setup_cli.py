@@ -7,17 +7,23 @@ RemoteTerm's configuration format.
 Usage (from project root):
 
     uv run python -m app.setup_cli
+    uv run python -m app.setup_cli --config-out data/config.yaml
 
 The wizard will:
   - Ask for a node name (default: existing value or a generated one)
   - Let you pick a hardware profile from `app.backends.spi_config.HARDWARE_PROFILES`
   - Fetch radio presets from https://api.meshcore.nz/api/v1/config, with a
     fallback to `data/radio-presets-fallback.json` if the network call fails
-  - Write or update `config.yaml` in the current working directory
+  - Write or update the SPI config file (default: ``data/config.yaml``, matching
+    ``MESHCORE_CONFIG_FILE`` / production under ``/opt/remoteterm``).
+
+If ``--config-out`` does not exist, it is seeded from ``config.yaml.example`` in
+the project root when present.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import sys
@@ -28,7 +34,19 @@ from app.backends.spi_config import HARDWARE_PROFILES
 
 API_URL = "https://api.meshcore.nz/api/v1/config"
 FALLBACK_PRESETS_PATH = Path("data/radio-presets-fallback.json")
-CONFIG_PATH = Path("config.yaml")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Interactive SPI radio setup wizard for RemoteTerm (LoRa HAT)."
+    )
+    parser.add_argument(
+        "--config-out",
+        type=Path,
+        default=Path("data/config.yaml"),
+        help="Path to write SPI config (default: data/config.yaml; aligns with MESHCORE_CONFIG_FILE).",
+    )
+    return parser.parse_args(argv)
 
 
 def _print_header() -> None:
@@ -268,23 +286,27 @@ def _ensure_logging(config: dict[str, Any]) -> None:
     config["logging"] = log_cfg
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    config_path: Path = args.config_out
+
     _print_header()
 
-    if not CONFIG_PATH.is_file():
+    if not config_path.is_file():
         example = Path("config.yaml.example")
         if example.is_file():
-            print(f"Base config not found, copying from {example}...")
-            CONFIG_PATH.write_text(example.read_text())
+            print(f"Base config not found, copying from {example} to {config_path}...")
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(example.read_text())
         else:
             print(
-                "Base config.yaml not found and config.yaml.example is missing.\n"
+                "SPI config file not found and config.yaml.example is missing.\n"
                 "Please ensure you run this from the project root.",
                 file=sys.stderr,
             )
             return 1
 
-    config = _load_existing_config(CONFIG_PATH)
+    config = _load_existing_config(config_path)
 
     _step_node_name(config)
     _step_hardware_profile(config)
@@ -292,7 +314,7 @@ def main() -> int:
     _step_location(config)
     _ensure_logging(config)
 
-    _save_config(CONFIG_PATH, config)
+    _save_config(config_path, config)
 
     node_name = (config.get("node") or {}).get("name", "")
     hw_profile = (config.get("hardware") or {}).get("profile", "")
@@ -314,6 +336,8 @@ def main() -> int:
         "  - Install SPI extras: `uv add 'pymc_core[hardware]' pyyaml httpx` "
         "  (or use the [spi] extra defined in pyproject.toml)\n"
         "  - Start RemoteTerm with `./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000`\n"
+        "  - Production: SPI config is read from data/config.yaml (or MESHCORE_CONFIG_FILE); "
+        "see remoteterm.service and systemd EnvironmentFile for USB serial.\n"
     )
     return 0
 

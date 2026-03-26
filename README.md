@@ -133,32 +133,32 @@ MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn ap
 
 > Tip: SPI mode is selected when a `config.yaml` (or `data/config.yaml`) exists. If you want SPI, use the SPI section below; if you want USB/TCP/BLE, ensure no SPI config file is present.
 
-### Running on Raspberry Pi (SPI mode)
+### Running on Raspberry Pi (SPI or USB)
 
-On a Pi with a LoRa HAT (e.g. Waveshare SX1262), RemoteTerm can drive the radio directly over SPI — no external MeshCore device needed. **Enable SPI first:** `sudo raspi-config` → Interface Options → SPI → Enable, then reboot.
-
-**One-time install and config:**
+On a Pi with a LoRa HAT (e.g. Waveshare SX1262), RemoteTerm can drive the radio over **SPI**, or use a **USB** MeshCore radio. **Production install** (systemd, SPI boot line, USB vs SPI, uninstall):
 
 ```bash
-chmod +x scripts/install_remoterm_pi.sh
-./scripts/install_remoterm_pi.sh
+chmod +x scripts/manage_remoterm.sh
+sudo ./scripts/manage_remoterm.sh
 ```
 
-This creates a venv, installs deps with `.[spi]`, and if `config.yaml` is missing runs an interactive **SPI setup wizard** (node name, hardware profile, radio region). To run only the wizard later (e.g. change region or node name):
+**Lightweight dev install** (venv + `.[spi]` only; no systemd):
 
 ```bash
-./scripts/install_remoterm_pi.sh --spi-config
+chmod +x scripts/install_remoteterm_pi.sh
+./scripts/install_remoteterm_pi.sh
+uv run python -m app.setup_cli
 ```
 
-**Start the server:**
+**Start the server** (without systemd):
 
 ```bash
 ./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000
 ```
 
-Config is stored in `config.yaml` (or `data/config.yaml`). You can instead copy `config.yaml.example` and edit it by hand; see `config.yaml.example` for node, radio, and hardware profile options.
+SPI config defaults to **`data/config.yaml`** (see `python -m app.setup_cli --help`). You can copy `config.yaml.example` instead; see that file for node, radio, and hardware profile options.
 
-For a short deployment guide (troubleshooting, service, identity), see [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
+For deployment (troubleshooting, service, identity), see [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
 ## Docker Compose
 
@@ -338,7 +338,16 @@ Accept the browser warning, or use [mkcert](https://github.com/FiloSottile/mkcer
 <details>
 <summary>Systemd Service (Linux)</summary>
 
-Assumes you're running from `/opt/remoteterm`; update commands and `remoteterm.service` if you're running elsewhere.
+**Raspberry Pi (recommended):** use the interactive installer (SPI LoRa HAT or USB serial, systemd, uninstall):
+
+```bash
+chmod +x scripts/manage_remoterm.sh
+sudo ./scripts/manage_remoterm.sh
+```
+
+See [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md). USB serial overrides go in `/etc/remoterm/environment` (`MESHCORE_SERIAL_PORT`); the unit file loads them via `EnvironmentFile=-/etc/remoterm/environment`.
+
+**Manual install** (any path; assumes `/opt/remoteterm`):
 
 ```bash
 # Create service user
@@ -369,7 +378,7 @@ sudo systemctl status remoteterm
 sudo journalctl -u remoteterm -f
 ```
 
-Edit `/etc/systemd/system/remoteterm.service` to set `MESHCORE_SERIAL_PORT` if needed.
+Edit `/etc/systemd/system/remoteterm.service` or `/etc/remoterm/environment` to set `MESHCORE_SERIAL_PORT` for USB radios.
 </details>
 
 <details>

@@ -11,12 +11,12 @@ ExecStart=/opt/remoteterm/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8
 Restart=always
 RestartSec=5
 
-# Environment
+# SPI mode reads data/config.yaml by default (MESHCORE_CONFIG_FILE). For USB LoRa,
+# use scripts/manage_remoterm.sh to write /etc/remoterm/environment with MESHCORE_SERIAL_PORT.
 Environment=MESHCORE_DATABASE_PATH=/opt/remoteterm/data/meshcore.db
-# Uncomment and set if auto-detection doesn't work:
-# Environment=MESHCORE_SERIAL_PORT=/dev/ttyUSB0
+EnvironmentFile=-/etc/remoterm/environment
 
-# Give access to serial devices
+# Serial USB: dialout. On Raspberry Pi OS also run: sudo usermod -aG spi,gpio remoteterm
 SupplementaryGroups=dialout
 
 [Install]
