@@ -504,9 +504,27 @@ manage_service() {
     return
   fi
   case "$action" in
-    start) systemctl start "$SERVICE_NAME" ;;
-    stop) systemctl stop "$SERVICE_NAME" ;;
-    restart) systemctl restart "$SERVICE_NAME" ;;
+    start)
+      if systemctl start "$SERVICE_NAME" 2>/dev/null; then
+        show_info "Start" "Service started.\n\nStatus: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo unknown)"
+      else
+        show_error "Failed to start the service.\n\nsudo journalctl -u $SERVICE_NAME -n 50"
+      fi
+      ;;
+    stop)
+      if systemctl stop "$SERVICE_NAME" 2>/dev/null; then
+        show_info "Stop" "Service stopped.\n\nStatus: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo unknown)"
+      else
+        show_error "Failed to stop the service."
+      fi
+      ;;
+    restart)
+      if systemctl restart "$SERVICE_NAME" 2>/dev/null; then
+        show_info "Restart" "Service restarted.\n\nStatus: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo unknown)"
+      else
+        show_error "Failed to restart the service.\n\nsudo journalctl -u $SERVICE_NAME -n 50"
+      fi
+      ;;
   esac
 }
 
