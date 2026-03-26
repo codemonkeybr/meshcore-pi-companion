@@ -135,7 +135,17 @@ MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn ap
 
 ### Running on Raspberry Pi (SPI or USB)
 
-On a Pi with a LoRa HAT (e.g. Waveshare SX1262), RemoteTerm can drive the radio over **SPI**, or use a **USB** MeshCore radio. **Production install** (systemd, SPI boot line, USB vs SPI, uninstall):
+On a Pi with a LoRa HAT (e.g. Waveshare SX1262), RemoteTerm can drive the radio over **SPI**, or use a **USB** MeshCore radio.
+
+**One-line install (recommended):** paste this into your Pi terminal and follow the interactive prompts:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/codemonkeybr/meshcore-pi-companion/main/scripts/get-remoteterm.sh)
+```
+
+This downloads the source, fetches the pre-built frontend from GitHub Releases, installs Python dependencies, and sets up a systemd service. You will be asked to choose SPI (LoRa HAT) or USB serial and configure accordingly.
+
+**Manual production install** (systemd, SPI boot line, USB vs SPI, uninstall):
 
 ```bash
 chmod +x scripts/manage_remoterm.sh
@@ -338,7 +348,13 @@ Accept the browser warning, or use [mkcert](https://github.com/FiloSottile/mkcer
 <details>
 <summary>Systemd Service (Linux)</summary>
 
-**Raspberry Pi (recommended):** use the interactive installer (SPI LoRa HAT or USB serial, systemd, uninstall):
+**Raspberry Pi (recommended):** paste this into your Pi terminal:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/codemonkeybr/meshcore-pi-companion/main/scripts/get-remoteterm.sh)
+```
+
+Or, if you already have the repo cloned:
 
 ```bash
 chmod +x scripts/manage_remoterm.sh
