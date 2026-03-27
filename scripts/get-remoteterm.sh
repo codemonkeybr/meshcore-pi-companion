@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/codemonkeybr/meshcore-pi-companion"
-BRANCH="${REMOTETERM_BRANCH:-feature/issue-13-self-install}"
+BRANCH="${REMOTETERM_BRANCH:-main}"
 TMP_DIR="$(mktemp -d /tmp/remoteterm-install-XXXXXX)"
 
 # Clean up temp dir on error; exec replaces the process so this won't fire on success.
