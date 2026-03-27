@@ -83,7 +83,7 @@ class TestSpiIdentity:
     def test_load_or_create_identity_creates_new(self, tmp_path):
         from app.spi_identity import load_or_create_identity, load_spi_config
 
-        cfg_path = tmp_path / "spi_config.json"
+        cfg_path = tmp_path / "config.yaml"
         seed = load_or_create_identity(cfg_path)
         assert len(seed) == 32
 
@@ -95,7 +95,7 @@ class TestSpiIdentity:
     def test_load_or_create_identity_loads_existing(self, tmp_path):
         from app.spi_identity import load_or_create_identity, save_spi_config
 
-        cfg_path = tmp_path / "spi_config.json"
+        cfg_path = tmp_path / "config.yaml"
         original_seed = os.urandom(32)
         save_spi_config(
             {"identity_key": base64.b64encode(original_seed).decode()},
@@ -108,14 +108,14 @@ class TestSpiIdentity:
     def test_import_identity_validates_length(self, tmp_path):
         from app.spi_identity import import_identity
 
-        cfg_path = tmp_path / "spi_config.json"
+        cfg_path = tmp_path / "config.yaml"
         with pytest.raises(ValueError, match="32 bytes"):
             import_identity(b"too-short", cfg_path)
 
     def test_export_identity_round_trip(self, tmp_path):
         from app.spi_identity import export_identity, import_identity
 
-        cfg_path = tmp_path / "spi_config.json"
+        cfg_path = tmp_path / "config.yaml"
         seed = os.urandom(32)
         import_identity(seed, cfg_path)
         assert export_identity(cfg_path) == seed
