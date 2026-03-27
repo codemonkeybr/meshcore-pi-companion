@@ -2,13 +2,12 @@
 
 Handles generation, persistence, and loading of the 32-byte seed that
 serves as the node's mesh identity.  The seed is stored base64-encoded
-inside ``data/spi_config.json`` (alongside radio/hardware settings).
+as ``identity_key`` inside ``data/config.yaml`` (alongside radio/hardware settings).
 """
 
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 from pathlib import Path
@@ -16,7 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = Path("data/spi_config.json")
+DEFAULT_CONFIG_PATH = Path("data/config.yaml")
 
 
 def _ensure_dir(path: Path) -> None:
@@ -29,18 +28,28 @@ def generate_identity_seed() -> bytes:
 
 
 def load_spi_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
-    """Load the SPI config file, returning an empty dict if it doesn't exist."""
+    """Load the config file, returning an empty dict if it doesn't exist."""
+    import yaml  # lazy — only available when [spi] extra is installed
+
     if not path.exists():
         return {}
     with open(path) as f:
-        return json.load(f)
+        return yaml.safe_load(f) or {}
 
 
 def save_spi_config(config: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
-    """Persist *config* to the SPI config file."""
+    """Persist *config* to the config file, merging with any existing content."""
+    import yaml  # lazy — only available when [spi] extra is installed
+
     _ensure_dir(path)
+    # Load existing file to preserve all other keys (node, radio, hardware, etc.)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        with open(path) as f:
+            existing = yaml.safe_load(f) or {}
+    existing.update(config)
     with open(path, "w") as f:
-        json.dump(config, f, indent=2)
+        yaml.safe_dump(existing, f, sort_keys=False)
     logger.info("SPI config saved to %s", path)
 
 

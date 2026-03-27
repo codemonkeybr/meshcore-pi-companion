@@ -67,3 +67,6 @@ hardware:
 # Logging level: DEBUG, INFO, WARNING, ERROR
 logging:
   level: INFO
+
+# Node identity — auto-generated on first run; do not edit by hand.
+# identity_key: <base64-encoded 32-byte seed>
