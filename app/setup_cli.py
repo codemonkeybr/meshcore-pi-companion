@@ -333,11 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nNext steps:\n"
         "  - Enable SPI via `sudo raspi-config` → Interface Options → SPI\n"
-        "  - Install SPI extras: `uv add 'pymc_core[hardware]' pyyaml httpx` "
-        "  (or use the [spi] extra defined in pyproject.toml)\n"
-        "  - Start RemoteTerm with `./scripts/run_remoterm.sh --host 0.0.0.0 --port 8000`\n"
-        "  - Production: SPI config is read from data/config.yaml (or MESHCORE_CONFIG_FILE); "
-        "see remoteterm.service and systemd EnvironmentFile for USB serial.\n"
+        "  - Use `sudo /opt/remoteterm/scripts/manage_remoterm.sh` to start, stop, and manage RemoteTerm.\n"
     )
     return 0
 
