@@ -158,23 +158,6 @@ echo
 GIT_HASH=$(git rev-parse --short HEAD)
 FULL_GIT_HASH=$(git rev-parse HEAD)
 
-# Build docker image
-echo -e "${YELLOW}Building Docker image...${NC}"
-docker build --build-arg COMMIT_HASH=$GIT_HASH \
-             -t jkingsman/remoteterm-meshcore:latest \
-             -t jkingsman/remoteterm-meshcore:$VERSION \
-             -t jkingsman/remoteterm-meshcore:$GIT_HASH .
-echo -e "${GREEN}Docker build complete!${NC}"
-echo
-
-# Push docker images
-echo -e "${YELLOW}Pushing Docker images...${NC}"
-docker push jkingsman/remoteterm-meshcore:latest
-docker push jkingsman/remoteterm-meshcore:$VERSION
-docker push jkingsman/remoteterm-meshcore:$GIT_HASH
-echo -e "${GREEN}Docker push complete!${NC}"
-echo
-
 # Create GitHub release using the changelog notes for this version.
 echo -e "${YELLOW}Creating GitHub release...${NC}"
 RELEASE_NOTES_FILE=$(mktemp)
@@ -211,9 +194,5 @@ echo
 echo -e "${GREEN}=== Publish complete! ===${NC}"
 echo -e "Version: ${YELLOW}$VERSION${NC}"
 echo -e "Git hash: ${YELLOW}$GIT_HASH${NC}"
-echo -e "Docker tags pushed:"
-echo -e "  - jkingsman/remoteterm-meshcore:latest"
-echo -e "  - jkingsman/remoteterm-meshcore:$VERSION"
-echo -e "  - jkingsman/remoteterm-meshcore:$GIT_HASH"
 echo -e "GitHub release:"
 echo -e "  - $VERSION"

@@ -21,9 +21,4 @@ echo -e "${BLUE}[e2e]${NC} Running end-to-end tests..."
 echo -e "${GREEN}[e2e]${NC} Passed!"
 echo
 
-echo -e "${BLUE}[docker_ci]${NC} Running Docker frontend install/build matrix..."
-"$SCRIPT_DIR/scripts/docker_ci.sh"
-echo -e "${GREEN}[docker_ci]${NC} Passed!"
-echo
-
 echo -e "${GREEN}=== Extended quality checks passed! ===${NC}"
