@@ -41,44 +41,18 @@ If extending, have your LLM read the three `AGENTS.md` files: `./AGENTS.md`, `./
 To use the browser UI, the frontend must be built into `frontend/dist` (Quick Start and the systemd service build it). If `frontend/dist` is already present, Node.js is not required.
 
 <details>
-<summary>Finding your serial port</summary>
+<summary>Finding your serial port (Linux / Raspberry Pi OS)</summary>
 
 ```bash
-#######
-# Linux
-#######
 ls /dev/ttyUSB* /dev/ttyACM*
-
-#######
-# macOS
-#######
-ls /dev/cu.usbserial-* /dev/cu.usbmodem*
-
-###########
-# Windows
-###########
-# In PowerShell:
-Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Caption
-
-######
-# WSL2
-######
-# Run this in an elevated PowerShell (not WSL) window
-winget install usbipd
-# restart console
-# then find device ID
-usbipd list
-# make device shareable
-usbipd bind --busid 3-8 # (or whatever the right ID is)
-# attach device to WSL (run this each time you plug in the device)
-usbipd attach --wsl --busid 3-8
-# device will appear in WSL as /dev/ttyUSB0 or /dev/ttyACM0
 ```
+
+The device typically appears as `/dev/ttyUSB0` or `/dev/ttyACM0`. If it does not appear, check `dmesg | tail -20` after plugging in the device.
 </details>
 
 ## Quick Start
 
-**This approach is recommended over Docker due to intermittent serial communications issues I've seen on \*nix systems.**
+**Recommended for Raspberry Pi and Linux.**
 
 ```bash
 git clone https://github.com/codemonkeybr/meshcore-pi-companion.git
@@ -104,12 +78,6 @@ MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=4000 uv run uvicorn app.main:a
 
 # BLE (address and PIN both required)
 MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-On Windows (PowerShell), set environment variables as a separate statement:
-```powershell
-$env:MESHCORE_SERIAL_PORT="COM8" # or your COM port
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Access at http://localhost:8000
@@ -170,51 +138,6 @@ SPI config defaults to **`data/config.yaml`** (see `python -m app.setup_cli --he
 
 For deployment (troubleshooting, service, identity), see [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
-## Docker Compose
-
-> **Warning:** Docker has intermittent issues with serial event subscriptions. The native method above is more reliable.
-
-> **Note:** BLE-in-docker is outside the scope of this README, but the env vars should all still work. **SPI mode** (Pi + LoRa HAT) is not supported in Docker; the container cannot access the host’s GPIO/SPI. Use the native install and run script on the Pi instead (see [Running on Raspberry Pi (SPI mode)](#running-on-raspberry-pi-spi-mode) and [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md)).
-
-Edit `docker-compose.yaml` to set a serial device for passthrough, or uncomment your transport (serial or TCP). Then:
-
-```bash
-docker compose up -d
-```
-
-The database is stored in `./data/` (bind-mounted), so the container shares the same database as the native app. To rebuild after pulling updates:
-
-```bash
-docker compose up -d --build
-```
-
-To use the prebuilt Docker Hub image instead of building locally, replace:
-
-```yaml
-build: .
-```
-
-with:
-
-```yaml
-image: jkingsman/remoteterm-meshcore:latest
-```
-
-Then run:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-The container runs as root by default for maximum serial passthrough compatibility across host setups. On Linux, if you switch between native and Docker runs, `./data` can end up root-owned. If you do not need that compatibility behavior, you can enable the optional `user: "${UID:-1000}:${GID:-1000}"` line in `docker-compose.yaml` to keep ownership aligned with your host user.
-
-To stop:
-
-```bash
-docker compose down
-```
-
 ## Development
 
 ### Backend
@@ -226,15 +149,6 @@ uv run uvicorn app.main:app --reload # autodetects serial port
 # Or with explicit serial port
 MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --reload
 ```
-
-On Windows (PowerShell):
-```powershell
-uv sync
-$env:MESHCORE_SERIAL_PORT="COM8" # or your COM port
-uv run uvicorn app.main:app --reload
-```
-
-> **Windows note:** I've seen an intermittent startup issue like `"Received empty packet: index out of range"` with failed contact sync. I can't figure out why this happens. The issue typically resolves on restart. If you can figure out why this happens, I will buy you a virtual or iRL six pack if you're in the PNW. As a former always-windows-girlie before embracing WSL2, I despise second-classing M$FT users, but I'm just stuck with this one.
 
 ### Frontend
 
@@ -323,23 +237,6 @@ WebGPU requires a secure context. When not on `localhost`, serve over HTTPS:
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --ssl-keyfile=key.pem --ssl-certfile=cert.pem
-```
-
-For Docker Compose, generate the cert and add the volume mounts and command override to `docker-compose.yaml`:
-
-```bash
-# generate snakeoil TLS cert
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
-```
-
-Then add the key and cert to the `remoteterm` service in `docker-compose.yaml`, and add an explicit launch command that uses them:
-
-```yaml
-    volumes:
-      - ./data:/app/data
-      - ./cert.pem:/app/cert.pem:ro
-      - ./key.pem:/app/key.pem:ro
-    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --ssl-keyfile=/app/key.pem --ssl-certfile=/app/cert.pem
 ```
 
 Accept the browser warning, or use [mkcert](https://github.com/FiloSottile/mkcert) for locally-trusted certs.

@@ -17,7 +17,7 @@ A clear description of what went wrong.
 What you expected to happen.
 
 ## Environment
-- **OS:** (e.g. Windows 11, Ubuntu 24.04, Raspberry Pi OS)
+- **OS:** (e.g. Raspberry Pi OS Bookworm, Raspberry Pi OS Lite)
 - **Transport:** (Serial / TCP / BLE / SPI)
 - **Radio/firmware:** (if known)
 - **Python:** `uv run python --version`
