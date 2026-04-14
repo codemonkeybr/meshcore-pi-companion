@@ -223,6 +223,10 @@ class SpiBackend(RadioBackend):
             "lat": 0.0,
             "lon": 0.0,
             "tx_power": tx_power,
+            "radio_freq": frequency / 1_000_000,
+            "radio_bw": bandwidth / 1_000,
+            "radio_sf": spreading_factor,
+            "radio_cr": coding_rate,
         }
         self._connected = True
         logger.info("SPI backend online — node %s (%s…)", node_name, pub_hex[:12])
