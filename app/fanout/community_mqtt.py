@@ -225,14 +225,16 @@ def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: s
         "type": "PACKET",
         "direction": "rx",
         "time": current_time.strftime("%H:%M:%S"),
-        "date": current_time.strftime("%d/%m/%Y"),
+        "date": current_time.strftime("%-d/%-m/%Y"),
         "len": str(len(raw_bytes)),
         "packet_type": packet_type,
         "route": route,
         "payload_len": payload_len,
-        "raw": raw_hex.upper(),
+        "raw": raw_hex,
         "SNR": snr,
         "RSSI": rssi,
+        "score": "0",
+        "duration": "0",
         "hash": packet_hash,
     }
 
