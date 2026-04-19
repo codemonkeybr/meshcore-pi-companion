@@ -22,6 +22,7 @@ ENV_FILE="$CONFIG_ENV_DIR/environment"
 SERVICE_USER="remoteterm"
 SERVICE_NAME="remoteterm"
 SERVICE_USER_HOME="/var/lib/remoteterm"
+UPDATE_LOCK_FILE="/tmp/remoteterm_update.lock"
 DEFAULT_FRONTEND_URL="${FRONTEND_RELEASE_URL:-https://github.com/codemonkeybr/meshcore-pi-companion/releases/download/frontend-latest/frontend-dist.zip}"
 
 # shellcheck disable=SC2034
@@ -409,6 +410,114 @@ do_upgrade() {
   show_info "Upgrade" "Upgrade complete.\n\nData backup copy:\n$backup_dir"
 }
 
+do_update() {
+  # Update the installed app to the latest remote commit without touching
+  # config.yaml or the systemd unit file. Mode "cli" (default) prints plain
+  # progress; mode "tui" wraps progress in a whiptail --gauge dialog.
+  local mode="${1:-cli}"
+
+  if [ "${EUID:-0}" -ne 0 ]; then
+    if [ "$mode" = "tui" ]; then
+      show_error "Update requires root.\n\nRun: sudo $0 update"
+    else
+      echo "Error: update requires root. Run: sudo $0 update" >&2
+    fi
+    exit 1
+  fi
+
+  if ! is_installed; then
+    local not_installed_msg="RemoteTerm is not installed under $INSTALL_DIR."
+    if [ "$mode" = "tui" ]; then
+      show_error "$not_installed_msg"
+    else
+      echo "Error: $not_installed_msg" >&2
+    fi
+    exit 1
+  fi
+
+  if [ ! -d "$SOURCE_ROOT/.git" ]; then
+    local not_git_msg="$SOURCE_ROOT is not a git repository; cannot update."
+    if [ "$mode" = "tui" ]; then
+      show_error "$not_git_msg"
+    else
+      echo "Error: $not_git_msg" >&2
+    fi
+    exit 1
+  fi
+
+  # Run the actual update inside a subshell so the EXIT trap (lock release,
+  # service recovery on failure) is scoped to this operation only.
+  (
+    exec 9>"$UPDATE_LOCK_FILE"
+    if ! flock -n 9; then
+      local lock_msg="An update is already in progress (lock: $UPDATE_LOCK_FILE)."
+      if [ "$mode" = "tui" ]; then
+        show_error "$lock_msg"
+      else
+        echo "Error: $lock_msg" >&2
+      fi
+      exit 1
+    fi
+
+    update_ok=0
+    # On any exit: if the update did not reach the success marker, attempt to
+    # restart the service so the system is left operational. Always release
+    # the lock and remove the lock file.
+    # shellcheck disable=SC2064
+    trap "
+      if [ \"\$update_ok\" -ne 1 ]; then
+        systemctl start '$SERVICE_NAME' 2>/dev/null || true
+      fi
+      flock -u 9 2>/dev/null || true
+      rm -f '$UPDATE_LOCK_FILE'
+    " EXIT
+
+    if [ "$mode" = "tui" ]; then
+      if ! (
+        echo "0"
+        echo "# Stopping $SERVICE_NAME service..."
+        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+        echo "20"
+        echo "# Fetching latest code (git pull)..."
+        git -C "$SOURCE_ROOT" pull >&2 || exit 1
+        echo "50"
+        echo "# Syncing source to $INSTALL_DIR..."
+        sync_source_upgrade >&2 || exit 1
+        chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" >&2 || exit 1
+        echo "65"
+        echo "# Installing Python dependencies..."
+        install_python_deps >&2 || exit 1
+        echo "90"
+        echo "# Starting $SERVICE_NAME service..."
+        systemctl start "$SERVICE_NAME" >&2 || exit 1
+        echo "100"
+      ) | $DIALOG --gauge "Updating RemoteTerm..." 8 70 0; then
+        show_error "Update failed. Service will be restarted from existing code.\n\nSee console output / journalctl for details."
+        exit 1
+      fi
+      update_ok=1
+      show_info "Update" "RemoteTerm updated to version $(get_version)."
+    else
+      echo "Stopping $SERVICE_NAME service..."
+      systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+      echo "Fetching latest code (git pull)..."
+      if ! git -C "$SOURCE_ROOT" pull; then
+        echo "Error: git pull failed. Service will be restarted from existing code." >&2
+        exit 1
+      fi
+      echo "Syncing source to $INSTALL_DIR..."
+      sync_source_upgrade
+      chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+      echo "Installing Python dependencies..."
+      install_python_deps
+      echo "Starting $SERVICE_NAME service..."
+      systemctl start "$SERVICE_NAME"
+      update_ok=1
+      echo "Update complete. Version: $(get_version)"
+    fi
+  )
+}
+
 do_uninstall() {
   require_tty
   pick_dialog
@@ -562,9 +671,10 @@ show_main_menu() {
   status="$(get_status_display)"
   local choice
   choice=$($DIALOG --backtitle "RemoteTerm Management" --title "RemoteTerm" --menu \
-    "Current: $status\nChoose:" 22 72 12 \
+    "Current: $status\nChoose:" 22 72 13 \
     install "Install to $INSTALL_DIR" \
     upgrade "Upgrade from this source tree" \
+    update "Update app to latest version (git pull + restart)" \
     uninstall "Remove RemoteTerm" \
     config_spi "Run SPI setup wizard" \
     config_usb "Set USB serial port" \
@@ -579,6 +689,7 @@ show_main_menu() {
   case "$choice" in
     install) do_install ;;
     upgrade) do_upgrade ;;
+    update) do_update tui ;;
     uninstall) do_uninstall ;;
     config_spi) do_configure_spi ;;
     config_usb) do_configure_usb ;;
@@ -604,6 +715,7 @@ Usage: $0 [command]
 Commands:
   install     Full install (interactive transport selection)
   upgrade     Sync from source tree to $INSTALL_DIR
+  update      Stop service, git pull, reinstall deps, restart service
   uninstall   Remove service and install directory
   config-spi  Run SPI wizard (setup_cli)
   config-usb  Set USB serial device in $ENV_FILE
@@ -631,6 +743,10 @@ case "${1:-}" in
     ;;
   upgrade)
     do_upgrade
+    exit 0
+    ;;
+  update)
+    do_update cli
     exit 0
     ;;
   uninstall)
