@@ -10,6 +10,8 @@
 # Environment:
 #   ALLOW_NON_PI=1     Skip Raspberry Pi device-tree check (for debugging only).
 #   FRONTEND_RELEASE_URL  Override prebuilt frontend zip URL (default: meshcore-pi-companion frontend-latest).
+#   REMOTETERM_REPO=codemonkeybr/meshcore-pi-companion  GitHub repo for release downloads.
+#   RELEASE_VERSION=latest  Release tag for upgrade (overridden by --version flag).
 
 set -euo pipefail
 
@@ -22,7 +24,8 @@ ENV_FILE="$CONFIG_ENV_DIR/environment"
 SERVICE_USER="remoteterm"
 SERVICE_NAME="remoteterm"
 SERVICE_USER_HOME="/var/lib/remoteterm"
-DEFAULT_FRONTEND_URL="${FRONTEND_RELEASE_URL:-https://github.com/codemonkeybr/meshcore-pi-companion/releases/download/frontend-latest/frontend-dist.zip}"
+REMOTETERM_REPO="${REMOTETERM_REPO:-codemonkeybr/meshcore-pi-companion}"
+DEFAULT_FRONTEND_URL="${FRONTEND_RELEASE_URL:-https://github.com/${REMOTETERM_REPO}/releases/download/frontend-latest/frontend-dist.zip}"
 
 # shellcheck disable=SC2034
 DIALOG=""
@@ -149,6 +152,107 @@ sync_source_upgrade() {
     echo "rsync is recommended for upgrade; install rsync or re-run install from a fresh copy." >&2
     sync_source_to_install
   fi
+}
+
+# http_get_text URL -- print URL body to stdout (silent, for API queries).
+http_get_text() {
+  local url="$1"
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$url"
+  elif command -v wget &>/dev/null; then
+    wget -q -O- "$url"
+  else
+    echo "Error: need curl or wget." >&2
+    return 1
+  fi
+}
+
+# http_fetch URL OUTFILE -- download URL to OUTFILE.
+http_fetch() {
+  local url="$1" out="$2"
+  if command -v curl &>/dev/null; then
+    if [ -t 1 ]; then
+      curl -fL --progress-bar -o "$out" "$url"
+    else
+      curl -fsSL -o "$out" "$url"
+    fi
+  elif command -v wget &>/dev/null; then
+    wget -q --show-progress -O "$out" "$url"
+  else
+    echo "Error: need curl or wget." >&2
+    return 1
+  fi
+}
+
+# Resolve "latest" or a specific tag against the GitHub Releases API. Echoes the
+# concrete tag (e.g. "v3.2.0") on success.
+resolve_release_version() {
+  local version="$1"
+  if [ -z "$version" ] || [ "$version" = "latest" ]; then
+    local body
+    if ! body="$(http_get_text "https://api.github.com/repos/${REMOTETERM_REPO}/releases/latest")"; then
+      echo "Error: failed to query GitHub Releases API for the latest version." >&2
+      return 1
+    fi
+    local tag
+    tag="$(printf '%s' "$body" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    if [ -z "$tag" ]; then
+      echo "Error: could not parse tag_name from GitHub API response." >&2
+      return 1
+    fi
+    echo "$tag"
+    return 0
+  fi
+  # Validate the tag exists by asking the API directly.
+  if ! http_get_text "https://api.github.com/repos/${REMOTETERM_REPO}/releases/tags/${version}" >/dev/null; then
+    echo "Error: release version '$version' not found in ${REMOTETERM_REPO}." >&2
+    return 1
+  fi
+  echo "$version"
+}
+
+# Download + extract a release tarball. Echoes the extracted source root path.
+# Usage: download_release_to_tmp TAG
+download_release_to_tmp() {
+  local tag="$1"
+  local semver="${tag#v}"
+  local artifact="remoteterm-backend-${semver}.tar.gz"
+  local checksum="${artifact}.sha256"
+  local base="https://github.com/${REMOTETERM_REPO}/releases/download/${tag}"
+  local tmp
+  tmp="$(mktemp -d /tmp/remoteterm-upgrade-XXXXXX)"
+
+  echo "Downloading $artifact ..." >&2
+  if ! http_fetch "${base}/${artifact}" "${tmp}/${artifact}"; then
+    echo "Error: failed to download ${base}/${artifact}" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if http_fetch "${base}/${checksum}" "${tmp}/${checksum}" 2>/dev/null; then
+    echo "Verifying SHA256 checksum..." >&2
+    if ! (cd "$tmp" && sha256sum -c "$checksum" >/dev/null 2>&1); then
+      echo "Error: checksum verification failed for $artifact." >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+  else
+    echo "Warning: no checksum file for $tag; skipping integrity verification." >&2
+  fi
+
+  mkdir -p "${tmp}/src"
+  if ! tar -xzf "${tmp}/${artifact}" -C "${tmp}/src"; then
+    echo "Error: failed to extract ${artifact}." >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if [ ! -f "${tmp}/src/pyproject.toml" ]; then
+    echo "Error: release artifact missing pyproject.toml — malformed bundle." >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  echo "${tmp}/src"
 }
 
 create_service_user() {
@@ -383,6 +487,28 @@ do_install() {
 }
 
 do_upgrade() {
+  local requested_version="${RELEASE_VERSION:-latest}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --version)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: --version requires a value (e.g. --version v3.2.0)." >&2
+          exit 2
+        fi
+        requested_version="$2"
+        shift 2
+        ;;
+      --version=*)
+        requested_version="${1#--version=}"
+        shift
+        ;;
+      *)
+        echo "Error: unknown upgrade argument: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
   require_tty
   pick_dialog
   if [ "${EUID:-0}" -ne 0 ]; then
@@ -393,20 +519,46 @@ do_upgrade() {
     show_error "RemoteTerm is not installed."
     exit 1
   fi
-  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm from:\n$SOURCE_ROOT\n\nto $INSTALL_DIR ?"; then
+
+  echo "Resolving release version ($requested_version)..."
+  local tag
+  if ! tag="$(resolve_release_version "$requested_version")"; then
+    show_error "Could not resolve release version '$requested_version'.\n\nCheck network access and verify the tag exists on\nhttps://github.com/${REMOTETERM_REPO}/releases"
+    exit 1
+  fi
+
+  local current_version
+  current_version="$(get_version)"
+  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm:\n\n  current : $current_version\n  target  : $tag\n\nDownload release and install to $INSTALL_DIR ?"; then
     exit 0
   fi
+
+  local release_src
+  if ! release_src="$(download_release_to_tmp "$tag")"; then
+    show_error "Failed to download release $tag.\n\nSee terminal output for details."
+    exit 1
+  fi
+
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
   local backup_dir="/tmp/remoteterm_data_backup_$(date +%Y%m%d_%H%M%S)"
   if [ -d "$INSTALL_DIR/data" ]; then
     cp -a "$INSTALL_DIR/data" "$backup_dir" 2>/dev/null || true
   fi
+
+  # Point sync at the downloaded release tree; restore on exit so the script
+  # state stays consistent for any follow-up commands.
+  local prev_source_root="$SOURCE_ROOT"
+  SOURCE_ROOT="$release_src"
   sync_source_upgrade
+  SOURCE_ROOT="$prev_source_root"
+
   chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
   install_python_deps
   install_systemd_unit
   systemctl start "$SERVICE_NAME"
-  show_info "Upgrade" "Upgrade complete.\n\nData backup copy:\n$backup_dir"
+
+  rm -rf "$(dirname "$release_src")" 2>/dev/null || true
+  show_info "Upgrade" "Upgrade complete.\n\nInstalled: $tag\nData backup copy:\n$backup_dir"
 }
 
 do_uninstall() {
@@ -602,20 +754,24 @@ RemoteTerm Pi management (Raspberry Pi OS).
 Usage: $0 [command]
 
 Commands:
-  install     Full install (interactive transport selection)
-  upgrade     Sync from source tree to $INSTALL_DIR
-  uninstall   Remove service and install directory
-  config-spi  Run SPI wizard (setup_cli)
-  config-usb  Set USB serial device in $ENV_FILE
+  install             Full install (interactive transport selection)
+  upgrade [--version vX.Y.Z]
+                      Download release from GitHub and install to $INSTALL_DIR.
+                      Defaults to latest when --version is omitted.
+  uninstall           Remove service and install directory
+  config-spi          Run SPI wizard (setup_cli)
+  config-usb          Set USB serial device in $ENV_FILE
   start | stop | restart   systemd
-  status      Show status
-  help        This help
+  status              Show status
+  help                This help
 
 With no arguments, shows the interactive menu (requires a TTY).
 
 Environment:
   ALLOW_NON_PI=1
   FRONTEND_RELEASE_URL=...   Prebuilt frontend zip URL
+  REMOTETERM_REPO=owner/name GitHub repo for release downloads
+  RELEASE_VERSION=latest     Default release tag for upgrade
 EOF
 }
 
@@ -630,7 +786,8 @@ case "${1:-}" in
     exit 0
     ;;
   upgrade)
-    do_upgrade
+    shift
+    do_upgrade "$@"
     exit 0
     ;;
   uninstall)

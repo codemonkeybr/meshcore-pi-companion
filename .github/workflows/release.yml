@@ -1,0 +1,109 @@
+# Build a backend release bundle on push to main.
+#
+# Reads the semantic version from pyproject.toml, creates (if missing) a
+# GitHub Release tagged v{version}, and uploads:
+#   - remoteterm-backend-{version}.tar.gz  (backend bundle)
+#   - remoteterm-backend-{version}.tar.gz.sha256  (checksum for integrity)
+#
+# The frontend is intentionally excluded; it remains a separate asset under the
+# frontend-latest release (see frontend-build.yml).
+name: Release build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version="$(grep -E '^version' pyproject.toml | head -n1 | cut -d'"' -f2)"
+          if [ -z "$version" ]; then
+            echo "Could not parse version from pyproject.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Parsed version: $version (tag: v$version)"
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $tag already exists; skipping creation."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build backend bundle
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          artifact="remoteterm-backend-${version}.tar.gz"
+          tar czf "$artifact" \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./.venv' \
+            --exclude='./frontend' \
+            --exclude='./node_modules' \
+            --exclude='./__pycache__' \
+            --exclude='*/__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='./.pytest_cache' \
+            --exclude='./.ruff_cache' \
+            --exclude='./.mypy_cache' \
+            --exclude='./data/meshcore.db*' \
+            --exclude='./LICENSE.md' \
+            --exclude='./README.md' \
+            --exclude='./CLAUDE.md' \
+            --exclude='./AGENTS.md' \
+            --exclude="./$artifact" \
+            .
+          sha256sum "$artifact" > "${artifact}.sha256"
+          ls -lh "$artifact" "${artifact}.sha256"
+          # Sanity check: bundle must contain scripts/ and pyproject.toml.
+          tar tzf "$artifact" | grep -q '^\./scripts/manage_remoterm.sh$'
+          tar tzf "$artifact" | grep -q '^\./pyproject.toml$'
+
+      - name: Upload backend artifact (Actions)
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: remoteterm-backend-${{ steps.version.outputs.version }}
+          path: |
+            remoteterm-backend-${{ steps.version.outputs.version }}.tar.gz
+            remoteterm-backend-${{ steps.version.outputs.version }}.tar.gz.sha256
+          retention-days: 30
+
+      - name: Create GitHub Release and upload assets
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "RemoteTerm Backend $tag" \
+            --generate-notes
+          gh release upload "$tag" \
+            "remoteterm-backend-${version}.tar.gz" \
+            "remoteterm-backend-${version}.tar.gz.sha256" \
+            --repo "${{ github.repository }}" \
+            --clobber
