@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           artifact="remoteterm-backend-${version}.tar.gz"
-          tar czf "$artifact" \
+          tar czf "/tmp/$artifact" \
             --exclude='./.git' \
             --exclude='./.github' \
             --exclude='./.venv' \
@@ -71,8 +71,8 @@ jobs:
             --exclude='./README.md' \
             --exclude='./CLAUDE.md' \
             --exclude='./AGENTS.md' \
-            --exclude="./$artifact" \
             .
+          mv "/tmp/$artifact" .
           sha256sum "$artifact" > "${artifact}.sha256"
           ls -lh "$artifact" "${artifact}.sha256"
           # Sanity check: bundle must contain scripts/ and pyproject.toml.
