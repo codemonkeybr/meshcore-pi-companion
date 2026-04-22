@@ -222,7 +222,7 @@ class TestPacketFormatConversion:
 
         assert result["origin"] == "TestNode"
         assert result["origin_id"] == "AABBCCDD" * 8
-        assert result["raw"] == "0A1B2C3D"
+        assert result["raw"] == "0a1b2c3d"
         assert result["SNR"] == "5.5"
         assert result["RSSI"] == "-90"
         assert result["type"] == "PACKET"
