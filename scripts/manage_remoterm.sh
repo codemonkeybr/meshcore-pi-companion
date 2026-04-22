@@ -83,6 +83,20 @@ is_running() {
   systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1
 }
 
+is_frontend_installed() {
+  [ -f "$INSTALL_DIR/frontend/dist/index.html" ]
+}
+
+get_install_state() {
+  if ! is_installed; then
+    echo "nothing_installed"
+  elif is_frontend_installed; then
+    echo "backend_and_frontend"
+  else
+    echo "backend_only"
+  fi
+}
+
 get_version() {
   if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
     grep "^version" "$INSTALL_DIR/pyproject.toml" | head -1 | cut -d'"' -f2 2>/dev/null || echo "unknown"
@@ -315,15 +329,41 @@ download_frontend_zip() {
   return 1
 }
 
-extract_frontend() {
+extract_frontend_atomic() {
   local zip="$INSTALL_DIR/frontend/frontend-dist.zip"
   if [ ! -f "$zip" ]; then
     return 1
   fi
-  mkdir -p "$INSTALL_DIR/frontend/dist"
-  if (cd "$INSTALL_DIR/frontend/dist" && unzip -o -q "../frontend-dist.zip"); then
-    return 0
+  local dist="$INSTALL_DIR/frontend/dist"
+  local dist_tmp="${dist}.tmp"
+  local dist_old="${dist}.old"
+
+  rm -rf "$dist_tmp"
+  mkdir -p "$dist_tmp"
+
+  if ! (cd "$dist_tmp" && unzip -o -q "$zip"); then
+    rm -rf "$dist_tmp"
+    return 1
   fi
+
+  if [ -d "$dist" ]; then
+    rm -rf "$dist_old"
+    mv "$dist" "$dist_old"
+  fi
+  mv "$dist_tmp" "$dist"
+  rm -rf "$dist_old" 2>/dev/null || true
+  return 0
+}
+
+install_frontend_bundle() {
+  if download_frontend_zip; then
+    if extract_frontend_atomic; then
+      return 0
+    fi
+    echo "Error: failed to extract frontend bundle." >&2
+    return 1
+  fi
+  echo "Error: failed to download frontend bundle." >&2
   return 1
 }
 
@@ -414,6 +454,52 @@ configure_usb_port_interactive() {
 }
 
 do_install() {
+  local components=""
+
+  # Parse arguments (T005 / FR-015)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --components)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: --components requires a value (be, be+fe, fe)." >&2
+          exit 2
+        fi
+        components="$2"
+        shift 2
+        ;;
+      --components=*)
+        components="${1#--components=}"
+        shift
+        ;;
+      *)
+        echo "Error: unknown install argument: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  # Validate --components value early (T005)
+  case "${components:-}" in
+    be | be+fe | fe | "") ;;
+    *)
+      echo "Error: --components ${components}: unknown value. Accepted: be, be+fe, fe." >&2
+      exit 2
+      ;;
+  esac
+
+  # Non-interactive mode requires --components (T011 / FR-015)
+  if [ -z "$components" ] && { [ ! -t 0 ] || [ -z "${TERM:-}" ]; }; then
+    echo "Error: --components is required in non-interactive mode. Accepted values: be, be+fe, fe." >&2
+    exit 1
+  fi
+
+  # FR-006: Refuse fe-only when backend not installed — checked before TTY requirement
+  # so automation also gets a clear message without needing a terminal.
+  if [ "$components" = "fe" ] && ! is_installed; then
+    echo "Error: cannot install frontend — backend is not installed. Run: sudo $0 install --components be (or be+fe) first." >&2
+    exit 1
+  fi
+
   require_tty
   pick_dialog
   ensure_pi
@@ -423,13 +509,101 @@ do_install() {
     exit 1
   fi
 
-  if is_installed; then
-    show_error "RemoteTerm is already installed under $INSTALL_DIR.\n\nUse upgrade or uninstall first."
-    exit 1
+  # Detect current state (T013 / FR-002)
+  local state
+  state="$(get_install_state)"
+
+  # Determine component selection interactively when not provided (T010)
+  if [ -z "$components" ]; then
+    case "$state" in
+      nothing_installed)
+        components=$(
+          $DIALOG --backtitle "RemoteTerm Management" --title "Component Selection" \
+            --menu "What would you like to install?" 15 72 2 \
+            be     "Backend only (API service, no web UI)" \
+            be+fe  "Backend + Frontend (API service + web UI)" \
+            3>&1 1>&2 2>&3
+        ) || exit 0
+        ;;
+      backend_only)
+        components=$(
+          $DIALOG --backtitle "RemoteTerm Management" --title "Component Selection" \
+            --menu "Backend is already installed. What would you like to do?" 15 72 2 \
+            fe     "Add Frontend (web UI) to existing backend" \
+            cancel "Cancel" \
+            3>&1 1>&2 2>&3
+        ) || exit 0
+        [ "$components" = "cancel" ] && exit 0
+        ;;
+      backend_and_frontend)
+        show_error "RemoteTerm is already fully installed (Backend + Frontend).\n\nUse upgrade or uninstall."
+        exit 1
+        ;;
+    esac
   fi
 
+  # Validate component selection against current state (T007 / T012 / T016 / T017)
+  case "$components" in
+    be | be+fe)
+      if [ "$state" != "nothing_installed" ]; then
+        show_error "RemoteTerm is already installed under $INSTALL_DIR.\n\nUse upgrade or uninstall first."
+        exit 1
+      fi
+      ;;
+    fe)
+      case "$state" in
+        nothing_installed)
+          # Show error via dialog if TTY available, also print to stderr for automation
+          echo "Error: cannot install frontend — backend is not installed. Run: sudo $0 install --components be (or be+fe) first." >&2
+          show_error "Cannot install frontend — backend is not installed.\n\nRun install first:\n  sudo $0 install --components be+fe"
+          exit 1
+          ;;
+        backend_and_frontend)
+          if ! ask_yes_no "Frontend Already Installed" "The frontend is already installed.\n\nRefresh it with the latest release?"; then
+            exit 0
+          fi
+          ;;
+        backend_only)
+          # Valid — proceed
+          ;;
+      esac
+      ;;
+  esac
+
+  # Pre-action confirmation summary (T006 / FR-012)
+  local action_summary=""
+  case "$components" in
+    be)    action_summary="Install: Backend (API service)\nSkip:    Frontend (web UI)" ;;
+    be+fe) action_summary="Install: Backend (API service)\nInstall: Frontend (web UI)" ;;
+    fe)    action_summary="Add:     Frontend (web UI)\nPreserve: Existing backend (unchanged)" ;;
+  esac
+  if ! ask_yes_no "Confirm Installation" "Planned actions:\n\n$action_summary\n\nProceed?"; then
+    exit 0
+  fi
+
+  # ── Frontend-only path (T015 / US2) ────────────────────────────────────────
+  if [ "$components" = "fe" ]; then
+    (
+      echo "10"
+      echo "# Downloading frontend bundle..."
+      echo "50"
+    ) | $DIALOG --gauge "Installing Frontend..." 8 70 0
+
+    if ! install_frontend_bundle; then
+      show_error "Failed to install frontend.\n\nCheck network access and try again."
+      exit 1
+    fi
+
+    local ip
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    # T018: inform operator restart is optional (R5)
+    show_info "Frontend Installed" "Frontend installed under $INSTALL_DIR/frontend/dist/.\n\nThe running backend will serve it immediately — no restart required.\n\nWeb UI: http://${ip:-localhost}:8000\n\nIf the browser shows a stale build, restart the service:\n  sudo systemctl restart $SERVICE_NAME"
+    return 0
+  fi
+
+  # ── Backend install path (T008 be / T009 be+fe / US1) ──────────────────────
   $DIALOG --backtitle "RemoteTerm Management" --title "Welcome" --msgbox \
-    "This installer sets up RemoteTerm on Raspberry Pi OS.\n\nYou will choose:\n- SPI + LoRa HAT, or\n- USB MeshCore radio\n\nThen dependencies, frontend, and systemd." 14 72
+    "This installer sets up RemoteTerm on Raspberry Pi OS.\n\nYou will choose:\n- SPI + LoRa HAT, or\n- USB MeshCore radio\n\nThen dependencies, systemd, and optional web UI." 14 72
 
   local transport
   transport=$($DIALOG --menu "Transport" 15 70 2 \
@@ -453,9 +627,9 @@ do_install() {
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     install_python_deps
     echo "55"
-    echo "# Frontend zip..."
-    if download_frontend_zip; then
-      sudo -u "$SERVICE_USER" bash -c "cd '$INSTALL_DIR' && mkdir -p frontend/dist && (cd frontend/dist && unzip -o -q ../frontend-dist.zip)" || true
+    if [ "$components" = "be+fe" ]; then
+      echo "# Installing frontend bundle..."
+      install_frontend_bundle || true
     fi
     echo "75"
     echo "# Radio configuration..."
@@ -483,7 +657,13 @@ do_install() {
 
   local ip
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  show_info "Done" "RemoteTerm installed under $INSTALL_DIR.\n\nThe service is enabled for boot but was not started yet.\n\nStart it when ready:\n  sudo systemctl start $SERVICE_NAME\nor choose Start from this menu.\n\nWeb UI (after start): http://${ip:-localhost}:8000"
+  local ui_note=""
+  if [ "$components" = "be+fe" ]; then
+    ui_note="\n\nWeb UI (after start): http://${ip:-localhost}:8000"
+  else
+    ui_note="\n\n(Frontend not installed — API only. Add later with: sudo $0 install --components fe)"
+  fi
+  show_info "Done" "RemoteTerm installed under $INSTALL_DIR.\n\nThe service is enabled for boot but was not started yet.\n\nStart it when ready:\n  sudo systemctl start $SERVICE_NAME\nor choose Start from this menu.${ui_note}"
 }
 
 do_upgrade() {
@@ -509,14 +689,20 @@ do_upgrade() {
     esac
   done
 
+  # Detect state before requiring TTY so automation gets a clear message (FR-008)
+  local state
+  state="$(get_install_state)"
+
+  # T022: Exit with clear message if nothing installed (FR-008)
+  if [ "$state" = "nothing_installed" ]; then
+    echo "Error: RemoteTerm is not installed. Run: sudo $0 install" >&2
+    exit 1
+  fi
+
   require_tty
   pick_dialog
   if [ "${EUID:-0}" -ne 0 ]; then
     show_error "Upgrade requires root.\n\nRun: sudo $0 upgrade"
-    exit 1
-  fi
-  if ! is_installed; then
-    show_error "RemoteTerm is not installed."
     exit 1
   fi
 
@@ -529,7 +715,15 @@ do_upgrade() {
 
   local current_version
   current_version="$(get_version)"
-  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm:\n\n  current : $current_version\n  target  : $tag\n\nDownload release and install to $INSTALL_DIR ?"; then
+
+  # Pre-action confirmation naming which components will be upgraded (FR-012)
+  local component_note=""
+  if [ "$state" = "backend_and_frontend" ]; then
+    component_note="\nComponents: Backend + Frontend"
+  else
+    component_note="\nComponents: Backend only (no frontend installed)"
+  fi
+  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm:\n\n  current : $current_version\n  target  : $tag${component_note}\n\nDownload release and install to $INSTALL_DIR ?"; then
     exit 0
   fi
 
@@ -555,22 +749,57 @@ do_upgrade() {
   chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
   install_python_deps
   install_systemd_unit
+
+  # T019/T020/T021: Upgrade frontend only when it was installed (FR-008, FR-009)
+  local fe_result=0
+  if [ "$state" = "backend_and_frontend" ]; then
+    # T023: Partial-failure handling — FE failure does not abort BE upgrade
+    if ! install_frontend_bundle; then
+      fe_result=1
+    fi
+  fi
+
   systemctl start "$SERVICE_NAME"
 
   rm -rf "$(dirname "$release_src")" 2>/dev/null || true
-  show_info "Upgrade" "Upgrade complete.\n\nInstalled: $tag\nData backup copy:\n$backup_dir"
+
+  if [ "$fe_result" -ne 0 ]; then
+    show_info "Upgrade (partial)" "Backend upgraded to $tag.\n\nFrontend upgrade FAILED — previous UI remains intact.\nCheck network access and retry upgrade.\n\nData backup copy:\n$backup_dir"
+  else
+    show_info "Upgrade" "Upgrade complete.\n\nInstalled: $tag\nData backup copy:\n$backup_dir"
+  fi
 }
 
 do_uninstall() {
+  # T024: Detect current state before requiring TTY (FR-002)
+  local state
+  state="$(get_install_state)"
+
+  # T027: Exit cleanly if nothing installed — checked before TTY requirement (spec AC3)
+  if [ "$state" = "nothing_installed" ]; then
+    echo "Error: RemoteTerm is not installed — nothing to remove." >&2
+    exit 1
+  fi
+
   require_tty
   pick_dialog
   if [ "${EUID:-0}" -ne 0 ]; then
     show_error "Uninstall requires root.\n\nRun: sudo $0 uninstall"
     exit 1
   fi
-  if ! ask_yes_no "Confirm uninstall" "Remove RemoteTerm service, $INSTALL_DIR, $CONFIG_ENV_DIR, and $SERVICE_USER_HOME ?\n\nBackups are copied to /tmp before removal."; then
+
+  # T026: Component summary in confirmation (FR-012)
+  local component_note=""
+  if [ "$state" = "backend_and_frontend" ]; then
+    component_note="Backend + Frontend"
+  else
+    component_note="Backend only"
+  fi
+  if ! ask_yes_no "Confirm uninstall" "Remove RemoteTerm ($component_note):\n\n  $INSTALL_DIR\n  $CONFIG_ENV_DIR\n  $SERVICE_USER_HOME\n\nBackups are copied to /tmp before removal."; then
     exit 0
   fi
+
+  # T025: Remove whatever is installed; silently skip missing components (FR-010, FR-011)
   (
     echo "10"
     echo "# Stopping service..."
@@ -754,11 +983,21 @@ RemoteTerm Pi management (Raspberry Pi OS).
 Usage: $0 [command]
 
 Commands:
-  install             Full install (interactive transport selection)
+  install [--components be|be+fe|fe] [--version vX.Y.Z]
+                      Install RemoteTerm components.
+                        be      Backend only (API service, no web UI)
+                        be+fe   Backend + Frontend (API + web UI)  [default interactive]
+                        fe      Frontend only (add to an existing backend install)
+                      --version defaults to latest.
+                      In non-interactive mode (no TTY), --components is required.
   upgrade [--version vX.Y.Z]
-                      Download release from GitHub and install to $INSTALL_DIR.
+                      Upgrade whatever is currently installed.
+                      Detects installed components automatically:
+                        Backend-only installs: backend is upgraded, frontend untouched.
+                        Backend+Frontend installs: both components are upgraded.
                       Defaults to latest when --version is omitted.
-  uninstall           Remove service and install directory
+  uninstall           Remove all installed components (backend + frontend if present).
+                      Detects installed components automatically.
   config-spi          Run SPI wizard (setup_cli)
   config-usb          Set USB serial device in $ENV_FILE
   start | stop | restart   systemd
@@ -782,7 +1021,8 @@ case "${1:-}" in
     exit 0
     ;;
   install)
-    do_install
+    shift
+    do_install "$@"
     exit 0
     ;;
   upgrade)
