@@ -76,8 +76,9 @@ jobs:
           sha256sum "$artifact" > "${artifact}.sha256"
           ls -lh "$artifact" "${artifact}.sha256"
           # Sanity check: bundle must contain scripts/ and pyproject.toml.
-          tar tzf "$artifact" | grep -q '^\./scripts/manage_remoterm.sh$'
-          tar tzf "$artifact" | grep -q '^\./pyproject.toml$'
+          listing=$(tar tzf "$artifact")
+          echo "$listing" | grep -q '^\./scripts/manage_remoterm.sh$'
+          echo "$listing" | grep -q '^\./pyproject.toml$'
 
       - name: Upload backend artifact (Actions)
         if: steps.check.outputs.exists == 'false'
