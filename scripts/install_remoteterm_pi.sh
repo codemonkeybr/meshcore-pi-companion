@@ -44,8 +44,8 @@ fi
 echo "Activating virtualenv and installing Python dependencies (including [spi])..."
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
-pip install --upgrade pip
-pip install ".[spi]"
+pip install --no-cache-dir --upgrade pip
+pip install --no-cache-dir ".[spi]"
 
 echo
 echo "== Frontend (optional) =="
