@@ -1,3 +1,7 @@
+## [3.2.1] - 2026-04-22
+
+Bugfix: Suppress pip cache warning when installing as service user (manage_remoterm.sh, install_remoteterm_pi.sh)
+
 ## [3.2.0] - 2026-03-12
 
 Feature: Improve ambiguous-sender DM handling and visibility

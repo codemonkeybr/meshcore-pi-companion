@@ -181,7 +181,7 @@ class TestDebugEndpoint:
         with patch(
             "app.routers.debug._build_application_info",
             return_value=DebugApplicationInfo(
-                version="3.2.0",
+                version="3.2.1",
                 commit_hash="deadbeef",
                 git_branch="main",
                 git_dirty=False,
@@ -222,7 +222,7 @@ class TestDebugEndpoint:
         with patch(
             "app.routers.debug._build_application_info",
             return_value=DebugApplicationInfo(
-                version="3.2.0",
+                version="3.2.1",
                 commit_hash="deadbeef",
                 git_branch="main",
                 git_dirty=False,
