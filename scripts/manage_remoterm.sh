@@ -281,11 +281,11 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-120}"
-pip install --upgrade pip wheel
+pip install --no-cache-dir --upgrade pip wheel
 max=5
 attempt=1
 while [ "$attempt" -le "$max" ]; do
-  if pip install --default-timeout="$PIP_DEFAULT_TIMEOUT" '.[spi]'; then
+  if pip install --no-cache-dir --default-timeout="$PIP_DEFAULT_TIMEOUT" '.[spi]'; then
     break
   fi
   if [ "$attempt" -eq "$max" ]; then
