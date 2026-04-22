@@ -1,4 +1,7 @@
-# Build a backend release bundle on push to main.
+# Build a backend release bundle after quality checks pass on main.
+#
+# Triggered by the "All Quality" workflow completing on main — the release job
+# only runs when quality succeeded, so a bad build can never produce an artifact.
 #
 # Reads the semantic version from pyproject.toml, creates (if missing) a
 # GitHub Release tagged v{version}, and uploads:
@@ -10,7 +13,9 @@
 name: Release build
 
 on:
-  push:
+  workflow_run:
+    workflows: ["All Quality"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -19,6 +24,7 @@ permissions:
 
 jobs:
   release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
