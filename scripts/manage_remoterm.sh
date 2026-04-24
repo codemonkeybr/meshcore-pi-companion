@@ -455,6 +455,7 @@ configure_usb_port_interactive() {
 
 do_install() {
   local components=""
+  local requested_version="${RELEASE_VERSION:-latest}"
 
   # Parse arguments (T005 / FR-015)
   while [ $# -gt 0 ]; do
@@ -469,6 +470,18 @@ do_install() {
         ;;
       --components=*)
         components="${1#--components=}"
+        shift
+        ;;
+      --version)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: --version requires a value (e.g. --version v3.2.0)." >&2
+          exit 2
+        fi
+        requested_version="$2"
+        shift 2
+        ;;
+      --version=*)
+        requested_version="${1#--version=}"
         shift
         ;;
       *)
