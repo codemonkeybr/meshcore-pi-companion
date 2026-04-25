@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-INSTALL_DIR="/opt/remoteterm"
+INSTALL_DIR="${REMOTETERM_INSTALL_DIR:-/opt/remoteterm}"
 CONFIG_ENV_DIR="/etc/remoterm"
 ENV_FILE="$CONFIG_ENV_DIR/environment"
 SERVICE_USER="remoteterm"
