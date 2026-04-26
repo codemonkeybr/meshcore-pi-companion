@@ -288,9 +288,14 @@ class SpiBackend(RadioBackend):
                 pass
         if self._node:
             self._node.stop()
-        if self._radio and hasattr(self._radio, "sleep"):
+        if self._radio:
             try:
-                self._radio.sleep()
+                if hasattr(self._radio, "cleanup"):
+                    # cleanup() calls lora.end() + gpio_manager.cleanup_all(),
+                    # which closes GPIO fds so the reconnect loop can reopen them.
+                    self._radio.cleanup()
+                elif hasattr(self._radio, "sleep"):
+                    self._radio.sleep()
             except Exception:
                 pass
         self._node = None

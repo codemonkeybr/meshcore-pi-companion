@@ -609,8 +609,8 @@ do_install() {
 
     local ip
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    # T018: inform operator restart is optional (R5)
-    show_info "Frontend Installed" "Frontend installed under $INSTALL_DIR/frontend/dist/.\n\nThe running backend will serve it immediately — no restart required.\n\nWeb UI: http://${ip:-localhost}:8000\n\nIf the browser shows a stale build, restart the service:\n  sudo systemctl restart $SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+    show_info "Frontend Installed" "Frontend installed under $INSTALL_DIR/frontend/dist/.\n\nService restarted — web UI is now live.\n\nWeb UI: http://${ip:-localhost}:8000"
     return 0
   fi
 
