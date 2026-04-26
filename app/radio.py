@@ -612,6 +612,14 @@ class RadioManager:
                     logger.warning("Reconnection failed: not connected after connect()")
                     return False
 
+            except SystemExit as e:
+                # gpio_manager calls sys.exit(1) when a GPIO pin is already
+                # claimed by another process. Treat it as a failed reconnect
+                # so the server keeps running in degraded mode.
+                msg = f"GPIO conflict (exit code {e.code}) — pin already in use by another process"
+                logger.error("Reconnection aborted: %s", msg)
+                broadcast_error("Reconnection failed", msg)
+                return False
             except Exception as e:
                 logger.warning("Reconnection failed: %s", e, exc_info=True)
                 broadcast_error("Reconnection failed", str(e))
