@@ -736,7 +736,7 @@ do_upgrade() {
   else
     component_note="\nComponents: Backend only (no frontend installed)"
   fi
-  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm:\n\n  current : $current_version\n  target  : $tag${component_note}\n\nDownload release and install to $INSTALL_DIR ?"; then
+  if ! ask_yes_no "Confirm upgrade" "Upgrade RemoteTerm:\n\n  current : $current_version\n  target  : ${tag#v}${component_note}\n\nDownload release and install to $INSTALL_DIR ?"; then
     exit 0
   fi
 
