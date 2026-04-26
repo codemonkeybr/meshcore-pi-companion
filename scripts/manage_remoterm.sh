@@ -597,19 +597,22 @@ do_install() {
   # ── Frontend-only path (T015 / US2) ────────────────────────────────────────
   if [ "$components" = "fe" ]; then
     (
-      echo "10"
+      echo "20"
       echo "# Downloading frontend bundle..."
-      echo "50"
+      install_frontend_bundle >/dev/null 2>&1
+      echo "80"
+      echo "# Restarting service..."
+      systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+      echo "100"
     ) | $DIALOG --gauge "Installing Frontend..." 8 70 0
 
-    if ! install_frontend_bundle; then
+    if [ ! -f "$INSTALL_DIR/frontend/dist/index.html" ]; then
       show_error "Failed to install frontend.\n\nCheck network access and try again."
       exit 1
     fi
 
     local ip
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
     show_info "Frontend Installed" "Frontend installed under $INSTALL_DIR/frontend/dist/.\n\nService restarted — web UI is now live.\n\nWeb UI: http://${ip:-localhost}:8000"
     return 0
   fi
@@ -631,18 +634,18 @@ do_install() {
   (
     echo "5"
     echo "# Creating service user..."
-    create_service_user
+    create_service_user >/dev/null 2>&1
     echo "15"
     echo "# Copying application to $INSTALL_DIR..."
-    sync_source_to_install
+    sync_source_to_install >/dev/null 2>&1
     echo "35"
     echo "# Installing Python dependencies..."
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-    install_python_deps
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" 2>/dev/null
+    install_python_deps >/dev/null 2>&1
     echo "55"
     if [ "$components" = "be+fe" ]; then
       echo "# Installing frontend bundle..."
-      install_frontend_bundle || true
+      install_frontend_bundle >/dev/null 2>&1 || true
     fi
     echo "75"
     echo "# Radio configuration..."
@@ -746,40 +749,60 @@ do_upgrade() {
     exit 1
   fi
 
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
   local backup_dir="/tmp/remoteterm_data_backup_$(date +%Y%m%d_%H%M%S)"
-  if [ -d "$INSTALL_DIR/data" ]; then
-    cp -a "$INSTALL_DIR/data" "$backup_dir" 2>/dev/null || true
-  fi
+  local fe_flag_file
+  fe_flag_file="$(mktemp)"
+  echo "0" > "$fe_flag_file"
 
-  # Point sync at the downloaded release tree; restore on exit so the script
-  # state stays consistent for any follow-up commands.
-  local prev_source_root="$SOURCE_ROOT"
-  SOURCE_ROOT="$release_src"
-  sync_source_upgrade
-  SOURCE_ROOT="$prev_source_root"
+  (
+    echo "10"
+    echo "# Stopping service..."
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
 
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-  install_python_deps
-  install_systemd_unit
-
-  # T019/T020/T021: Upgrade frontend only when it was installed (FR-008, FR-009)
-  local fe_result=0
-  if [ "$state" = "backend_and_frontend" ]; then
-    # T023: Partial-failure handling — FE failure does not abort BE upgrade
-    if ! install_frontend_bundle; then
-      fe_result=1
+    echo "20"
+    echo "# Backing up data..."
+    if [ -d "$INSTALL_DIR/data" ]; then
+      cp -a "$INSTALL_DIR/data" "$backup_dir" >/dev/null 2>&1 || true
     fi
-  fi
 
-  systemctl start "$SERVICE_NAME"
+    echo "35"
+    echo "# Syncing application files..."
+    SOURCE_ROOT="$release_src"
+    sync_source_upgrade >/dev/null 2>&1
+
+    echo "55"
+    echo "# Installing Python dependencies..."
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" 2>/dev/null
+    install_python_deps >/dev/null 2>&1
+    install_systemd_unit >/dev/null 2>&1
+
+    # T019/T020/T021: Upgrade frontend only when it was installed (FR-008, FR-009)
+    if [ "$state" = "backend_and_frontend" ]; then
+      echo "75"
+      echo "# Upgrading frontend bundle..."
+      # T023: Partial-failure handling — FE failure does not abort BE upgrade
+      if ! install_frontend_bundle >/dev/null 2>&1; then
+        echo "1" > "$fe_flag_file"
+      fi
+    fi
+
+    echo "90"
+    echo "# Starting service..."
+    systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+
+    echo "100"
+  ) | $DIALOG --gauge "Upgrading RemoteTerm..." 8 70 0
+
+  local fe_result
+  fe_result="$(cat "$fe_flag_file")"
+  rm -f "$fe_flag_file"
 
   rm -rf "$(dirname "$release_src")" 2>/dev/null || true
 
   if [ "$fe_result" -ne 0 ]; then
-    show_info "Upgrade (partial)" "Backend upgraded to $tag.\n\nFrontend upgrade FAILED — previous UI remains intact.\nCheck network access and retry upgrade.\n\nData backup copy:\n$backup_dir"
+    show_info "Upgrade (partial)" "Backend upgraded to ${tag#v}.\n\nFrontend upgrade FAILED — previous UI remains intact.\nCheck network access and retry upgrade.\n\nData backup copy:\n$backup_dir"
   else
-    show_info "Upgrade" "Upgrade complete.\n\nInstalled: $tag\nData backup copy:\n$backup_dir"
+    show_info "Upgrade" "Upgrade complete.\n\nInstalled: ${tag#v}\nData backup copy:\n$backup_dir"
   fi
 }
 
