@@ -118,12 +118,12 @@ async def get_radio_config() -> RadioConfigResponse:
     )
 
 
-@router.patch("/config", response_model=RadioConfigResponse)
 def _meshcore_from_backend(be):
     """Return the underlying MeshCore for command services; ClientBackend has _mc, SpiBackend is passed through."""
     return getattr(be, "_mc", be)
 
 
+@router.patch("/config", response_model=RadioConfigResponse)
 async def update_radio_config(update: RadioConfigUpdate) -> RadioConfigResponse:
     """Update radio configuration. Only provided fields will be updated."""
     require_connected()
