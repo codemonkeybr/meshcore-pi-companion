@@ -27,6 +27,7 @@ export function SettingsRadioSection({
   onDisconnect,
   onReconnect,
   onAdvertise,
+  onSyncChannels,
   onClose,
   className,
 }: {
@@ -41,6 +42,7 @@ export function SettingsRadioSection({
   onDisconnect: () => Promise<void>;
   onReconnect: () => Promise<void>;
   onAdvertise: () => Promise<void>;
+  onSyncChannels: () => Promise<void>;
   onClose: () => void;
   className?: string;
 }) {
@@ -75,6 +77,7 @@ export function SettingsRadioSection({
 
   // Advertise state
   const [advertising, setAdvertising] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [connectionBusy, setConnectionBusy] = useState(false);
 
   useEffect(() => {
@@ -292,6 +295,15 @@ export function SettingsRadioSection({
       await onAdvertise();
     } finally {
       setAdvertising(false);
+    }
+  };
+
+  const handleSyncChannels = async () => {
+    setSyncing(true);
+    try {
+      await onSyncChannels();
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -699,6 +711,27 @@ export function SettingsRadioSection({
           className="w-full bg-warning hover:bg-warning/90 text-warning-foreground"
         >
           {advertising ? 'Sending...' : 'Send Advertisement'}
+        </Button>
+        {!health?.radio_connected && (
+          <p className="text-sm text-destructive">Radio not connected</p>
+        )}
+      </div>
+
+      <Separator />
+
+      {/* Sync Channels from Radio */}
+      <div className="space-y-2">
+        <Label>Sync Channels from Radio</Label>
+        <p className="text-xs text-muted-foreground">
+          Pull the channel list from the connected radio into the app. Required before sending
+          messages to channels you haven&apos;t synced yet.
+        </p>
+        <Button
+          onClick={handleSyncChannels}
+          disabled={syncing || !health?.radio_connected}
+          className="w-full"
+        >
+          {syncing ? 'Syncing...' : 'Sync Channels from Radio'}
         </Button>
         {!health?.radio_connected && (
           <p className="text-sm text-destructive">Radio not connected</p>

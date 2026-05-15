@@ -171,6 +171,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ flood_scope_override: floodScopeOverride }),
     }),
+  syncChannels: () => fetchJson<{ synced: number }>('/channels/sync', { method: 'POST' }),
 
   // Messages
   getMessages: (

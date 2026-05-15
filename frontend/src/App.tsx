@@ -16,6 +16,7 @@ import {
   useBrowserNotifications,
 } from './hooks';
 import { AppShell } from './components/AppShell';
+import { toast } from './components/ui/sonner';
 import type { MessageInputHandle } from './components/MessageInput';
 import { messageContainsMention } from './utils/messageParser';
 import { getStateKey } from './utils/conversationState';
@@ -333,6 +334,7 @@ export function App() {
   } = useConversationActions({
     activeConversation,
     activeConversationRef,
+    channels,
     setChannels,
     addMessageIfNew,
     jumpToBottom,
@@ -355,6 +357,18 @@ export function App() {
     },
     [fetchUndecryptedCount, setChannels]
   );
+  const handleSyncChannels = useCallback(async () => {
+    try {
+      const result = await api.syncChannels();
+      const updatedChannels = await api.getChannels();
+      setChannels(updatedChannels);
+      toast.success(`Synced ${result.synced} channel${result.synced === 1 ? '' : 's'} from radio`);
+    } catch (err) {
+      toast.error('Failed to sync channels', {
+        description: err instanceof Error ? err.message : 'Check radio connection',
+      });
+    }
+  }, [setChannels]);
 
   const statusProps = {
     health,
@@ -451,6 +465,7 @@ export function App() {
     onDisconnect: handleDisconnect,
     onReconnect: handleReconnect,
     onAdvertise: handleAdvertise,
+    onSyncChannels: handleSyncChannels,
     onHealthRefresh: handleHealthRefresh,
     onRefreshAppSettings: fetchAppSettings,
     blockedKeys: appSettings?.blocked_keys,

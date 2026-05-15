@@ -34,6 +34,7 @@ interface SettingsModalBaseProps {
   onDisconnect: () => Promise<void>;
   onReconnect: () => Promise<void>;
   onAdvertise: () => Promise<void>;
+  onSyncChannels: () => Promise<void>;
   onHealthRefresh: () => Promise<void>;
   onRefreshAppSettings: () => Promise<void>;
   onLocalLabelChange?: (label: LocalLabel) => void;
@@ -64,6 +65,7 @@ export function SettingsModal(props: SettingsModalProps) {
     onDisconnect,
     onReconnect,
     onAdvertise,
+    onSyncChannels,
     onHealthRefresh,
     onRefreshAppSettings,
     onLocalLabelChange,
@@ -189,6 +191,7 @@ export function SettingsModal(props: SettingsModalProps) {
               onDisconnect={onDisconnect}
               onReconnect={onReconnect}
               onAdvertise={onAdvertise}
+              onSyncChannels={onSyncChannels}
               onClose={onClose}
               className={sectionContentClass}
             />
