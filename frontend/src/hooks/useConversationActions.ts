@@ -8,6 +8,7 @@ import type { Channel, Conversation, Message } from '../types';
 interface UseConversationActionsArgs {
   activeConversation: Conversation | null;
   activeConversationRef: MutableRefObject<Conversation | null>;
+  channels: Channel[];
   setChannels: React.Dispatch<React.SetStateAction<Channel[]>>;
   addMessageIfNew: (msg: Message) => boolean;
   jumpToBottom: () => void;
@@ -32,6 +33,7 @@ interface UseConversationActionsResult {
 export function useConversationActions({
   activeConversation,
   activeConversationRef,
+  channels,
   setChannels,
   addMessageIfNew,
   jumpToBottom,
@@ -58,6 +60,13 @@ export function useConversationActions({
     async (text: string) => {
       if (!activeConversation) return;
 
+      if (activeConversation.type === 'channel') {
+        const channel = channels.find((c) => c.key === activeConversation.id);
+        if (channel && !channel.on_radio) {
+          throw new Error('Channel is not on the radio. Sync channels first.');
+        }
+      }
+
       const conversationId = activeConversation.id;
       const sent =
         activeConversation.type === 'channel'
@@ -68,7 +77,7 @@ export function useConversationActions({
         addMessageIfNew(sent);
       }
     },
-    [activeConversation, activeConversationRef, addMessageIfNew]
+    [activeConversation, activeConversationRef, channels, addMessageIfNew]
   );
 
   const handleResendChannelMessage = useCallback(

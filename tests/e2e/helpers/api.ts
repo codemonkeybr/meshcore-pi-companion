@@ -83,6 +83,10 @@ export function deleteChannel(key: string): Promise<void> {
   return fetchJson(`/channels/${key}`, { method: 'DELETE' });
 }
 
+export function syncChannels(): Promise<{ synced: number }> {
+  return fetchJson('/channels/sync', { method: 'POST' });
+}
+
 // --- Contacts ---
 
 export interface Contact {

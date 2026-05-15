@@ -65,6 +65,7 @@ function createArgs(overrides: Partial<Parameters<typeof useConversationActions>
   return {
     activeConversation,
     activeConversationRef: { current: activeConversation },
+    channels: [{ ...publicChannel, on_radio: true }],
     setChannels: vi.fn(),
     addMessageIfNew: vi.fn(() => true),
     jumpToBottom: vi.fn(),
@@ -131,6 +132,20 @@ describe('useConversationActions', () => {
     expect(args.handleToggleBlockedKey).toHaveBeenCalledWith('cc'.repeat(32));
     expect(mocks.messageCache.clear).toHaveBeenCalledTimes(1);
     expect(args.jumpToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws when the active channel is not on the radio', async () => {
+    const args = createArgs({ channels: [publicChannel] }); // on_radio: false
+
+    const { result } = renderHook(() => useConversationActions(args));
+
+    await expect(
+      act(async () => {
+        await result.current.handleSendMessage('hello');
+      })
+    ).rejects.toThrow('Channel is not on the radio');
+
+    expect(mocks.api.sendChannelMessage).not.toHaveBeenCalled();
   });
 
   it('appends sender mentions into the message input', () => {

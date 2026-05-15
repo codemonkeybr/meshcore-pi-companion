@@ -102,6 +102,7 @@ function renderModal(overrides?: {
     onDisconnect,
     onReconnect,
     onAdvertise: vi.fn(async () => {}),
+    onSyncChannels: vi.fn(async () => {}),
     onHealthRefresh: vi.fn(async () => {}),
     onRefreshAppSettings,
   };
@@ -336,6 +337,7 @@ describe('SettingsModal', () => {
         onDisconnect={vi.fn(async () => {})}
         onReconnect={vi.fn(async () => {})}
         onAdvertise={vi.fn(async () => {})}
+        onSyncChannels={vi.fn(async () => {})}
         onHealthRefresh={vi.fn(async () => {})}
         onRefreshAppSettings={vi.fn(async () => {})}
       />
