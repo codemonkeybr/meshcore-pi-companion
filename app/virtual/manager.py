@@ -102,6 +102,9 @@ class VirtualManager:
         from app.virtual.room_server import RoomServer
 
         room_configs = config.get("virtual_rooms") or []
+        if not room_configs:
+            return
+
         for raw in room_configs:
             try:
                 room_cfg = RoomConfig(**raw)
@@ -134,6 +137,72 @@ class VirtualManager:
             await room.start()
             self._rooms.append(room)
             logger.info("VirtualManager: room '%s' started", room_cfg.name)
+
+        if self._rooms:
+            backend.register_raw_rx_subscriber(self._room_txt_msg_handler)
+
+    async def _room_txt_msg_handler(self, pkt: Any, data: bytes, analysis: Any = None) -> None:
+        """Intercept TXT_MSG packets destined for virtual room identities and route to handle_text."""
+        try:
+            from pymc_core.protocol.constants import (
+                PAYLOAD_TYPE_TXT_MSG,  # type: ignore[import-not-found]
+            )
+            from pymc_core.protocol.crypto import CryptoUtils  # type: ignore[import-not-found]
+        except ImportError:
+            return
+
+        try:
+            if pkt.get_payload_type() != PAYLOAD_TYPE_TXT_MSG:
+                return
+            if len(pkt.payload) < 3:
+                return
+
+            dest_hash: int = pkt.payload[0]
+            src_hash: int = pkt.payload[1]
+            payload: bytes = bytes(pkt.payload[2:])
+
+            room = None
+            for r in self._rooms:
+                if r._hash_byte == dest_hash:
+                    room = r
+                    break
+            if room is None:
+                return
+
+            # Find ACL entry by first byte of client public key
+            entry = None
+            for e in room._acl.values():
+                client_bytes = bytes.fromhex(e.client_key_hex)
+                if client_bytes[0] == src_hash:
+                    entry = e
+                    break
+
+            if entry is None or entry.shared_secret is None:
+                logger.debug(
+                    "Room '%s': TXT_MSG from unknown src_hash=0x%02x — not authenticated",
+                    room.config.name,
+                    src_hash,
+                )
+                return
+
+            aes_key = entry.shared_secret[:16]
+            decrypted = CryptoUtils.mac_then_decrypt(aes_key, entry.shared_secret, payload)
+
+            if len(decrypted) < 5:
+                return
+
+            # decrypted layout: timestamp(4) + flags(1) + message_body
+            text_bytes = decrypted[5:]
+            try:
+                text = text_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.warning("Room '%s': TXT_MSG body is not valid UTF-8", room.config.name)
+                return
+
+            sender_key = bytes.fromhex(entry.client_key_hex)
+            await room.handle_text(sender_key, text)
+        except Exception:
+            logger.exception("VirtualManager: error in room TXT_MSG handler")
 
     async def _start_companions(self, backend: Any, db: aiosqlite.Connection, config: dict) -> None:
         from pymc_core.protocol import LocalIdentity  # type: ignore[import-not-found]
