@@ -187,7 +187,7 @@ class VirtualCompanion:
 
         # Register bridge to receive parsed incoming packets destined for this identity.
         # add_raw_packet_subscriber calls back with (pkt, data); we only need pkt.
-        async def _on_parsed_packet(pkt: Any, data: bytes) -> None:
+        async def _on_parsed_packet(pkt: Any, data: bytes, analysis: Any = None) -> None:
             await self._bridge.process_received_packet(pkt)
 
         self._register_raw_rx_subscriber(_on_parsed_packet)
