@@ -336,9 +336,9 @@ class SpiBackend(RadioBackend):
         return self._node.dispatcher.send_packet
 
     def register_raw_rx_subscriber(self, handler) -> None:
-        """Register an async callable that receives every raw incoming packet."""
+        """Register an async callable that receives every parsed packet (pkt, data)."""
         if self._node is not None:
-            self._node.dispatcher.add_raw_rx_subscriber(handler)
+            self._node.dispatcher.add_raw_packet_subscriber(handler)
 
     def register_dispatcher_handler(self, handler) -> None:
         """Register a typed packet handler (e.g. LoginServerHandler) on the dispatcher."""

@@ -185,8 +185,12 @@ class VirtualCompanion:
             adv_type=1,  # ADV_TYPE_CHAT
         )
 
-        # Register bridge to receive raw incoming packets destined for this identity
-        self._register_raw_rx_subscriber(self._bridge.process_received_packet)
+        # Register bridge to receive parsed incoming packets destined for this identity.
+        # add_raw_packet_subscriber calls back with (pkt, data); we only need pkt.
+        async def _on_parsed_packet(pkt: Any, data: bytes) -> None:
+            await self._bridge.process_received_packet(pkt)
+
+        self._register_raw_rx_subscriber(_on_parsed_packet)
 
         timeout = self.config.tcp_timeout if self.config.tcp_timeout > 0 else None
 
