@@ -330,10 +330,10 @@ class SpiBackend(RadioBackend):
 
     @property
     def packet_injector(self):
-        """Return the dispatcher's inject_packet callable for secondary identities."""
+        """Return the dispatcher's send_packet callable for secondary identities."""
         if self._node is None:
             return None
-        return self._node.dispatcher.inject_packet
+        return self._node.dispatcher.send_packet
 
     def register_raw_rx_subscriber(self, handler) -> None:
         """Register an async callable that receives every raw incoming packet."""
@@ -343,7 +343,10 @@ class SpiBackend(RadioBackend):
     def register_dispatcher_handler(self, handler) -> None:
         """Register a typed packet handler (e.g. LoginServerHandler) on the dispatcher."""
         if self._node is not None:
-            self._node.dispatcher.register_handler(handler)
+            payload_type = handler.payload_type() if hasattr(handler, "payload_type") else None
+            if payload_type is None:
+                raise ValueError(f"Handler {handler!r} has no payload_type() method")
+            self._node.dispatcher.register_handler(payload_type, handler)
 
     # ------------------------------------------------------------------
     # Contacts
