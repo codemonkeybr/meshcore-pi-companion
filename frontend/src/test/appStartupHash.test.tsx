@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
     getUndecryptedPacketCount: vi.fn(),
     getChannels: vi.fn(),
     getContacts: vi.fn(),
-    migratePreferences: vi.fn(),
   },
 }));
 
@@ -30,31 +29,31 @@ vi.mock('../hooks', async (importOriginal) => {
       messagesLoading: false,
       loadingOlder: false,
       hasOlderMessages: false,
-      setMessages: vi.fn(),
-      fetchMessages: vi.fn(async () => {}),
+      hasNewerMessages: false,
+      loadingNewer: false,
       fetchOlderMessages: vi.fn(async () => {}),
-      addMessageIfNew: vi.fn(),
-      updateMessageAck: vi.fn(),
+      fetchNewerMessages: vi.fn(async () => {}),
+      jumpToBottom: vi.fn(),
+      reloadCurrentConversation: vi.fn(),
+      observeMessage: vi.fn(() => ({ added: false, activeConversation: false })),
+      receiveMessageAck: vi.fn(),
+      reconcileOnReconnect: vi.fn(),
+      renameConversationMessages: vi.fn(),
+      removeConversationMessages: vi.fn(),
+      clearConversationMessages: vi.fn(),
     }),
     useUnreadCounts: () => ({
       unreadCounts: {},
       mentions: {},
       lastMessageTimes: {},
       unreadLastReadAts: {},
-      incrementUnread: vi.fn(),
+      recordMessageEvent: vi.fn(),
       renameConversationState: vi.fn(),
       markAllRead: vi.fn(),
-      trackNewMessage: vi.fn(),
+      refreshUnreads: vi.fn(async () => {}),
     }),
-    getMessageContentKey: () => 'content-key',
   };
 });
-
-vi.mock('../messageCache', () => ({
-  addMessage: vi.fn(),
-  updateAck: vi.fn(),
-  remove: vi.fn(),
-}));
 
 vi.mock('../components/StatusBar', () => ({
   StatusBar: () => <div data-testid="status-bar" />,
@@ -90,12 +89,15 @@ vi.mock('../components/NewMessageModal', () => ({
 }));
 
 vi.mock('../components/SettingsModal', () => ({
-  SettingsModal: () => null,
-  SETTINGS_SECTION_ORDER: ['radio', 'local', 'database', 'bot'],
+  SettingsModal: ({ desktopSection }: { desktopSection?: string }) => (
+    <div data-testid="settings-modal-section">{desktopSection ?? 'none'}</div>
+  ),
+  SETTINGS_SECTION_ORDER: ['radio', 'local', 'radio-app', 'database', 'bot'],
   SETTINGS_SECTION_LABELS: {
     radio: 'Radio',
     local: 'Local Configuration',
-    database: 'Database & Messaging',
+    'radio-app': 'Radio-App Management',
+    database: 'Database',
     bot: 'Bot',
   },
 }));
@@ -144,6 +146,7 @@ const publicChannel = {
   is_hashtag: false,
   on_radio: false,
   last_read_at: null,
+  favorite: false,
 };
 
 describe('App startup hash resolution', () => {
@@ -165,11 +168,9 @@ describe('App startup hash resolution', () => {
     });
     mocks.api.getSettings.mockResolvedValue({
       max_radio_contacts: 200,
-      favorites: [],
       auto_decrypt_dm_on_advert: false,
-      sidebar_sort_order: 'recent',
       last_message_times: {},
-      preferences_migrated: true,
+
       advert_interval: 0,
       last_advert_time: 0,
     });
@@ -193,6 +194,53 @@ describe('App startup hash resolution', () => {
     });
   });
 
+  it('restores the trace tool from the URL hash', async () => {
+    window.location.hash = '#trace';
+
+    render(<App />);
+
+    await waitFor(() => {
+      for (const node of screen.getAllByTestId('active-conversation')) {
+        expect(node).toHaveTextContent('trace:trace:Trace');
+      }
+    });
+  });
+
+  it('restores the trace tool from the URL hash even when channels are unavailable', async () => {
+    window.location.hash = '#trace';
+    mocks.api.getChannels.mockResolvedValue([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      for (const node of screen.getAllByTestId('active-conversation')) {
+        expect(node).toHaveTextContent('trace:trace:Trace');
+      }
+    });
+  });
+
+  it('reopens the last viewed trace tool even when channels are unavailable', async () => {
+    window.location.hash = '';
+    localStorage.setItem(REOPEN_LAST_CONVERSATION_KEY, '1');
+    localStorage.setItem(
+      LAST_VIEWED_CONVERSATION_KEY,
+      JSON.stringify({
+        type: 'trace',
+        id: 'trace',
+        name: 'Trace',
+      })
+    );
+    mocks.api.getChannels.mockResolvedValue([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      for (const node of screen.getAllByTestId('active-conversation')) {
+        expect(node).toHaveTextContent('trace:trace:Trace');
+      }
+    });
+  });
+
   it('restores last viewed channel when hash is empty and reopen preference is enabled', async () => {
     const chatChannel = {
       key: '11111111111111111111111111111111',
@@ -200,6 +248,7 @@ describe('App startup hash resolution', () => {
       is_hashtag: false,
       on_radio: false,
       last_read_at: null,
+      favorite: false,
     };
 
     window.location.hash = '';
@@ -231,6 +280,7 @@ describe('App startup hash resolution', () => {
       is_hashtag: false,
       on_radio: false,
       last_read_at: null,
+      favorite: false,
     };
 
     window.location.hash = '';
@@ -254,19 +304,52 @@ describe('App startup hash resolution', () => {
     expect(window.location.hash).toBe('');
   });
 
+  it('tracks the current conversation in local storage even before reopen is enabled', async () => {
+    const chatChannel = {
+      key: '11111111111111111111111111111111',
+      name: 'Ops',
+      is_hashtag: false,
+      on_radio: false,
+      last_read_at: null,
+      favorite: false,
+    };
+
+    window.location.hash = '';
+    mocks.api.getChannels.mockResolvedValue([publicChannel, chatChannel]);
+    localStorage.setItem(
+      LAST_VIEWED_CONVERSATION_KEY,
+      JSON.stringify({
+        type: 'channel',
+        id: chatChannel.key,
+        name: chatChannel.name,
+      })
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      for (const node of screen.getAllByTestId('active-conversation')) {
+        expect(node).toHaveTextContent(`channel:${publicChannel.key}:Public`);
+      }
+    });
+
+    expect(localStorage.getItem(LAST_VIEWED_CONVERSATION_KEY)).toContain(publicChannel.key);
+  });
+
   it('restores last viewed contact from legacy name token when hash is empty and reopen is enabled', async () => {
     const aliceContact = {
       public_key: 'b'.repeat(64),
       name: 'Alice',
       type: 1,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
+      direct_path: null,
+      direct_path_len: -1,
       last_advert: null,
       lat: null,
       lon: null,
       last_seen: null,
       on_radio: false,
+      favorite: false,
       last_contacted: null,
       last_read_at: null,
       first_seen: null,
@@ -292,5 +375,19 @@ describe('App startup hash resolution', () => {
       }
     });
     expect(window.location.hash).toBe('');
+  });
+
+  it('stays on radio settings section even when radio is disconnected', async () => {
+    window.location.hash = '#settings/radio';
+    mocks.api.getRadioConfig.mockRejectedValue(new Error('radio offline'));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-modal-section')).toHaveTextContent('radio');
+    });
+
+    // Section stays on radio (no redirect to local) and hash is preserved
+    expect(window.location.hash).toBe('#settings/radio');
   });
 });

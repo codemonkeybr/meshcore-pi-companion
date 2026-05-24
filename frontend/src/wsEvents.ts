@@ -4,6 +4,7 @@ export interface MessageAckedPayload {
   message_id: number;
   ack_count: number;
   paths?: MessagePath[];
+  packet_id?: number | null;
 }
 
 export interface ContactDeletedPayload {

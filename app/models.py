@@ -1,8 +1,24 @@
+from __future__ import annotations
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.path_utils import normalize_contact_route
+from app.path_utils import normalize_contact_route, normalize_route_override
+
+# Valid MeshCore contact types: 0=unknown, 1=client, 2=repeater, 3=room, 4=sensor.
+# Corrupted radio data can produce values outside this range.
+_VALID_CONTACT_TYPES = frozenset({0, 1, 2, 3, 4})
+
+
+class ContactRoute(BaseModel):
+    """A normalized contact route."""
+
+    path: str = Field(description="Hex-encoded path bytes (empty string for direct/flood)")
+    path_len: int = Field(description="Hop count (-1=flood, 0=direct, >0=explicit route)")
+    path_hash_mode: int = Field(
+        description="Path hash mode (-1=flood, 0=1-byte, 1=2-byte, 2=3-byte hop identifiers)"
+    )
 
 
 class ContactUpsert(BaseModel):
@@ -12,9 +28,10 @@ class ContactUpsert(BaseModel):
     name: str | None = None
     type: int = 0
     flags: int = 0
-    last_path: str | None = None
-    last_path_len: int = -1
-    out_path_hash_mode: int | None = None
+    direct_path: str | None = None
+    direct_path_len: int | None = None
+    direct_path_hash_mode: int | None = None
+    direct_path_updated_at: int | None = None
     route_override_path: str | None = None
     route_override_len: int | None = None
     route_override_hash_mode: int | None = None
@@ -27,7 +44,7 @@ class ContactUpsert(BaseModel):
     first_seen: int | None = None
 
     @classmethod
-    def from_contact(cls, contact: "Contact", **changes) -> "ContactUpsert":
+    def from_contact(cls, contact: Contact, **changes) -> ContactUpsert:
         return cls.model_validate(
             {
                 **contact.model_dump(exclude={"last_read_at"}),
@@ -38,9 +55,9 @@ class ContactUpsert(BaseModel):
     @classmethod
     def from_radio_dict(
         cls, public_key: str, radio_data: dict, on_radio: bool = False
-    ) -> "ContactUpsert":
+    ) -> ContactUpsert:
         """Convert radio contact data to the contact-row write shape."""
-        last_path, last_path_len, out_path_hash_mode = normalize_contact_route(
+        direct_path, direct_path_len, direct_path_hash_mode = normalize_contact_route(
             radio_data.get("out_path"),
             radio_data.get("out_path_len", -1),
             radio_data.get(
@@ -48,16 +65,30 @@ class ContactUpsert(BaseModel):
                 -1 if radio_data.get("out_path_len", -1) == -1 else 0,
             ),
         )
+        # Clamp invalid contact types to 0 (unknown) — corrupted radio data
+        # can produce values like 111 or 240 that break downstream branching.
+        raw_type = radio_data.get("type", 0)
+        contact_type = raw_type if raw_type in _VALID_CONTACT_TYPES else 0
+
+        # Null out impossible coordinates — the contact is still ingested,
+        # but garbage lat/lon (e.g. 1953.7) is discarded rather than stored.
+        lat = radio_data.get("adv_lat")
+        lon = radio_data.get("adv_lon")
+        if lat is not None and not (-90 <= lat <= 90):
+            lat = None
+        if lon is not None and not (-180 <= lon <= 180):
+            lon = None
+
         return cls(
             public_key=public_key,
             name=radio_data.get("adv_name"),
-            type=radio_data.get("type", 0),
+            type=contact_type,
             flags=radio_data.get("flags", 0),
-            last_path=last_path,
-            last_path_len=last_path_len,
-            out_path_hash_mode=out_path_hash_mode,
-            lat=radio_data.get("adv_lat"),
-            lon=radio_data.get("adv_lon"),
+            direct_path=direct_path,
+            direct_path_len=direct_path_len,
+            direct_path_hash_mode=direct_path_hash_mode,
+            lat=lat,
+            lon=lon,
             last_advert=radio_data.get("last_advert"),
             on_radio=on_radio,
         )
@@ -68,9 +99,10 @@ class Contact(BaseModel):
     name: str | None = None
     type: int = 0  # 0=unknown, 1=client, 2=repeater, 3=room, 4=sensor
     flags: int = 0
-    last_path: str | None = None
-    last_path_len: int = -1
-    out_path_hash_mode: int = 0
+    direct_path: str | None = None
+    direct_path_len: int = -1
+    direct_path_hash_mode: int = -1
+    direct_path_updated_at: int | None = None
     route_override_path: str | None = None
     route_override_len: int | None = None
     route_override_hash_mode: int | None = None
@@ -79,41 +111,103 @@ class Contact(BaseModel):
     lon: float | None = None
     last_seen: int | None = None
     on_radio: bool = False
+    favorite: bool = False
     last_contacted: int | None = None  # Last time we sent/received a message
     last_read_at: int | None = None  # Server-side read state tracking
     first_seen: int | None = None
+    effective_route: ContactRoute | None = None
+    effective_route_source: Literal["override", "direct", "flood"] = "flood"
+    direct_route: ContactRoute | None = None
+    route_override: ContactRoute | None = None
+
+    def model_post_init(self, __context) -> None:
+        direct_path, direct_path_len, direct_path_hash_mode = normalize_contact_route(
+            self.direct_path,
+            self.direct_path_len,
+            self.direct_path_hash_mode,
+        )
+        self.direct_path = direct_path or None
+        self.direct_path_len = direct_path_len
+        self.direct_path_hash_mode = direct_path_hash_mode
+
+        route_override_path, route_override_len, route_override_hash_mode = (
+            normalize_route_override(
+                self.route_override_path,
+                self.route_override_len,
+                self.route_override_hash_mode,
+            )
+        )
+        self.route_override_path = route_override_path or None
+        self.route_override_len = route_override_len
+        self.route_override_hash_mode = route_override_hash_mode
+        if (
+            route_override_path is not None
+            and route_override_len is not None
+            and route_override_hash_mode is not None
+        ):
+            self.route_override = ContactRoute(
+                path=route_override_path,
+                path_len=route_override_len,
+                path_hash_mode=route_override_hash_mode,
+            )
+        else:
+            self.route_override = None
+
+        if direct_path_len >= 0:
+            self.direct_route = ContactRoute(
+                path=direct_path,
+                path_len=direct_path_len,
+                path_hash_mode=direct_path_hash_mode,
+            )
+        else:
+            self.direct_route = None
+
+        path, path_len, path_hash_mode = self.effective_route_tuple()
+        if self.has_route_override():
+            self.effective_route_source = "override"
+        elif self.direct_route is not None:
+            self.effective_route_source = "direct"
+        else:
+            self.effective_route_source = "flood"
+        self.effective_route = ContactRoute(
+            path=path,
+            path_len=path_len,
+            path_hash_mode=path_hash_mode,
+        )
 
     def has_route_override(self) -> bool:
         return self.route_override_len is not None
 
-    def effective_route(self) -> tuple[str, int, int]:
+    def effective_route_tuple(self) -> tuple[str, int, int]:
         if self.has_route_override():
             return normalize_contact_route(
                 self.route_override_path,
                 self.route_override_len,
                 self.route_override_hash_mode,
             )
-        return normalize_contact_route(
-            self.last_path,
-            self.last_path_len,
-            self.out_path_hash_mode,
-        )
+        if self.direct_path_len >= 0:
+            return normalize_contact_route(
+                self.direct_path,
+                self.direct_path_len,
+                self.direct_path_hash_mode,
+            )
+        return "", -1, -1
 
     def to_radio_dict(self) -> dict:
         """Convert to the dict format expected by meshcore radio commands.
 
         The radio API uses different field names (adv_name, out_path, etc.)
-        than our database schema (name, last_path, etc.).
+        than our database schema (name, direct_path, etc.).
         """
-        last_path, last_path_len, out_path_hash_mode = self.effective_route()
+        effective_path, effective_path_len, effective_path_hash_mode = self.effective_route_tuple()
         return {
             "public_key": self.public_key,
             "adv_name": self.name or "",
             "type": self.type,
             "flags": self.flags,
-            "out_path": last_path,
-            "out_path_len": last_path_len,
-            "out_path_hash_mode": out_path_hash_mode,
+            "out_path": effective_path,
+            "out_path_len": effective_path_len,
+            "out_path_hash_mode": effective_path_hash_mode,
             "adv_lat": self.lat if self.lat is not None else 0.0,
             "adv_lon": self.lon if self.lon is not None else 0.0,
             "last_advert": self.last_advert if self.last_advert is not None else 0,
@@ -123,21 +217,15 @@ class Contact(BaseModel):
         """Convert the stored contact to the repository's write contract."""
         return ContactUpsert.from_contact(self, **changes)
 
-    @staticmethod
-    def from_radio_dict(public_key: str, radio_data: dict, on_radio: bool = False) -> dict:
-        """Backward-compatible dict wrapper over ContactUpsert.from_radio_dict()."""
-        return ContactUpsert.from_radio_dict(
-            public_key,
-            radio_data,
-            on_radio=on_radio,
-        ).model_dump()
-
 
 class CreateContactRequest(BaseModel):
     """Request to create a new contact."""
 
     public_key: str = Field(min_length=64, max_length=64, description="Public key (64-char hex)")
     name: str | None = Field(default=None, description="Display name for the contact")
+    type: int = Field(
+        default=0, ge=0, le=3, description="Contact type (0=unknown, 1=client, 2=repeater, 3=room)"
+    )
     try_historical: bool = Field(
         default=False,
         description="Attempt to decrypt historical DM packets for this contact",
@@ -149,7 +237,7 @@ class ContactRoutingOverrideRequest(BaseModel):
 
     route: str = Field(
         description=(
-            "Blank clears the override and resets learned routing to flood, "
+            "Blank clears the override, "
             '"-1" forces flood, "0" forces direct, and explicit routes are '
             "comma-separated 1/2/3-byte hop hex values"
         )
@@ -158,6 +246,7 @@ class ContactRoutingOverrideRequest(BaseModel):
 
 # Contact type constants
 CONTACT_TYPE_REPEATER = 2
+CONTACT_TYPE_ROOM = 3
 
 
 class ContactAdvertPath(BaseModel):
@@ -192,7 +281,7 @@ class ContactNameHistory(BaseModel):
 
 
 class ContactActiveRoom(BaseModel):
-    """A channel/room where a contact has been active."""
+    """A channel where a contact has been active."""
 
     channel_key: str
     channel_name: str
@@ -207,30 +296,6 @@ class NearestRepeater(BaseModel):
     path_len: int
     last_seen: int
     heard_count: int
-
-
-class ContactDetail(BaseModel):
-    """Comprehensive contact profile data."""
-
-    contact: Contact
-    name_history: list[ContactNameHistory] = Field(default_factory=list)
-    dm_message_count: int = 0
-    channel_message_count: int = 0
-    most_active_rooms: list[ContactActiveRoom] = Field(default_factory=list)
-    advert_paths: list[ContactAdvertPath] = Field(default_factory=list)
-    advert_frequency: float | None = Field(
-        default=None,
-        description="Advert observations per hour (includes multi-path arrivals of same advert)",
-    )
-    nearest_repeaters: list[NearestRepeater] = Field(default_factory=list)
-
-
-class NameOnlyContactDetail(BaseModel):
-    """Channel activity summary for a sender name that is not tied to a known key."""
-
-    name: str
-    channel_message_count: int = 0
-    most_active_rooms: list[ContactActiveRoom] = Field(default_factory=list)
 
 
 class ContactAnalyticsHourlyBucket(BaseModel):
@@ -280,7 +345,13 @@ class Channel(BaseModel):
         default=None,
         description="Per-channel outbound flood scope override (null = use global app setting)",
     )
+    path_hash_mode_override: int | None = Field(
+        default=None,
+        description="Per-channel path hash mode override (0=1-byte, 1=2-byte, 2=3-byte, null = use radio default)",
+    )
     last_read_at: int | None = None  # Server-side read state tracking
+    favorite: bool = False
+    muted: bool = False
 
 
 class ChannelMessageCounts(BaseModel):
@@ -301,6 +372,18 @@ class ChannelTopSender(BaseModel):
     message_count: int
 
 
+class PathHashWidthStats(BaseModel):
+    """Hop byte width distribution for parsed raw packets."""
+
+    total_packets: int = 0
+    single_byte: int = 0
+    double_byte: int = 0
+    triple_byte: int = 0
+    single_byte_pct: float = 0.0
+    double_byte_pct: float = 0.0
+    triple_byte_pct: float = 0.0
+
+
 class ChannelDetail(BaseModel):
     """Comprehensive channel profile data."""
 
@@ -309,6 +392,7 @@ class ChannelDetail(BaseModel):
     first_message_at: int | None = None
     unique_sender_count: int = 0
     top_senders_24h: list[ChannelTopSender] = Field(default_factory=list)
+    path_hash_width_24h: PathHashWidthStats = Field(default_factory=PathHashWidthStats)
 
 
 class MessagePath(BaseModel):
@@ -320,6 +404,8 @@ class MessagePath(BaseModel):
         default=None,
         description="Hop count. None = legacy (infer as len(path)//2, i.e. 1-byte hops)",
     )
+    rssi: int | None = Field(default=None, description="Last-hop RSSI in dBm")
+    snr: float | None = Field(default=None, description="Last-hop SNR in dB")
 
 
 class Message(BaseModel):
@@ -339,12 +425,22 @@ class Message(BaseModel):
     acked: int = 0
     sender_name: str | None = None
     channel_name: str | None = None
+    packet_id: int | None = Field(
+        default=None,
+        description="Representative raw packet row ID when archival raw bytes exist",
+    )
 
 
 class MessagesAroundResponse(BaseModel):
     messages: list[Message]
     has_older: bool
     has_newer: bool
+
+
+class ResendChannelMessageResponse(BaseModel):
+    status: str
+    message_id: int
+    message: Message | None = None
 
 
 class RawPacketDecryptedInfo(BaseModel):
@@ -354,6 +450,8 @@ class RawPacketDecryptedInfo(BaseModel):
     sender: str | None = None
     channel_key: str | None = None
     contact_key: str | None = None
+    sender_timestamp: int | None = None
+    message: str | None = None
 
 
 class RawPacketBroadcast(BaseModel):
@@ -374,6 +472,21 @@ class RawPacketBroadcast(BaseModel):
     payload_type: str = Field(description="Packet type name (e.g., GROUP_TEXT, ADVERT)")
     snr: float | None = Field(default=None, description="Signal-to-noise ratio in dB")
     rssi: int | None = Field(default=None, description="Received signal strength in dBm")
+    decrypted: bool = False
+    decrypted_info: RawPacketDecryptedInfo | None = None
+
+
+class RawPacketDetail(BaseModel):
+    """Stored raw-packet detail returned by the packet API."""
+
+    id: int
+    timestamp: int
+    data: str = Field(description="Hex-encoded packet data")
+    payload_type: str = Field(description="Packet type name (e.g. GROUP_TEXT, ADVERT)")
+    snr: float | None = Field(default=None, description="Signal-to-noise ratio in dB if available")
+    rssi: int | None = Field(
+        default=None, description="Received signal strength in dBm if available"
+    )
     decrypted: bool = False
     decrypted_info: RawPacketDecryptedInfo | None = None
 
@@ -404,6 +517,11 @@ class RepeaterLoginResponse(BaseModel):
     """Response from repeater login."""
 
     status: str = Field(description="Login result status")
+    authenticated: bool = Field(description="Whether repeater authentication was confirmed")
+    message: str | None = Field(
+        default=None,
+        description="Optional warning or error message when authentication was not confirmed",
+    )
 
 
 class RepeaterStatusResponse(BaseModel):
@@ -426,6 +544,10 @@ class RepeaterStatusResponse(BaseModel):
     flood_dups: int = Field(description="Duplicate flood packets")
     direct_dups: int = Field(description="Duplicate direct packets")
     full_events: int = Field(description="Full event queue count")
+    recv_errors: int | None = Field(default=None, description="Radio-level RX packet errors")
+    telemetry_history: list[TelemetryHistoryEntry] = Field(
+        default_factory=list, description="Recent telemetry history snapshots"
+    )
 
 
 class RepeaterNodeInfoResponse(BaseModel):
@@ -478,6 +600,16 @@ class RepeaterLppTelemetryResponse(BaseModel):
     sensors: list[LppSensor] = Field(default_factory=list, description="List of sensor readings")
 
 
+class ContactTelemetryResponse(BaseModel):
+    """On-demand CayenneLPP telemetry snapshot from any contact."""
+
+    sensors: list[LppSensor] = Field(default_factory=list, description="List of sensor readings")
+    fetched_at: int = Field(description="Unix timestamp when this telemetry was fetched")
+    telemetry_history: list[TelemetryHistoryEntry] = Field(
+        default_factory=list, description="Recent telemetry history entries"
+    )
+
+
 class NeighborInfo(BaseModel):
     """Information about a neighbor seen by a repeater."""
 
@@ -524,6 +656,83 @@ class TraceResponse(BaseModel):
     path_len: int = Field(description="Number of hops in the trace path")
 
 
+class RadioTraceHopRequest(BaseModel):
+    """One requested hop in a radio trace path."""
+
+    public_key: str | None = Field(
+        default=None,
+        description="Full repeater public key when this hop maps to a known repeater",
+    )
+    hop_hex: str | None = Field(
+        default=None,
+        description="Raw hop hash hex when using a custom repeater prefix",
+    )
+
+
+class RadioTraceRequest(BaseModel):
+    """Ordered trace path for a radio trace loop."""
+
+    hop_hash_bytes: Literal[1, 2, 4] = Field(
+        default=4,
+        description="Hash width in bytes for every hop in this trace path",
+    )
+    hops: list[RadioTraceHopRequest] = Field(
+        min_length=1,
+        description="Ordered repeater hops, using either known repeater keys or custom hop hex",
+    )
+
+
+class RadioTraceNode(BaseModel):
+    """One resolved node in a radio trace result."""
+
+    role: Literal["repeater", "custom", "local"] = Field(description="Node role in the trace")
+    public_key: str | None = Field(
+        default=None,
+        description="Resolved full public key for this node when known",
+    )
+    name: str | None = Field(default=None, description="Display name for this node when known")
+    observed_hash: str | None = Field(
+        default=None,
+        description="Observed 4-byte trace hash for this node as hex",
+    )
+    snr: float | None = Field(default=None, description="Reported SNR for this node in dB")
+
+
+class RadioTraceResponse(BaseModel):
+    """Resolved multi-hop radio trace result."""
+
+    path_len: int = Field(description="Number of hashed nodes returned by the trace response")
+    timeout_seconds: float = Field(description="Timeout window used while waiting for the trace")
+    nodes: list[RadioTraceNode] = Field(
+        default_factory=list,
+        description="Ordered trace nodes: repeater hops followed by the terminal local radio",
+    )
+
+
+class PathDiscoveryRoute(BaseModel):
+    """One resolved route returned by contact path discovery."""
+
+    path: str = Field(description="Hex-encoded path bytes")
+    path_len: int = Field(description="Hop count for this route")
+    path_hash_mode: int = Field(
+        description="Path hash mode (0=1-byte, 1=2-byte, 2=3-byte hop identifiers)"
+    )
+
+
+class PathDiscoveryResponse(BaseModel):
+    """Round-trip routing data for a contact path discovery request."""
+
+    contact: Contact = Field(
+        description="Updated contact row after saving the learned forward path"
+    )
+    forward_path: PathDiscoveryRoute = Field(
+        description="Route used from the local radio to the target contact"
+    )
+    return_path: PathDiscoveryRoute = Field(
+        description="Route used from the target contact back to the local radio"
+    )
+
+
 class CommandRequest(BaseModel):
     """Request to send a CLI command to a repeater."""
 
@@ -540,11 +749,50 @@ class CommandResponse(BaseModel):
     )
 
 
-class Favorite(BaseModel):
-    """A favorite conversation."""
+class RadioDiscoveryRequest(BaseModel):
+    """Request to discover nearby mesh nodes from the local radio."""
 
-    type: Literal["channel", "contact"] = Field(description="'channel' or 'contact'")
-    id: str = Field(description="Channel key or contact public key")
+    target: Literal["repeaters", "sensors", "all"] = Field(
+        default="all",
+        description="Which node classes to discover over the mesh",
+    )
+
+
+class RadioDiscoveryResult(BaseModel):
+    """One mesh node heard during a discovery sweep."""
+
+    public_key: str = Field(description="Discovered node public key as hex")
+    name: str | None = Field(
+        default=None,
+        description="Known name for this node from contacts DB, if any",
+    )
+    node_type: Literal["repeater", "sensor"] = Field(description="Discovered node class")
+    heard_count: int = Field(default=1, description="How many responses were heard from this node")
+    local_snr: float | None = Field(
+        default=None,
+        description="SNR at which the local radio heard the response (dB)",
+    )
+    local_rssi: int | None = Field(
+        default=None,
+        description="RSSI at which the local radio heard the response (dBm)",
+    )
+    remote_snr: float | None = Field(
+        default=None,
+        description="SNR reported by the remote node while hearing our discovery request (dB)",
+    )
+
+
+class RadioDiscoveryResponse(BaseModel):
+    """Response payload for a mesh discovery sweep."""
+
+    target: Literal["repeaters", "sensors", "all"] = Field(
+        description="Which node classes were requested"
+    )
+    duration_seconds: float = Field(description="How long the sweep listened for responses")
+    results: list[RadioDiscoveryResult] = Field(
+        default_factory=list,
+        description="Deduplicated discovery responses heard during the sweep",
+    )
 
 
 class UnreadCounts(BaseModel):
@@ -574,24 +822,13 @@ class AppSettings(BaseModel):
             "favorites reload first, then background fill targets about 80% of this value"
         ),
     )
-    favorites: list[Favorite] = Field(
-        default_factory=list, description="List of favorited conversations"
-    )
     auto_decrypt_dm_on_advert: bool = Field(
-        default=False,
+        default=True,
         description="Whether to attempt historical DM decryption on new contact advertisement",
-    )
-    sidebar_sort_order: Literal["recent", "alpha"] = Field(
-        default="recent",
-        description="Sidebar sort order: 'recent' or 'alpha'",
     )
     last_message_times: dict[str, int] = Field(
         default_factory=dict,
         description="Map of conversation state keys to last message timestamps",
-    )
-    preferences_migrated: bool = Field(
-        default=False,
-        description="Whether preferences have been migrated from localStorage",
     )
     advert_interval: int = Field(
         default=0,
@@ -613,19 +850,43 @@ class AppSettings(BaseModel):
         default_factory=list,
         description="Display names whose messages are hidden from the UI",
     )
-
-
-class FanoutConfig(BaseModel):
-    """Configuration for a single fanout integration."""
-
-    id: str
-    type: str  # 'mqtt_private' | 'mqtt_community' | 'bot' | 'webhook' | 'apprise' | 'sqs'
-    name: str
-    enabled: bool
-    config: dict
-    scope: dict
-    sort_order: int = 0
-    created_at: int = 0
+    discovery_blocked_types: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Contact type codes (1=Client, 2=Repeater, 3=Room, 4=Sensor) whose "
+            "advertisements should not create new contacts; existing contacts are still updated"
+        ),
+    )
+    tracked_telemetry_repeaters: list[str] = Field(
+        default_factory=list,
+        description="Public keys of repeaters opted into periodic telemetry collection (max 8)",
+    )
+    tracked_telemetry_contacts: list[str] = Field(
+        default_factory=list,
+        description="Public keys of contacts opted into periodic LPP telemetry collection (max 8)",
+    )
+    telemetry_interval_hours: int = Field(
+        default=8,
+        description=(
+            "User-preferred telemetry collection interval in hours. The backend "
+            "clamps this up to the shortest legal interval given the number of "
+            "tracked repeaters and contacts so daily checks stay under a 24/day ceiling."
+        ),
+    )
+    telemetry_routed_hourly: bool = Field(
+        default=False,
+        description=(
+            "When enabled, tracked repeaters/contacts with a direct or routed (non-flood) "
+            "path are polled every hour instead of on the normal scheduled interval."
+        ),
+    )
+    auto_resend_channel: bool = Field(
+        default=False,
+        description=(
+            "When enabled, outgoing channel messages that receive no echo within 2 seconds "
+            "are automatically byte-perfect resent once (within the 30-second dedup window)"
+        ),
+    )
 
 
 class BusyChannel(BaseModel):
@@ -640,14 +901,26 @@ class ContactActivityCounts(BaseModel):
     last_week: int
 
 
-class PathHashWidthStats(BaseModel):
-    total_packets: int
-    single_byte: int
-    double_byte: int
-    triple_byte: int
-    single_byte_pct: float
-    double_byte_pct: float
-    triple_byte_pct: float
+class NoiseFloorSample(BaseModel):
+    timestamp: int = Field(description="Unix timestamp of the sampled reading")
+    noise_floor_dbm: int = Field(description="Noise floor in dBm")
+
+
+class NoiseFloorHistoryStats(BaseModel):
+    sample_interval_seconds: int = Field(description="Expected spacing between samples")
+    coverage_seconds: int = Field(description="How much of the last 24 hours is represented")
+    latest_noise_floor_dbm: int | None = Field(
+        default=None, description="Most recent sampled noise floor in dBm"
+    )
+    latest_timestamp: int | None = Field(
+        default=None, description="Unix timestamp of the most recent sample"
+    )
+    samples: list[NoiseFloorSample] = Field(default_factory=list)
+
+
+class PacketsPerHourBucket(BaseModel):
+    timestamp: int = Field(description="Unix timestamp at the start of the hour")
+    count: int = Field(description="Number of packets received in that hour")
 
 
 class StatisticsResponse(BaseModel):
@@ -663,4 +936,12 @@ class StatisticsResponse(BaseModel):
     total_outgoing: int
     contacts_heard: ContactActivityCounts
     repeaters_heard: ContactActivityCounts
+    known_channels_active: ContactActivityCounts
     path_hash_width_24h: PathHashWidthStats
+    packets_per_hour_72h: list[PacketsPerHourBucket]
+    noise_floor_24h: NoiseFloorHistoryStats
+
+
+class TelemetryHistoryEntry(BaseModel):
+    timestamp: int
+    data: dict

@@ -3,15 +3,21 @@
  *
  * Uses the contact's public key to generate a consistent background color,
  * and extracts initials or emoji from the name for display.
- * Repeaters (type=2) always show 🛜 with a gray background.
+ * Repeaters (type=2) and room servers (type=3) always show a fixed glyph.
  */
 
-import { CONTACT_TYPE_REPEATER } from '../types';
+import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
 
-// Repeater avatar styling
+// Fixed contact-type avatar styling
 const REPEATER_AVATAR = {
   text: '🛜',
   background: '#444444',
+  textColor: '#ffffff',
+};
+
+const ROOM_AVATAR = {
+  text: '🛖',
+  background: '#6b4f2a',
   textColor: '#ffffff',
 };
 
@@ -103,7 +109,7 @@ function getAvatarColor(publicKey: string): {
 
 /**
  * Get all avatar properties for a contact.
- * Repeaters (type=2) always get a special gray avatar with 🛜.
+ * Repeaters and room servers always get a special fixed avatar.
  */
 export function getContactAvatar(
   name: string | null,
@@ -114,9 +120,11 @@ export function getContactAvatar(
   background: string;
   textColor: string;
 } {
-  // Repeaters always get the repeater avatar
   if (contactType === CONTACT_TYPE_REPEATER) {
     return REPEATER_AVATAR;
+  }
+  if (contactType === CONTACT_TYPE_ROOM) {
+    return ROOM_AVATAR;
   }
 
   const text = getAvatarText(name, publicKey);

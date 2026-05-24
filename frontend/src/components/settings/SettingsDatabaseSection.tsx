@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Button } from '../ui/button';
@@ -13,20 +13,12 @@ export function SettingsDatabaseSection({
   health,
   onSaveAppSettings,
   onHealthRefresh,
-  blockedKeys = [],
-  blockedNames = [],
-  onToggleBlockedKey,
-  onToggleBlockedName,
   className,
 }: {
   appSettings: AppSettings;
   health: HealthStatus | null;
   onSaveAppSettings: (update: AppSettingsUpdate) => Promise<void>;
   onHealthRefresh: () => Promise<void>;
-  blockedKeys?: string[];
-  blockedNames?: string[];
-  onToggleBlockedKey?: (key: string) => void;
-  onToggleBlockedName?: (name: string) => void;
   className?: string;
 }) {
   const [retentionDays, setRetentionDays] = useState('14');
@@ -34,8 +26,7 @@ export function SettingsDatabaseSection({
   const [purgingDecryptedRaw, setPurgingDecryptedRaw] = useState(false);
   const [autoDecryptOnAdvert, setAutoDecryptOnAdvert] = useState(false);
 
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     setAutoDecryptOnAdvert(appSettings.auto_decrypt_dm_on_advert);
@@ -87,195 +78,132 @@ export function SettingsDatabaseSection({
     }
   };
 
-  const handleSave = async () => {
-    setBusy(true);
-    setError(null);
-
-    try {
-      await onSaveAppSettings({ auto_decrypt_dm_on_advert: autoDecryptOnAdvert });
-      toast.success('Database settings saved');
-    } catch (err) {
-      console.error('Failed to save database settings:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save');
-      toast.error('Failed to save settings');
-    } finally {
-      setBusy(false);
-    }
+  const persistAppSettings = (update: AppSettingsUpdate, revert: () => void): Promise<void> => {
+    const chained = saveChainRef.current.then(async () => {
+      try {
+        await onSaveAppSettings(update);
+      } catch (err) {
+        console.error('Failed to save database settings:', err);
+        revert();
+        toast.error('Failed to save setting', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    });
+    saveChainRef.current = chained;
+    return chained;
   };
 
   return (
     <div className={className}>
+      {/* ── Database Overview ── */}
       <div className="space-y-3">
-        <div className="flex justify-between items-center">
-          <span className="text-sm text-muted-foreground">Database size</span>
-          <span className="font-medium">{health?.database_size_mb ?? '?'} MB</span>
-        </div>
-
-        {health?.oldest_undecrypted_timestamp ? (
+        <h3 className="text-base font-semibold tracking-tight">Database Overview</h3>
+        <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
           <div className="flex justify-between items-center">
-            <span className="text-sm text-muted-foreground">Oldest undecrypted packet</span>
-            <span className="font-medium">
-              {formatTime(health.oldest_undecrypted_timestamp)}
-              <span className="text-muted-foreground ml-1">
-                ({Math.floor((Date.now() / 1000 - health.oldest_undecrypted_timestamp) / 86400)}{' '}
-                days old)
+            <span className="text-sm">Database size</span>
+            <span className="text-sm font-semibold">{health?.database_size_mb ?? '?'} MB</span>
+          </div>
+          <div className="flex justify-between items-center">
+            <span className="text-sm">Oldest undecrypted packet</span>
+            {health?.oldest_undecrypted_timestamp ? (
+              <span className="text-sm font-semibold">
+                {formatTime(health.oldest_undecrypted_timestamp)}
+                <span className="font-normal text-muted-foreground ml-1">
+                  ({Math.floor((Date.now() / 1000 - health.oldest_undecrypted_timestamp) / 86400)}{' '}
+                  days)
+                </span>
               </span>
-            </span>
+            ) : (
+              <span className="text-sm text-muted-foreground">None</span>
+            )}
           </div>
-        ) : (
-          <div className="flex justify-between items-center">
-            <span className="text-sm text-muted-foreground">Oldest undecrypted packet</span>
-            <span className="text-muted-foreground">None</span>
-          </div>
-        )}
+        </div>
       </div>
 
       <Separator />
 
-      <div className="space-y-3">
-        <Label>Delete Undecrypted Packets</Label>
-        <p className="text-xs text-muted-foreground">
-          Permanently deletes stored raw packets containing DMs and channel messages that have not
-          yet been decrypted. These packets are retained in case you later obtain the correct key —
-          once deleted, these messages can never be recovered or decrypted.
-        </p>
-        <div className="flex gap-2 items-end">
-          <div className="space-y-1">
-            <Label htmlFor="retention-days" className="text-xs">
-              Older than (days)
-            </Label>
-            <Input
-              id="retention-days"
-              type="number"
-              min="1"
-              max="365"
-              value={retentionDays}
-              onChange={(e) => setRetentionDays(e.target.value)}
-              className="w-24"
-            />
+      {/* ── Storage Cleanup ── */}
+      <div className="space-y-4">
+        <h3 className="text-base font-semibold tracking-tight">Storage Cleanup</h3>
+
+        <div className="rounded-md border border-border p-3 space-y-2">
+          <h3 className="text-sm font-semibold">Delete Undecrypted Packets</h3>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Permanently deletes stored raw packets that have not yet been decrypted. These are
+            retained in case you later obtain the correct key — once deleted, these messages can
+            never be recovered.
+          </p>
+          <div className="flex gap-2 items-end">
+            <div className="space-y-1">
+              <Label htmlFor="retention-days" className="text-xs text-muted-foreground">
+                Older than (days)
+              </Label>
+              <Input
+                id="retention-days"
+                type="number"
+                min="1"
+                max="365"
+                value={retentionDays}
+                onChange={(e) => setRetentionDays(e.target.value)}
+                className="w-24"
+              />
+            </div>
+            <Button
+              variant="outline"
+              onClick={handleCleanup}
+              disabled={cleaning}
+              className="border-destructive/50 text-destructive hover:bg-destructive/10"
+            >
+              {cleaning ? 'Deleting...' : 'Delete'}
+            </Button>
           </div>
+        </div>
+
+        <div className="rounded-md border border-border p-3 space-y-2">
+          <h3 className="text-sm font-semibold">Purge Archival Raw Packets</h3>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Deletes the raw packet bytes behind messages that are already decrypted and visible in
+            chat. This frees space but removes packet-analysis availability for those messages. It
+            does not affect displayed messages or future decryption.
+          </p>
           <Button
             variant="outline"
-            onClick={handleCleanup}
-            disabled={cleaning}
-            className="border-destructive/50 text-destructive hover:bg-destructive/10"
+            onClick={handlePurgeDecryptedRawPackets}
+            disabled={purgingDecryptedRaw}
+            className="w-full border-warning/50 text-warning hover:bg-warning/10"
           >
-            {cleaning ? 'Deleting...' : 'Permanently Delete'}
+            {purgingDecryptedRaw ? 'Purging...' : 'Purge Archival Packets'}
           </Button>
         </div>
       </div>
 
       <Separator />
 
+      {/* ── DM Decryption ── */}
       <div className="space-y-3">
-        <Label>Purge Archival Raw Packets</Label>
-        <p className="text-xs text-muted-foreground">
-          Deletes archival copies of raw packet bytes for messages that are already decrypted and
-          visible in your chat history.{' '}
-          <em className="text-muted-foreground/80">
-            This will not affect any displayed messages or app functionality.
-          </em>{' '}
-          The raw bytes are only useful for manual packet analysis.
-        </p>
-        <Button
-          variant="outline"
-          onClick={handlePurgeDecryptedRawPackets}
-          disabled={purgingDecryptedRaw}
-          className="w-full border-warning/50 text-warning hover:bg-warning/10"
-        >
-          {purgingDecryptedRaw ? 'Purging Archival Raw Packets...' : 'Purge Archival Raw Packets'}
-        </Button>
-      </div>
-
-      <Separator />
-
-      <div className="space-y-3">
-        <Label>DM Decryption</Label>
+        <h3 className="text-base font-semibold tracking-tight">DM Decryption</h3>
         <label className="flex items-center gap-3 cursor-pointer">
           <input
             type="checkbox"
             checked={autoDecryptOnAdvert}
-            onChange={(e) => setAutoDecryptOnAdvert(e.target.checked)}
+            onChange={(e) => {
+              const next = e.target.checked;
+              const prev = autoDecryptOnAdvert;
+              setAutoDecryptOnAdvert(next);
+              void persistAppSettings({ auto_decrypt_dm_on_advert: next }, () =>
+                setAutoDecryptOnAdvert(prev)
+              );
+            }}
             className="w-4 h-4 rounded border-input accent-primary"
           />
           <span className="text-sm">Auto-decrypt historical DMs when new contact advertises</span>
         </label>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-[0.8125rem] text-muted-foreground">
           When enabled, the server will automatically try to decrypt stored DM packets when a new
           contact sends an advertisement. This may cause brief delays on large packet backlogs.
         </p>
       </div>
-
-      <Separator />
-
-      <div className="space-y-3">
-        <Label>Blocked Contacts</Label>
-        <p className="text-xs text-muted-foreground">
-          Blocking only hides messages from the UI. MQTT forwarding and bot responses are not
-          affected. Messages are still stored and will reappear if unblocked.
-        </p>
-
-        {blockedKeys.length === 0 && blockedNames.length === 0 ? (
-          <p className="text-sm text-muted-foreground italic">No blocked contacts</p>
-        ) : (
-          <div className="space-y-2">
-            {blockedKeys.length > 0 && (
-              <div>
-                <span className="text-xs text-muted-foreground font-medium">Blocked Keys</span>
-                <div className="mt-1 space-y-1">
-                  {blockedKeys.map((key) => (
-                    <div key={key} className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-mono truncate flex-1">{key}</span>
-                      {onToggleBlockedKey && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => onToggleBlockedKey(key)}
-                          className="h-7 text-xs flex-shrink-0"
-                        >
-                          Unblock
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {blockedNames.length > 0 && (
-              <div>
-                <span className="text-xs text-muted-foreground font-medium">Blocked Names</span>
-                <div className="mt-1 space-y-1">
-                  {blockedNames.map((name) => (
-                    <div key={name} className="flex items-center justify-between gap-2">
-                      <span className="text-sm truncate flex-1">{name}</span>
-                      {onToggleBlockedName && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => onToggleBlockedName(name)}
-                          className="h-7 text-xs flex-shrink-0"
-                        >
-                          Unblock
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <div className="text-sm text-destructive" role="alert">
-          {error}
-        </div>
-      )}
-
-      <Button onClick={handleSave} disabled={busy} className="w-full">
-        {busy ? 'Saving...' : 'Save Settings'}
-      </Button>
     </div>
   );
 }

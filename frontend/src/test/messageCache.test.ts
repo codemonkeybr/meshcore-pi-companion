@@ -3,8 +3,12 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import * as messageCache from '../messageCache';
-import { MAX_CACHED_CONVERSATIONS, MAX_MESSAGES_PER_ENTRY } from '../messageCache';
+import {
+  ConversationMessageCache,
+  MAX_CACHED_CONVERSATIONS,
+  MAX_MESSAGES_PER_ENTRY,
+  reconcileConversationMessages,
+} from '../hooks/useConversationMessages';
 import type { Message } from '../types';
 
 function createMessage(overrides: Partial<Message> = {}): Message {
@@ -27,16 +31,14 @@ function createMessage(overrides: Partial<Message> = {}): Message {
 }
 
 function createEntry(messages: Message[] = [], hasOlderMessages = false) {
-  const seenContent = new Set<string>();
-  for (const msg of messages) {
-    seenContent.add(`${msg.type}-${msg.conversation_key}-${msg.text}-${msg.sender_timestamp}`);
-  }
-  return { messages, seenContent, hasOlderMessages };
+  return { messages, hasOlderMessages };
 }
 
 describe('messageCache', () => {
+  let messageCache: ConversationMessageCache;
+
   beforeEach(() => {
-    messageCache.clear();
+    messageCache = new ConversationMessageCache();
   });
 
   describe('get/set', () => {
@@ -155,11 +157,7 @@ describe('messageCache', () => {
       messageCache.set('conv1', createEntry([]));
 
       const msg = createMessage({ id: 10, text: 'New message' });
-      const result = messageCache.addMessage(
-        'conv1',
-        msg,
-        'CHAN-channel123-New message-1700000000'
-      );
+      const result = messageCache.addMessage('conv1', msg);
 
       expect(result).toBe(true);
       const entry = messageCache.get('conv1');
@@ -171,12 +169,11 @@ describe('messageCache', () => {
       messageCache.set('conv1', createEntry([]));
 
       const msg1 = createMessage({ id: 10, text: 'Hello' });
-      const contentKey = 'CHAN-channel123-Hello-1700000000';
-      expect(messageCache.addMessage('conv1', msg1, contentKey)).toBe(true);
+      expect(messageCache.addMessage('conv1', msg1)).toBe(true);
 
       // Same content key, different message id
       const msg2 = createMessage({ id: 11, text: 'Hello' });
-      expect(messageCache.addMessage('conv1', msg2, contentKey)).toBe(false);
+      expect(messageCache.addMessage('conv1', msg2)).toBe(false);
 
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(1);
@@ -187,9 +184,7 @@ describe('messageCache', () => {
 
       // Same id, different content key
       const msg = createMessage({ id: 10, text: 'Different' });
-      expect(messageCache.addMessage('conv1', msg, 'CHAN-channel123-Different-1700000000')).toBe(
-        false
-      );
+      expect(messageCache.addMessage('conv1', msg)).toBe(false);
 
       const entry = messageCache.get('conv1');
       expect(entry!.messages).toHaveLength(1);
@@ -208,11 +203,7 @@ describe('messageCache', () => {
         text: 'newest',
         received_at: 1700000000 + MAX_MESSAGES_PER_ENTRY,
       });
-      const result = messageCache.addMessage(
-        'conv1',
-        newMsg,
-        `CHAN-channel123-newest-${newMsg.sender_timestamp}`
-      );
+      const result = messageCache.addMessage('conv1', newMsg);
 
       expect(result).toBe(true);
       const entry = messageCache.get('conv1');
@@ -223,13 +214,79 @@ describe('messageCache', () => {
       expect(entry!.messages.some((m) => m.id === 0)).toBe(false);
     });
 
+    it('allows a trimmed-out message to be re-added after set() trimming', () => {
+      const messages = Array.from({ length: MAX_MESSAGES_PER_ENTRY + 1 }, (_, i) =>
+        createMessage({
+          id: i,
+          text: `message-${i}`,
+          received_at: 1700000000 + i,
+          sender_timestamp: 1700000000 + i,
+        })
+      );
+
+      messageCache.set('conv1', createEntry(messages));
+
+      const trimmedOut = createMessage({
+        id: 10_000,
+        text: 'message-0',
+        received_at: 1800000000,
+        sender_timestamp: 1700000000,
+      });
+
+      expect(messageCache.addMessage('conv1', trimmedOut)).toBe(true);
+      const entry = messageCache.get('conv1');
+      expect(entry!.messages.some((m) => m.id === 10_000)).toBe(true);
+    });
+
+    it('allows a trimmed-out message to be re-added after addMessage() trimming', () => {
+      const messages = Array.from({ length: MAX_MESSAGES_PER_ENTRY - 1 }, (_, i) =>
+        createMessage({
+          id: i,
+          text: `message-${i}`,
+          received_at: 1700000000 + i,
+          sender_timestamp: 1700000000 + i,
+        })
+      );
+      messageCache.set('conv1', createEntry(messages));
+
+      expect(
+        messageCache.addMessage(
+          'conv1',
+          createMessage({
+            id: MAX_MESSAGES_PER_ENTRY,
+            text: 'newest-a',
+            received_at: 1800000000,
+            sender_timestamp: 1800000000,
+          })
+        )
+      ).toBe(true);
+      expect(
+        messageCache.addMessage(
+          'conv1',
+          createMessage({
+            id: MAX_MESSAGES_PER_ENTRY + 1,
+            text: 'newest-b',
+            received_at: 1800000001,
+            sender_timestamp: 1800000001,
+          })
+        )
+      ).toBe(true);
+
+      const readdedTrimmedMessage = createMessage({
+        id: 10_001,
+        text: 'message-0',
+        received_at: 1900000000,
+        sender_timestamp: 1700000000,
+      });
+
+      expect(messageCache.addMessage('conv1', readdedTrimmedMessage)).toBe(true);
+      const entry = messageCache.get('conv1');
+      expect(entry!.messages.some((m) => m.id === 10_001)).toBe(true);
+    });
+
     it('auto-creates a minimal entry for never-visited conversations and returns true', () => {
       const msg = createMessage({ id: 10, text: 'First contact' });
-      const result = messageCache.addMessage(
-        'new_conv',
-        msg,
-        'CHAN-channel123-First contact-1700000000'
-      );
+      const result = messageCache.addMessage('new_conv', msg);
 
       expect(result).toBe(true);
       const entry = messageCache.get('new_conv');
@@ -237,7 +294,6 @@ describe('messageCache', () => {
       expect(entry!.messages).toHaveLength(1);
       expect(entry!.messages[0].text).toBe('First contact');
       expect(entry!.hasOlderMessages).toBe(true);
-      expect(entry!.seenContent.has('CHAN-channel123-First contact-1700000000')).toBe(true);
     });
 
     it('promotes entry to MRU on addMessage', () => {
@@ -248,7 +304,7 @@ describe('messageCache', () => {
 
       // addMessage to conv0 (currently LRU) should promote it
       const msg = createMessage({ id: 999, text: 'Incoming WS message' });
-      messageCache.addMessage('conv0', msg, 'CHAN-channel123-Incoming WS message-1700000000');
+      messageCache.addMessage('conv0', msg);
 
       // Add one more — conv1 should now be LRU and get evicted, not conv0
       messageCache.set('conv_new', createEntry());
@@ -259,11 +315,10 @@ describe('messageCache', () => {
 
     it('returns false for duplicate delivery to auto-created entry', () => {
       const msg = createMessage({ id: 10, text: 'Echo' });
-      const contentKey = 'CHAN-channel123-Echo-1700000000';
 
-      expect(messageCache.addMessage('new_conv', msg, contentKey)).toBe(true);
+      expect(messageCache.addMessage('new_conv', msg)).toBe(true);
       // Duplicate via mesh echo
-      expect(messageCache.addMessage('new_conv', msg, contentKey)).toBe(false);
+      expect(messageCache.addMessage('new_conv', msg)).toBe(false);
 
       const entry = messageCache.get('new_conv');
       expect(entry!.messages).toHaveLength(1);
@@ -358,7 +413,7 @@ describe('messageCache', () => {
         createMessage({ id: 3, acked: 1 }),
       ];
 
-      expect(messageCache.reconcile(msgs, fetched)).toBeNull();
+      expect(reconcileConversationMessages(msgs, fetched)).toBeNull();
     });
 
     it('detects new messages missing from cache', () => {
@@ -369,7 +424,7 @@ describe('messageCache', () => {
         createMessage({ id: 3, text: 'missed via WS' }),
       ];
 
-      const merged = messageCache.reconcile(current, fetched);
+      const merged = reconcileConversationMessages(current, fetched);
       expect(merged).not.toBeNull();
       expect(merged!.map((m) => m.id)).toEqual([1, 2, 3]);
     });
@@ -378,7 +433,7 @@ describe('messageCache', () => {
       const current = [createMessage({ id: 1, acked: 0 })];
       const fetched = [createMessage({ id: 1, acked: 3 })];
 
-      const merged = messageCache.reconcile(current, fetched);
+      const merged = reconcileConversationMessages(current, fetched);
       expect(merged).not.toBeNull();
       expect(merged![0].acked).toBe(3);
     });
@@ -397,20 +452,20 @@ describe('messageCache', () => {
         createMessage({ id: 2 }),
       ];
 
-      const merged = messageCache.reconcile(current, fetched);
+      const merged = reconcileConversationMessages(current, fetched);
       expect(merged).not.toBeNull();
       // Should have fetched page + older paginated message
       expect(merged!.map((m) => m.id)).toEqual([4, 3, 2, 1]);
     });
 
     it('returns null for empty fetched and empty current', () => {
-      expect(messageCache.reconcile([], [])).toBeNull();
+      expect(reconcileConversationMessages([], [])).toBeNull();
     });
 
     it('detects difference when current is empty but fetch has messages', () => {
       const fetched = [createMessage({ id: 1 })];
 
-      const merged = messageCache.reconcile([], fetched);
+      const merged = reconcileConversationMessages([], fetched);
       expect(merged).not.toBeNull();
       expect(merged!).toHaveLength(1);
     });
@@ -430,7 +485,7 @@ describe('messageCache', () => {
         }),
       ];
 
-      const merged = messageCache.reconcile(current, fetched);
+      const merged = reconcileConversationMessages(current, fetched);
       expect(merged).not.toBeNull();
       expect(merged![0].paths).toHaveLength(2);
     });
@@ -439,7 +494,7 @@ describe('messageCache', () => {
       const current = [createMessage({ id: 1, text: '[encrypted]' })];
       const fetched = [createMessage({ id: 1, text: 'Hello world' })];
 
-      const merged = messageCache.reconcile(current, fetched);
+      const merged = reconcileConversationMessages(current, fetched);
       expect(merged).not.toBeNull();
       expect(merged![0].text).toBe('Hello world');
     });
@@ -449,7 +504,7 @@ describe('messageCache', () => {
       const current = [createMessage({ id: 1, acked: 2, paths, text: 'Hello' })];
       const fetched = [createMessage({ id: 1, acked: 2, paths, text: 'Hello' })];
 
-      expect(messageCache.reconcile(current, fetched)).toBeNull();
+      expect(reconcileConversationMessages(current, fetched)).toBeNull();
     });
   });
 });

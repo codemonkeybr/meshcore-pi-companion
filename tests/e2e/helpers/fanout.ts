@@ -1,6 +1,10 @@
 import type { Locator, Page } from '@playwright/test';
 import http from 'http';
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function createCaptureServer(urlFactory: (port: number) => string) {
   const requests: { body: string; headers: http.IncomingHttpHeaders }[] = [];
   const server = http.createServer((req, res) => {
@@ -36,6 +40,15 @@ export async function openFanoutSettings(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByText('Settings').click();
   await page.getByRole('button', { name: /MQTT.*Automation/ }).click();
+}
+
+export async function startIntegrationDraft(page: Page, integrationName: string): Promise<void> {
+  await page.getByRole('button', { name: 'Add Integration' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create Integration' });
+  await dialog
+    .getByRole('button', { name: new RegExp(`^${escapeRegex(integrationName)}(?:\\s|$)`) })
+    .click();
+  await dialog.getByRole('button', { name: 'Create' }).click();
 }
 
 export function fanoutHeader(page: Page, name: string): Locator {

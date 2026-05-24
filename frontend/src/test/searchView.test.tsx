@@ -35,7 +35,15 @@ function createSearchResult(overrides: Partial<Message> = {}): Message {
 const defaultProps = {
   contacts: [],
   channels: [
-    { key: 'ABC123', name: 'Public', is_hashtag: true, on_radio: false, last_read_at: null },
+    {
+      key: 'ABC123',
+      name: 'Public',
+      is_hashtag: true,
+      on_radio: false,
+      last_read_at: null,
+      favorite: false,
+      muted: false,
+    },
   ],
   onNavigateToMessage: vi.fn(),
 };
@@ -60,6 +68,7 @@ async function typeAndWaitForResults(query: string) {
 describe('SearchView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetMessages.mockReset();
   });
 
   afterEach(() => {
@@ -230,14 +239,15 @@ describe('SearchView', () => {
             name: 'Bob',
             type: 1,
             flags: 0,
-            last_path: null,
-            last_path_len: -1,
-            out_path_hash_mode: 0,
+            direct_path: null,
+            direct_path_len: -1,
+            direct_path_hash_mode: 0,
             last_advert: null,
             lat: null,
             lon: null,
             last_seen: null,
             on_radio: false,
+            favorite: false,
             last_contacted: null,
             first_seen: null,
             last_read_at: null,
@@ -282,6 +292,33 @@ describe('SearchView', () => {
       expect.objectContaining({ q: 'user:"Alice Smith"' }),
       expect.any(AbortSignal)
     );
+  });
+
+  it('refetches current results when visibility policy changes', async () => {
+    mockGetMessages
+      .mockResolvedValueOnce([createSearchResult({ id: 1, text: 'visible result' })])
+      .mockResolvedValueOnce([]);
+
+    const { rerender } = render(<SearchView {...defaultProps} visibilityVersion={0} />);
+
+    await typeAndWaitForResults('visible');
+    expect(mockGetMessages).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getAllByRole('button').some((button) => button.textContent?.includes('visible result'))
+    ).toBe(true);
+
+    rerender(<SearchView {...defaultProps} visibilityVersion={1} />);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mockGetMessages).toHaveBeenCalledTimes(2);
+    expect(mockGetMessages).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: 'visible' }),
+      expect.any(AbortSignal)
+    );
+    expect(screen.getByText(/No messages found/)).toBeInTheDocument();
   });
 
   it('aborts the load-more request on unmount', async () => {

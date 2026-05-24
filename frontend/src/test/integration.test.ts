@@ -8,12 +8,12 @@
  * between backend and frontend - both sides test against the same data.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import fixtures from './fixtures/websocket_events.json';
-import { getMessageContentKey } from '../hooks/useConversationMessages';
 import { getStateKey } from '../utils/conversationState';
 import { mergeContactIntoList } from '../utils/contactMerge';
-import * as messageCache from '../messageCache';
+import { ConversationMessageCache } from '../hooks/useConversationMessages';
+import { getMessageContentKey } from '../utils/messageIdentity';
 import type { Contact, Message } from '../types';
 
 /**
@@ -25,6 +25,7 @@ interface MockState {
   unreadCounts: Record<string, number>;
   lastMessageTimes: Record<string, number>;
   seenActiveContent: Set<string>;
+  messageCache: ConversationMessageCache;
 }
 
 function createMockState(): MockState {
@@ -33,6 +34,7 @@ function createMockState(): MockState {
     unreadCounts: {},
     lastMessageTimes: {},
     seenActiveContent: new Set(),
+    messageCache: new ConversationMessageCache(),
   };
 }
 
@@ -68,7 +70,7 @@ function handleMessageEvent(
   state.lastMessageTimes[stateKey] = msg.received_at;
 
   if (!isForActiveConversation) {
-    const isNew = messageCache.addMessage(msg.conversation_key, msg, contentKey);
+    const isNew = state.messageCache.addMessage(msg.conversation_key, msg);
     if (!msg.outgoing && isNew) {
       state.unreadCounts[stateKey] = (state.unreadCounts[stateKey] || 0) + 1;
       unreadIncremented = true;
@@ -77,11 +79,6 @@ function handleMessageEvent(
 
   return { added, unreadIncremented };
 }
-
-// Clear messageCache between tests to avoid cross-test contamination
-beforeEach(() => {
-  messageCache.clear();
-});
 
 describe('Integration: Channel Message Events', () => {
   const fixture = fixtures.channel_message;
@@ -170,17 +167,15 @@ describe('Integration: Duplicate Message Handling', () => {
   });
 });
 
-describe('Integration: No phantom unreads from mesh echoes (hitlist #8 regression)', () => {
-  it('does not increment unread when a mesh echo arrives after many unique messages', () => {
+describe('Integration: Trimmed cache entries can reappear (hitlist #7 regression)', () => {
+  it('increments unread when an evicted inactive-conversation message arrives again', () => {
     const state = createMockState();
     const convKey = 'channel_busy';
 
-    // Deliver 1001 unique messages — exceeding the old global
-    // seenMessageContentRef prune threshold (1000→500). Under the old
-    // dual-set design the global set would drop msg-0's key during pruning,
-    // so a later mesh echo of msg-0 would pass the global check and
-    // phantom-increment unread. With the fix, messageCache's per-conversation
-    // seenContent is the single source of truth and is never pruned.
+    // Deliver enough unique messages to evict msg-0 from the inactive
+    // conversation cache. Once it falls out of that window, a later arrival
+    // with the same content should be allowed back in instead of being
+    // suppressed forever by a stale content key.
     const MESSAGE_COUNT = 1001;
     for (let i = 0; i < MESSAGE_COUNT; i++) {
       const msg: Message = {
@@ -222,9 +217,8 @@ describe('Integration: No phantom unreads from mesh echoes (hitlist #8 regressio
     };
     const result = handleMessageEvent(state, echo, 'other_active_conv');
 
-    // Must NOT increment unread — the echo is a duplicate
-    expect(result.unreadIncremented).toBe(false);
-    expect(state.unreadCounts[stateKey]).toBe(MESSAGE_COUNT);
+    expect(result.unreadIncremented).toBe(true);
+    expect(state.unreadCounts[stateKey]).toBe(MESSAGE_COUNT + 1);
   });
 });
 
@@ -277,18 +271,19 @@ function makeContact(overrides: Partial<Contact> = {}): Contact {
     name: 'TestNode',
     type: 1,
     flags: 0,
-    last_path: null,
-    last_path_len: 0,
+    direct_path: null,
+    direct_path_len: 0,
     last_advert: null,
     lat: null,
     lon: null,
     last_seen: null,
     on_radio: true,
+    favorite: false,
     last_contacted: null,
     last_read_at: null,
     first_seen: null,
     ...overrides,
-    out_path_hash_mode: overrides.out_path_hash_mode ?? 0,
+    direct_path_hash_mode: overrides.direct_path_hash_mode ?? 0,
   };
 }
 
@@ -342,11 +337,8 @@ describe('Integration: Contact Merge', () => {
 // --- ACK + messageCache propagation tests ---
 
 describe('Integration: ACK + messageCache propagation', () => {
-  beforeEach(() => {
-    messageCache.clear();
-  });
-
   it('updateAck updates acked count on cached message', () => {
+    const messageCache = new ConversationMessageCache();
     const msg: Message = {
       id: 100,
       type: 'PRIV',
@@ -362,7 +354,7 @@ describe('Integration: ACK + messageCache propagation', () => {
       acked: 0,
       sender_name: null,
     };
-    messageCache.addMessage('pk_abc', msg, 'key-100');
+    messageCache.addMessage('pk_abc', msg);
 
     messageCache.updateAck(100, 1);
 
@@ -372,6 +364,7 @@ describe('Integration: ACK + messageCache propagation', () => {
   });
 
   it('updateAck updates paths when longer', () => {
+    const messageCache = new ConversationMessageCache();
     const msg: Message = {
       id: 101,
       type: 'PRIV',
@@ -387,7 +380,7 @@ describe('Integration: ACK + messageCache propagation', () => {
       acked: 1,
       sender_name: null,
     };
-    messageCache.addMessage('pk_abc', msg, 'key-101');
+    messageCache.addMessage('pk_abc', msg);
 
     const longerPaths = [
       { path: 'aa', received_at: 1700000001 },
@@ -401,6 +394,7 @@ describe('Integration: ACK + messageCache propagation', () => {
   });
 
   it('preserves higher existing ack count (max semantics)', () => {
+    const messageCache = new ConversationMessageCache();
     const msg: Message = {
       id: 102,
       type: 'PRIV',
@@ -416,7 +410,7 @@ describe('Integration: ACK + messageCache propagation', () => {
       acked: 5,
       sender_name: null,
     };
-    messageCache.addMessage('pk_abc', msg, 'key-102');
+    messageCache.addMessage('pk_abc', msg);
 
     // Try to update with a lower ack count
     messageCache.updateAck(102, 3);
@@ -426,6 +420,7 @@ describe('Integration: ACK + messageCache propagation', () => {
   });
 
   it('is a no-op for unknown message ID', () => {
+    const messageCache = new ConversationMessageCache();
     const msg: Message = {
       id: 103,
       type: 'PRIV',
@@ -441,7 +436,7 @@ describe('Integration: ACK + messageCache propagation', () => {
       acked: 0,
       sender_name: null,
     };
-    messageCache.addMessage('pk_abc', msg, 'key-103');
+    messageCache.addMessage('pk_abc', msg);
 
     // Update a non-existent message ID — should not throw or modify anything
     messageCache.updateAck(999, 1);

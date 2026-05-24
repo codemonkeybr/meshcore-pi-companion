@@ -2,11 +2,21 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { takePrefetchOrFetch } from '../prefetch';
 import { toast } from '../components/ui/sonner';
-import type { HealthStatus, RadioConfig, RadioConfigUpdate } from '../types';
+import type {
+  HealthStatus,
+  RadioAdvertMode,
+  RadioConfig,
+  RadioConfigUpdate,
+  RadioDiscoveryResponse,
+  RadioDiscoveryTarget,
+} from '../types';
 
 export function useRadioControl() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [config, setConfig] = useState<RadioConfig | null>(null);
+  const [meshDiscovery, setMeshDiscovery] = useState<RadioDiscoveryResponse | null>(null);
+  const [meshDiscoveryLoadingTarget, setMeshDiscoveryLoadingTarget] =
+    useState<RadioDiscoveryTarget | null>(null);
 
   const prevHealthRef = useRef<HealthStatus | null>(null);
   const rebootPollTokenRef = useRef(0);
@@ -84,15 +94,36 @@ export function useRadioControl() {
     }
   }, [fetchConfig]);
 
-  const handleAdvertise = useCallback(async () => {
+  const handleAdvertise = useCallback(async (mode: RadioAdvertMode = 'flood') => {
     try {
-      await api.sendAdvertisement();
-      toast.success('Advertisement sent');
+      await api.sendAdvertisement(mode);
+      toast.success(mode === 'zero_hop' ? 'Zero-hop advertisement sent' : 'Advertisement sent');
     } catch (err) {
-      console.error('Failed to send advertisement:', err);
-      toast.error('Failed to send advertisement', {
+      const label = mode === 'zero_hop' ? 'zero-hop advertisement' : 'advertisement';
+      console.error(`Failed to send ${label}:`, err);
+      toast.error(`Failed to send ${label}`, {
         description: err instanceof Error ? err.message : 'Check radio connection',
       });
+    }
+  }, []);
+
+  const handleDiscoverMesh = useCallback(async (target: RadioDiscoveryTarget) => {
+    setMeshDiscoveryLoadingTarget(target);
+    try {
+      const data = await api.discoverMesh(target);
+      setMeshDiscovery(data);
+      toast.success(
+        data.results.length === 0
+          ? 'No nearby nodes responded'
+          : `Found ${data.results.length} nearby node${data.results.length === 1 ? '' : 's'}`
+      );
+    } catch (err) {
+      console.error('Failed to discover nearby nodes:', err);
+      toast.error('Failed to run mesh discovery', {
+        description: err instanceof Error ? err.message : 'Check radio connection',
+      });
+    } finally {
+      setMeshDiscoveryLoadingTarget(null);
     }
   }, []);
 
@@ -118,6 +149,9 @@ export function useRadioControl() {
     handleDisconnect,
     handleReconnect,
     handleAdvertise,
+    meshDiscovery,
+    meshDiscoveryLoadingTarget,
+    handleDiscoverMesh,
     handleHealthRefresh,
   };
 }

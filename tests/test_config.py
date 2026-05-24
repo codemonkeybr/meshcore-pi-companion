@@ -33,7 +33,7 @@ class TestTransportExclusivity:
 
     def test_tcp_default_port(self):
         s = Settings(tcp_host="192.168.1.1")
-        assert s.tcp_port == 4000
+        assert s.tcp_port == 5000
 
     def test_ble_only(self):
         s = Settings(ble_address="AA:BB:CC:DD:EE:FF", ble_pin="123456")
@@ -118,3 +118,12 @@ class TestBasicAuthConfiguration:
                 basic_auth_username="",
                 basic_auth_password="secret",
             )
+
+
+class TestExperimentalAliases:
+    """Ensure exact-name experimental env vars still map into settings."""
+
+    def test_clowntown_wraparound_alias_reads_exact_env_var(self, monkeypatch):
+        monkeypatch.setenv("__CLOWNTOWN_DO_CLOCK_WRAPAROUND", "true")
+        s = Settings(serial_port="", tcp_host="", ble_address="")
+        assert s.clowntown_do_clock_wraparound is True

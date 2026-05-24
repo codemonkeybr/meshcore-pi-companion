@@ -4,7 +4,12 @@ import {
   deleteFanoutConfig,
   getFanoutConfigs,
 } from '../helpers/api';
-import { createCaptureServer, fanoutHeader, openFanoutSettings } from '../helpers/fanout';
+import {
+  createCaptureServer,
+  fanoutHeader,
+  openFanoutSettings,
+  startIntegrationDraft,
+} from '../helpers/fanout';
 
 test.describe('Webhook integration settings', () => {
   let createdWebhookId: string | null = null;
@@ -35,9 +40,7 @@ test.describe('Webhook integration settings', () => {
     await openFanoutSettings(page);
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    // Open add menu and pick Webhook
-    await page.getByRole('button', { name: 'Add Integration' }).click();
-    await page.getByRole('menuitem', { name: 'Webhook' }).click();
+    await startIntegrationDraft(page, 'Webhook');
 
     // Should navigate to the detail/edit view with a numbered default name
     await expect(page.locator('#fanout-edit-name')).toHaveValue(/Webhook #\d+/);
@@ -77,8 +80,7 @@ test.describe('Webhook integration settings', () => {
     await openFanoutSettings(page);
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Add Integration' }).click();
-    await page.getByRole('menuitem', { name: 'Webhook' }).click();
+    await startIntegrationDraft(page, 'Webhook');
     await expect(page.locator('#fanout-edit-name')).toHaveValue(/Webhook #\d+/);
 
     await page.locator('#fanout-edit-name').fill('Unsaved Webhook Draft');

@@ -56,15 +56,68 @@ interface SheetContentProps
   hideCloseButton?: boolean;
 }
 
+// Safe-area insets for each sheet side. Sheets are position:fixed and escape
+// body padding, so without this they render under the iOS status bar/home
+// indicator when the app is installed as a PWA.
+//
+// NOTE: these inline styles override the matching sides of the `p-6` default
+// in sheetVariants. All current consumers pass `p-0`; future sheets that want
+// the default padding should compose explicit per-side padding in their own
+// className rather than relying on the `p-6` shorthand being preserved.
+type SheetSide = Exclude<VariantProps<typeof sheetVariants>['side'], null | undefined>;
+
+const sheetSafeAreaStyles: Record<SheetSide, React.CSSProperties> = {
+  top: {
+    paddingTop: 'var(--safe-area-top)',
+    paddingLeft: 'var(--safe-area-left)',
+    paddingRight: 'var(--safe-area-right)',
+  },
+  bottom: {
+    paddingBottom: 'var(--safe-area-bottom)',
+    paddingLeft: 'var(--safe-area-left)',
+    paddingRight: 'var(--safe-area-right)',
+  },
+  left: {
+    paddingTop: 'var(--safe-area-top)',
+    paddingLeft: 'var(--safe-area-left)',
+    paddingBottom: 'var(--safe-area-bottom)',
+  },
+  right: {
+    paddingTop: 'var(--safe-area-top)',
+    paddingRight: 'var(--safe-area-right)',
+    paddingBottom: 'var(--safe-area-bottom)',
+  },
+};
+
 const SheetContent = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Content>,
   SheetContentProps
->(({ side = 'right', className, children, hideCloseButton = false, ...props }, ref) => (
+>(({ side = 'right', className, children, hideCloseButton = false, style, ...props }, ref) => (
   <SheetPortal>
     <SheetOverlay />
-    <SheetPrimitive.Content ref={ref} className={cn(sheetVariants({ side }), className)} {...props}>
+    <SheetPrimitive.Content
+      ref={ref}
+      className={cn(sheetVariants({ side }), className)}
+      style={{ ...sheetSafeAreaStyles[side as SheetSide], ...style }}
+      {...props}
+    >
       {!hideCloseButton && (
-        <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary">
+        <SheetPrimitive.Close
+          // Absolute positioning is measured from the containing block's
+          // padding edge, so the safe-area padding on SheetContent does not
+          // push this button down. We offset `top` by safe-area-top manually
+          // for sheets that pin to the viewport top (top/left/right). Bottom
+          // sheets start mid-viewport, so no adjustment is needed there.
+          style={
+            side === 'bottom'
+              ? undefined
+              : {
+                  top: 'calc(var(--safe-area-top) + 1rem)',
+                  right: 'calc(var(--safe-area-right) + 1rem)',
+                }
+          }
+          className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary"
+        >
           <X className="h-4 w-4" />
           <span className="sr-only">Close</span>
         </SheetPrimitive.Close>

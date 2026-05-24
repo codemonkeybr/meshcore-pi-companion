@@ -41,6 +41,11 @@ class TestWebSocketEndpoint:
             mock_ws_rm.connection_info = "Serial: /dev/ttyUSB0"
             mock_health_rm.is_connected = True
             mock_health_rm.connection_info = "Serial: /dev/ttyUSB0"
+            mock_health_rm.is_setup_in_progress = False
+            mock_health_rm.is_setup_complete = True
+            mock_health_rm.connection_desired = True
+            mock_health_rm.is_reconnecting = False
+            mock_health_rm.device_info_loaded = False
             mock_repo.get_oldest_undecrypted = AsyncMock(return_value=None)
             mock_settings.database_path = "/tmp/test.db"
             mock_settings.disable_bots = False
@@ -75,6 +80,11 @@ class TestWebSocketEndpoint:
             mock_ws_rm.connection_info = None
             mock_health_rm.is_connected = False
             mock_health_rm.connection_info = None
+            mock_health_rm.is_setup_in_progress = False
+            mock_health_rm.is_setup_complete = False
+            mock_health_rm.connection_desired = True
+            mock_health_rm.is_reconnecting = False
+            mock_health_rm.device_info_loaded = False
             mock_repo.get_oldest_undecrypted = AsyncMock(return_value=None)
             mock_settings.database_path = "/tmp/test.db"
             mock_settings.disable_bots = False
@@ -105,6 +115,11 @@ class TestWebSocketEndpoint:
             mock_ws_rm.connection_info = "TCP: 192.168.1.1:4000"
             mock_health_rm.is_connected = True
             mock_health_rm.connection_info = "TCP: 192.168.1.1:4000"
+            mock_health_rm.is_setup_in_progress = False
+            mock_health_rm.is_setup_complete = True
+            mock_health_rm.connection_desired = True
+            mock_health_rm.is_reconnecting = False
+            mock_health_rm.device_info_loaded = False
             mock_repo.get_oldest_undecrypted = AsyncMock(return_value=None)
             mock_settings.database_path = "/tmp/test.db"
             mock_settings.disable_bots = False
@@ -136,6 +151,11 @@ class TestWebSocketEndpoint:
             mock_ws_rm.connection_info = "Serial: /dev/ttyUSB0"
             mock_health_rm.is_connected = True
             mock_health_rm.connection_info = "Serial: /dev/ttyUSB0"
+            mock_health_rm.is_setup_in_progress = False
+            mock_health_rm.is_setup_complete = True
+            mock_health_rm.connection_desired = True
+            mock_health_rm.is_reconnecting = False
+            mock_health_rm.device_info_loaded = False
             mock_repo.get_oldest_undecrypted = AsyncMock(return_value=None)
             mock_settings.database_path = "/tmp/test.db"
             mock_settings.disable_bots = False
@@ -167,6 +187,11 @@ class TestWebSocketEndpoint:
             mock_ws_rm.connection_info = "Serial: /dev/ttyUSB0"
             mock_health_rm.is_connected = True
             mock_health_rm.connection_info = "Serial: /dev/ttyUSB0"
+            mock_health_rm.is_setup_in_progress = False
+            mock_health_rm.is_setup_complete = True
+            mock_health_rm.connection_desired = True
+            mock_health_rm.is_reconnecting = False
+            mock_health_rm.device_info_loaded = False
             mock_repo.get_oldest_undecrypted = AsyncMock(return_value=None)
             mock_settings.database_path = "/tmp/test.db"
             mock_settings.disable_bots = False

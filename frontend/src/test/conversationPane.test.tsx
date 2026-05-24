@@ -1,17 +1,10 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConversationPane } from '../components/ConversationPane';
-import type {
-  Channel,
-  Contact,
-  Conversation,
-  Favorite,
-  HealthStatus,
-  Message,
-  RadioConfig,
-} from '../types';
+import type { Channel, Contact, Conversation, HealthStatus, Message, RadioConfig } from '../types';
+import type { RawPacketStatsSessionState } from '../utils/rawPacketStats';
 
 const mocks = vi.hoisted(() => ({
   messageList: vi.fn(() => <div data-testid="message-list" />),
@@ -40,12 +33,31 @@ vi.mock('../components/RepeaterDashboard', () => ({
   RepeaterDashboard: () => <div data-testid="repeater-dashboard" />,
 }));
 
+vi.mock('../components/RoomServerPanel', () => ({
+  RoomServerPanel: ({
+    onAuthenticatedChange,
+  }: {
+    onAuthenticatedChange?: (value: boolean) => void;
+  }) => (
+    <div>
+      <div data-testid="room-server-panel" />
+      <button type="button" onClick={() => onAuthenticatedChange?.(true)}>
+        Authenticate room
+      </button>
+    </div>
+  ),
+}));
+
 vi.mock('../components/MapView', () => ({
   MapView: () => <div data-testid="map-view" />,
 }));
 
 vi.mock('../components/VisualizerView', () => ({
   VisualizerView: () => <div data-testid="visualizer-view" />,
+}));
+
+vi.mock('../components/TracePane', () => ({
+  TracePane: () => <div data-testid="trace-pane" />,
 }));
 
 const config: RadioConfig = {
@@ -77,6 +89,8 @@ const channel: Channel = {
   is_hashtag: false,
   on_radio: false,
   last_read_at: null,
+  favorite: false,
+  muted: false,
 };
 
 const message: Message = {
@@ -95,18 +109,25 @@ const message: Message = {
   sender_name: null,
 };
 
+const rawPacketStatsSession: RawPacketStatsSessionState = {
+  sessionStartedAt: 1_700_000_000_000,
+  totalObservedPackets: 0,
+  trimmedObservationCount: 0,
+  observations: [],
+};
+
 function createProps(overrides: Partial<React.ComponentProps<typeof ConversationPane>> = {}) {
   return {
     activeConversation: null as Conversation | null,
     contacts: [] as Contact[],
     channels: [channel],
     rawPackets: [],
+    rawPacketStatsSession,
     config,
     health,
     notificationsSupported: true,
     notificationsEnabled: false,
     notificationsPermission: 'granted' as const,
-    favorites: [] as Favorite[],
     messages: [message],
     messagesLoading: false,
     loadingOlder: false,
@@ -117,10 +138,16 @@ function createProps(overrides: Partial<React.ComponentProps<typeof Conversation
     loadingNewer: false,
     messageInputRef: { current: null },
     onTrace: vi.fn(async () => {}),
+    onRunTracePath: vi.fn(async () => ({ path_len: 0, timeout_seconds: 5, nodes: [] })),
+    onPathDiscovery: vi.fn(async () => {
+      throw new Error('unused');
+    }),
     onToggleFavorite: vi.fn(async () => {}),
+    onToggleMute: vi.fn(async () => {}),
     onDeleteContact: vi.fn(async () => {}),
     onDeleteChannel: vi.fn(async () => {}),
     onSetChannelFloodScopeOverride: vi.fn(async () => {}),
+    onSelectConversation: vi.fn(),
     onOpenContactInfo: vi.fn(),
     onOpenChannelInfo: vi.fn(),
     onSenderClick: vi.fn(),
@@ -132,6 +159,10 @@ function createProps(overrides: Partial<React.ComponentProps<typeof Conversation
     onDismissUnreadMarker: vi.fn(),
     onSendMessage: vi.fn(async () => {}),
     onToggleNotifications: vi.fn(),
+    trackedTelemetryRepeaters: [],
+    onToggleTrackedTelemetry: vi.fn(async () => {}),
+    repeaterAutoLoginKey: null,
+    onClearRepeaterAutoLogin: vi.fn(),
     ...overrides,
   };
 }
@@ -163,14 +194,15 @@ describe('ConversationPane', () => {
               name: 'Repeater',
               type: 2,
               flags: 0,
-              last_path: null,
-              last_path_len: 0,
-              out_path_hash_mode: 0,
+              direct_path: null,
+              direct_path_len: 0,
+              direct_path_hash_mode: 0,
               last_advert: null,
               lat: null,
               lon: null,
               last_seen: null,
               on_radio: false,
+              favorite: false,
               last_contacted: null,
               last_read_at: null,
               first_seen: null,
@@ -199,6 +231,72 @@ describe('ConversationPane', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('chat-header')).toBeInTheDocument();
+      expect(screen.getByTestId('message-list')).toBeInTheDocument();
+      expect(screen.getByTestId('message-input')).toBeInTheDocument();
+    });
+  });
+
+  it('renders the trace tool pane for trace conversations', () => {
+    render(
+      <ConversationPane
+        {...createProps({
+          activeConversation: {
+            type: 'trace',
+            id: 'trace',
+            name: 'Trace',
+          },
+        })}
+      />
+    );
+
+    expect(screen.getByTestId('trace-pane')).toBeInTheDocument();
+    expect(screen.queryByTestId('message-list')).not.toBeInTheDocument();
+  });
+
+  it('gates room chat behind room login controls until authenticated', async () => {
+    render(
+      <ConversationPane
+        {...createProps({
+          activeConversation: {
+            type: 'contact',
+            id: 'cc'.repeat(32),
+            name: 'Ops Board',
+          },
+          contacts: [
+            {
+              public_key: 'cc'.repeat(32),
+              name: 'Ops Board',
+              type: 3,
+              flags: 0,
+              direct_path: null,
+              direct_path_len: -1,
+              direct_path_hash_mode: -1,
+              last_advert: null,
+              lat: null,
+              lon: null,
+              last_seen: null,
+              on_radio: false,
+              favorite: false,
+              last_contacted: null,
+              last_read_at: null,
+              first_seen: null,
+            },
+          ],
+        })}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('room-server-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('chat-header')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByTestId('message-list')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('message-input')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Authenticate room' }));
+
+    await waitFor(() => {
       expect(screen.getByTestId('message-list')).toBeInTheDocument();
       expect(screen.getByTestId('message-input')).toBeInTheDocument();
     });
@@ -265,14 +363,15 @@ describe('ConversationPane', () => {
               name: null,
               type: 0,
               flags: 0,
-              last_path: null,
-              last_path_len: -1,
-              out_path_hash_mode: -1,
+              direct_path: null,
+              direct_path_len: -1,
+              direct_path_hash_mode: -1,
               last_advert: null,
               lat: null,
               lon: null,
               last_seen: 1700000000,
               on_radio: false,
+              favorite: false,
               last_contacted: 1700000000,
               last_read_at: null,
               first_seen: 1700000000,
@@ -282,7 +381,7 @@ describe('ConversationPane', () => {
       />
     );
 
-    expect(screen.getByText(/A full identity profile is not yet available/i)).toBeInTheDocument();
+    expect(screen.getByText(/profile details.*haven't arrived yet/i)).toBeInTheDocument();
     expect(screen.getByTestId('message-input')).toBeInTheDocument();
   });
 
@@ -301,14 +400,15 @@ describe('ConversationPane', () => {
               name: null,
               type: 0,
               flags: 0,
-              last_path: null,
-              last_path_len: -1,
-              out_path_hash_mode: -1,
+              direct_path: null,
+              direct_path_len: -1,
+              direct_path_hash_mode: -1,
               last_advert: null,
               lat: null,
               lon: null,
               last_seen: 1700000000,
               on_radio: false,
+              favorite: false,
               last_contacted: 1700000000,
               last_read_at: null,
               first_seen: 1700000000,
@@ -318,7 +418,9 @@ describe('ConversationPane', () => {
       />
     );
 
-    expect(screen.getByText(/This conversation is read-only/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Sending is disabled until their identity is confirmed/i)
+    ).toBeInTheDocument();
     expect(screen.queryByTestId('message-input')).not.toBeInTheDocument();
   });
 });

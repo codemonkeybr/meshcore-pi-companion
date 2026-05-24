@@ -24,22 +24,28 @@ const mocks = vi.hoisted(() => ({
     requestTrace: vi.fn(),
     updateRadioConfig: vi.fn(),
     setPrivateKey: vi.fn(),
-    migratePreferences: vi.fn(),
   },
   toast: {
     success: vi.fn(),
     error: vi.fn(),
   },
+  push: {
+    isSupported: false,
+    isSubscribed: false,
+    subscribe: vi.fn<() => Promise<string | null>>(async () => null),
+    toggleConversation: vi.fn(async () => {}),
+    isConversationPushEnabled: vi.fn(() => false),
+  },
   hookFns: {
-    setMessages: vi.fn(),
-    fetchMessages: vi.fn(async () => {}),
     fetchOlderMessages: vi.fn(async () => {}),
-    addMessageIfNew: vi.fn(),
-    updateMessageAck: vi.fn(),
-    triggerReconcile: vi.fn(),
-    incrementUnread: vi.fn(),
+    observeMessage: vi.fn(() => ({ added: false, activeConversation: false })),
+    receiveMessageAck: vi.fn(),
+    reconcileOnReconnect: vi.fn(),
+    renameConversationMessages: vi.fn(),
+    removeConversationMessages: vi.fn(),
+    clearConversationMessages: vi.fn(),
+    recordMessageEvent: vi.fn(),
     markAllRead: vi.fn(),
-    trackNewMessage: vi.fn(),
     refreshUnreads: vi.fn(async () => {}),
   },
 }));
@@ -50,6 +56,25 @@ vi.mock('../api', () => ({
 
 vi.mock('../useWebSocket', () => ({
   useWebSocket: vi.fn(),
+}));
+
+vi.mock('../contexts/PushSubscriptionContext', () => ({
+  usePush: () => ({
+    isSupported: mocks.push.isSupported,
+    isSubscribed: mocks.push.isSubscribed,
+    currentSubscriptionId: mocks.push.isSubscribed ? 'sub-1' : null,
+    allSubscriptions: [],
+    pushConversations: [],
+    loading: false,
+    subscribe: mocks.push.subscribe,
+    unsubscribe: vi.fn(async () => {}),
+    toggleConversation: mocks.push.toggleConversation,
+    isConversationPushEnabled: mocks.push.isConversationPushEnabled,
+    deleteSubscription: vi.fn(async () => {}),
+    testPush: vi.fn(async () => {}),
+    refreshSubscriptions: vi.fn(async () => []),
+    refreshConversations: vi.fn(async () => {}),
+  }),
 }));
 
 vi.mock('../hooks', async (importOriginal) => {
@@ -63,36 +88,29 @@ vi.mock('../hooks', async (importOriginal) => {
       hasOlderMessages: false,
       hasNewerMessages: false,
       loadingNewer: false,
-      hasNewerMessagesRef: { current: false },
-      setMessages: mocks.hookFns.setMessages,
-      fetchMessages: mocks.hookFns.fetchMessages,
       fetchOlderMessages: mocks.hookFns.fetchOlderMessages,
       fetchNewerMessages: vi.fn(async () => {}),
       jumpToBottom: vi.fn(),
-      addMessageIfNew: mocks.hookFns.addMessageIfNew,
-      updateMessageAck: mocks.hookFns.updateMessageAck,
-      triggerReconcile: mocks.hookFns.triggerReconcile,
+      reloadCurrentConversation: vi.fn(),
+      observeMessage: mocks.hookFns.observeMessage,
+      receiveMessageAck: mocks.hookFns.receiveMessageAck,
+      reconcileOnReconnect: mocks.hookFns.reconcileOnReconnect,
+      renameConversationMessages: mocks.hookFns.renameConversationMessages,
+      removeConversationMessages: mocks.hookFns.removeConversationMessages,
+      clearConversationMessages: mocks.hookFns.clearConversationMessages,
     }),
     useUnreadCounts: () => ({
       unreadCounts: {},
       mentions: {},
       lastMessageTimes: {},
       unreadLastReadAts: {},
-      incrementUnread: mocks.hookFns.incrementUnread,
+      recordMessageEvent: mocks.hookFns.recordMessageEvent,
       renameConversationState: vi.fn(),
       markAllRead: mocks.hookFns.markAllRead,
-      trackNewMessage: mocks.hookFns.trackNewMessage,
       refreshUnreads: mocks.hookFns.refreshUnreads,
     }),
-    getMessageContentKey: () => 'content-key',
   };
 });
-
-vi.mock('../messageCache', () => ({
-  addMessage: vi.fn(),
-  updateAck: vi.fn(),
-  remove: vi.fn(),
-}));
 
 vi.mock('../components/StatusBar', () => ({
   StatusBar: ({
@@ -131,11 +149,12 @@ vi.mock('../components/SettingsModal', () => ({
   SettingsModal: ({ desktopSection }: { desktopSection?: string }) => (
     <div data-testid="settings-modal-section">{desktopSection ?? 'none'}</div>
   ),
-  SETTINGS_SECTION_ORDER: ['radio', 'local', 'database', 'bot'],
+  SETTINGS_SECTION_ORDER: ['radio', 'local', 'radio-app', 'database', 'bot'],
   SETTINGS_SECTION_LABELS: {
     radio: '📻 Radio',
     local: '🖥️ Local Configuration',
-    database: '🗄️ Database & Messaging',
+    'radio-app': '🗄️ Radio-App Management',
+    database: '🗄️ Database',
     bot: '🤖 Bot',
   },
 }));
@@ -171,7 +190,10 @@ vi.mock('../components/ui/sonner', () => ({
 
 vi.mock('../utils/urlHash', () => ({
   parseHashConversation: () => null,
+  parseHashSettingsSection: () => null,
   updateUrlHash: vi.fn(),
+  updateSettingsHash: vi.fn(),
+  getSettingsHash: (section: string) => `#settings/${section}`,
   getMapFocusHash: () => '#map',
 }));
 
@@ -192,11 +214,9 @@ const baseConfig = {
 
 const baseSettings = {
   max_radio_contacts: 200,
-  favorites: [] as Array<{ type: 'channel' | 'contact'; id: string }>,
   auto_decrypt_dm_on_advert: false,
-  sidebar_sort_order: 'recent' as const,
   last_message_times: {},
-  preferences_migrated: false,
+
   advert_interval: 0,
   last_advert_time: 0,
   flood_scope: '',
@@ -210,11 +230,16 @@ const publicChannel = {
   is_hashtag: false,
   on_radio: false,
   last_read_at: null,
+  favorite: false,
 };
 
 describe('App favorite toggle flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.push.isSupported = false;
+    mocks.push.isSubscribed = false;
+    mocks.push.subscribe.mockResolvedValue(null);
+    mocks.push.isConversationPushEnabled.mockReturnValue(false);
 
     mocks.api.getRadioConfig.mockResolvedValue(baseConfig);
     mocks.api.getSettings.mockResolvedValue({ ...baseSettings });
@@ -222,8 +247,9 @@ describe('App favorite toggle flow', () => {
     mocks.api.getChannels.mockResolvedValue([publicChannel]);
     mocks.api.getContacts.mockResolvedValue([]);
     mocks.api.toggleFavorite.mockResolvedValue({
-      ...baseSettings,
-      favorites: [{ type: 'channel', id: publicChannel.key }],
+      type: 'channel',
+      id: publicChannel.key,
+      favorite: true,
     });
   });
 
@@ -245,11 +271,8 @@ describe('App favorite toggle flow', () => {
     });
   });
 
-  it('rolls back favorite state by refetching settings on toggle failure', async () => {
+  it('rolls back favorite state on toggle failure', async () => {
     mocks.api.toggleFavorite.mockRejectedValue(new Error('toggle failed'));
-    mocks.api.getSettings
-      .mockResolvedValueOnce({ ...baseSettings }) // initial load
-      .mockResolvedValueOnce({ ...baseSettings }); // rollback refetch
 
     render(<App />);
 
@@ -261,10 +284,6 @@ describe('App favorite toggle flow', () => {
 
     await waitFor(() => {
       expect(mocks.api.toggleFavorite).toHaveBeenCalledWith('channel', publicChannel.key);
-    });
-
-    await waitFor(() => {
-      expect(mocks.api.getSettings).toHaveBeenCalledTimes(2);
     });
 
     await waitFor(() => {
@@ -294,7 +313,7 @@ describe('App favorite toggle flow', () => {
     await waitFor(() => {
       expect(mocks.api.getChannels).toHaveBeenCalledTimes(2);
     });
-    expect(mocks.hookFns.triggerReconcile).toHaveBeenCalledTimes(1);
+    expect(mocks.hookFns.reconcileOnReconnect).toHaveBeenCalledTimes(1);
     expect(mocks.hookFns.refreshUnreads).toHaveBeenCalledTimes(1);
   });
 
@@ -324,5 +343,45 @@ describe('App favorite toggle flow', () => {
       expect(screen.getByRole('button', { name: 'Radio & Config' })).toBeInTheDocument();
       expect(screen.queryByTestId('settings-modal-section')).not.toBeInTheDocument();
     });
+  });
+
+  it('subscribes this browser before enabling web push for a conversation', async () => {
+    mocks.push.isSupported = true;
+    mocks.push.isSubscribed = false;
+    mocks.push.subscribe.mockResolvedValue('sub-1');
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Notification settings' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notification settings' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /web push/i }));
+
+    await waitFor(() => {
+      expect(mocks.push.subscribe).toHaveBeenCalledTimes(1);
+      expect(mocks.push.toggleConversation).toHaveBeenCalledWith(`channel-${publicChannel.key}`);
+    });
+  });
+
+  it('does not enable web push when subscription setup fails', async () => {
+    mocks.push.isSupported = true;
+    mocks.push.isSubscribed = false;
+    mocks.push.subscribe.mockResolvedValue(null);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Notification settings' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notification settings' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /web push/i }));
+
+    await waitFor(() => {
+      expect(mocks.push.subscribe).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.push.toggleConversation).not.toHaveBeenCalled();
   });
 });

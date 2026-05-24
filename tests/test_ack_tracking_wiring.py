@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from meshcore import EventType
 
-from app.backends.client_backend import ClientBackend
+import app.services.message_send as message_send_service
 from app.models import SendDirectMessageRequest
 from app.radio import radio_manager
 from app.repository import ContactRepository
@@ -20,11 +20,17 @@ from app.routers.messages import send_direct_message
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._backend
+    prev = radio_manager._meshcore
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._backend = prev
+    radio_manager._meshcore = prev
     radio_manager._operation_lock = prev_lock
+
+
+@pytest.fixture(autouse=True)
+def _disable_background_dm_retries(monkeypatch):
+    monkeypatch.setattr(message_send_service, "DM_SEND_MAX_ATTEMPTS", 1)
+    yield
 
 
 def _make_mc(name="TestNode"):
@@ -43,8 +49,9 @@ async def _insert_contact(public_key, name="Alice"):
             "name": name,
             "type": 0,
             "flags": 0,
-            "last_path": None,
-            "last_path_len": -1,
+            "direct_path": None,
+            "direct_path_len": -1,
+            "direct_path_hash_mode": -1,
             "last_advert": None,
             "lat": None,
             "lon": None,
@@ -76,8 +83,8 @@ class TestDMAckTrackingWiring:
         await _insert_contact(pub_key)
 
         with (
-            patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -108,8 +115,8 @@ class TestDMAckTrackingWiring:
         await _insert_contact(pub_key)
 
         with (
-            patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -137,8 +144,8 @@ class TestDMAckTrackingWiring:
         await _insert_contact(pub_key)
 
         with (
-            patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):
@@ -165,8 +172,8 @@ class TestDMAckTrackingWiring:
         await _insert_contact(pub_key)
 
         with (
-            patch("app.routers.messages.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.messages.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.messages.track_pending_ack") as mock_track,
             patch("app.routers.messages.broadcast_event"),
         ):

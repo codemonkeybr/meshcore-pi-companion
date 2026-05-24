@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import importlib.metadata
 import json
 import logging
 import ssl
@@ -21,26 +20,27 @@ from datetime import datetime
 from typing import Any, Protocol
 
 import aiomqtt
-import nacl.bindings
 
 from app.fanout.mqtt_base import BaseMqttPublisher
+from app.keystore import ed25519_sign_expanded
 from app.path_utils import parse_packet_envelope, split_path_hex
+from app.version_info import get_app_build_info
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BROKER = "mqtt-us-v1.letsmesh.net"
 _DEFAULT_PORT = 443  # Community protocol uses WSS on port 443 by default
-_CLIENT_ID = "MeshCorePiCompanion (github.com/codemonkeybr/meshcore-pi-companion)"
-# Proactive JWT renewal: reconnect 1 hour before the 24h token expires
-_TOKEN_LIFETIME = 86400  # 24 hours (must match _generate_jwt_token exp)
-_TOKEN_RENEWAL_THRESHOLD = _TOKEN_LIFETIME - 3600  # 23 hours
+_CLIENT_ID = "RemoteTerm"
+
+# JWT lifetime kept under 1 hour for compatibility with services that reject
+# tokens with exp > 3600s from iat (e.g. Waev.app).  Proactive renewal
+# reconnects 5 minutes before expiry.
+_TOKEN_LIFETIME = 3300  # 55 minutes
+_TOKEN_RENEWAL_THRESHOLD = _TOKEN_LIFETIME - 300  # 50 minutes
 
 # Periodic status republish interval (matches meshcore-packet-capture reference)
 _STATS_REFRESH_INTERVAL = 300  # 5 minutes
 _STATS_MIN_CACHE_SECS = 60  # Don't re-fetch stats within 60s
-
-# Ed25519 group order
-_L = 2**252 + 27742317777372353535851937790883648493
 
 # Route type mapping: bottom 2 bits of first byte
 _ROUTE_MAP = {0: "F", 1: "F", 2: "D", 3: "T"}
@@ -60,35 +60,13 @@ class CommunityMqttSettings(Protocol):
     community_mqtt_password: str
     community_mqtt_iata: str
     community_mqtt_email: str
-    community_mqtt_owner: str
     community_mqtt_token_audience: str
+    community_mqtt_websocket_path: str
 
 
 def _base64url_encode(data: bytes) -> str:
     """Base64url encode without padding."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _ed25519_sign_expanded(
-    message: bytes, scalar: bytes, prefix: bytes, public_key: bytes
-) -> bytes:
-    """Sign a message using MeshCore's expanded Ed25519 key format.
-
-    MeshCore stores 64-byte "orlp" format keys: scalar(32) || prefix(32).
-    Standard Ed25519 libraries expect seed format and would re-SHA-512 the key.
-    This performs the signing manually using the already-expanded key material.
-
-    Port of meshcore-packet-capture's ed25519_sign_with_expanded_key().
-    """
-    # r = SHA-512(prefix || message) mod L
-    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % _L
-    # R = r * B (base point multiplication)
-    R = nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(r.to_bytes(32, "little"))
-    # k = SHA-512(R || public_key || message) mod L
-    k = int.from_bytes(hashlib.sha512(R + public_key + message).digest(), "little") % _L
-    # s = (r + k * scalar) mod L
-    s = (r + k * int.from_bytes(scalar, "little")) % _L
-    return R + s.to_bytes(32, "little")
 
 
 def _generate_jwt_token(
@@ -97,49 +75,39 @@ def _generate_jwt_token(
     *,
     audience: str = _DEFAULT_BROKER,
     email: str = "",
-) -> tuple[str, str]:
-    """Generate a JWT token for community MQTT (LetsMesh) authentication.
+) -> str:
+    """Generate a JWT token for community MQTT authentication.
 
-    Returns (token, pubkey_hex) so the caller can use the same pubkey for the
-    MQTT username (v1_{pubkey_hex}). Payload: publicKey, iat, exp, aud, owner, client.
-    Signed with standard Ed25519 when key is 32-byte seed (SPI), else MeshCore expanded.
+    Creates a token with Ed25519 signature using MeshCore's expanded key format.
+    Token format: header_b64.payload_b64.signature_hex
+
+    Optional ``email`` embeds a node-claiming identity so the community
+    aggregator can associate this radio with an owner.
     """
-    from nacl.signing import SigningKey
-
     header = {"alg": "Ed25519", "typ": "JWT"}
     now = int(time.time())
-
-    if len(private_key) == 32:
-        signer = SigningKey(private_key)
-        pubkey_for_jwt = signer.verify_key.encode()
-        pubkey_hex = pubkey_for_jwt.hex().upper()
-    else:
-        pubkey_hex = public_key.hex().upper()
-        pubkey_for_jwt = public_key
-
+    pubkey_hex = public_key.hex().upper()
     payload: dict[str, object] = {
         "publicKey": pubkey_hex,
         "iat": now,
         "exp": now + _TOKEN_LIFETIME,
         "aud": audience,
         "owner": pubkey_hex,
-        "client": _CLIENT_ID,
+        "client": _get_client_version(),
     }
     if email:
         payload["email"] = email
+
     header_b64 = _base64url_encode(json.dumps(header, separators=(",", ":")).encode())
     payload_b64 = _base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
+
     signing_input = f"{header_b64}.{payload_b64}".encode()
 
-    if len(private_key) == 32:
-        signature = signer.sign(signing_input).signature
-    else:
-        scalar = private_key[:32]
-        prefix = private_key[32:]
-        signature = _ed25519_sign_expanded(signing_input, scalar, prefix, pubkey_for_jwt)
+    scalar = private_key[:32]
+    prefix = private_key[32:]
+    signature = ed25519_sign_expanded(signing_input, scalar, prefix, public_key)
 
-    token = f"{header_b64}.{payload_b64}.{signature.hex()}"
-    return (token, pubkey_hex)
+    return f"{header_b64}.{payload_b64}.{signature.hex()}"
 
 
 def _calculate_packet_hash(raw_bytes: bytes) -> str:
@@ -199,22 +167,30 @@ def _decode_packet_fields(raw_bytes: bytes) -> tuple[str, str, str, list[str], i
         return route, packet_type, payload_len, path_values, payload_type
 
 
-def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: str) -> dict:
-    """Convert a RawPacketBroadcast dict to meshcore-packet-capture format."""
+def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: str) -> dict | None:
+    """Convert a RawPacketBroadcast dict to meshcore-packet-capture format.
+
+    Returns ``None`` when the packet cannot be decoded — callers should skip
+    publishing rather than forwarding malformed data.
+    """
     raw_hex = data.get("data", "")
     raw_bytes = bytes.fromhex(raw_hex) if raw_hex else b""
 
     route, packet_type, payload_len, path_values, _payload_type = _decode_packet_fields(raw_bytes)
 
+    if route == "U":
+        return None
+
     # Reference format uses local "now" timestamp and derived time/date fields.
     current_time = datetime.now()
     ts_str = current_time.isoformat()
 
-    # SNR/RSSI are always strings in reference output.
+    # Keep numeric telemetry numeric so downstream analyzers can ingest it.
+    # Preserve the existing "Unknown" fallback for missing values.
     snr_val = data.get("snr")
     rssi_val = data.get("rssi")
-    snr = str(snr_val) if snr_val is not None else "Unknown"
-    rssi = str(rssi_val) if rssi_val is not None else "Unknown"
+    snr: float | str = float(snr_val) if snr_val is not None else "Unknown"
+    rssi: int | str = int(rssi_val) if rssi_val is not None else "Unknown"
 
     packet_hash = _calculate_packet_hash(raw_bytes)
 
@@ -225,16 +201,14 @@ def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: s
         "type": "PACKET",
         "direction": "rx",
         "time": current_time.strftime("%H:%M:%S"),
-        "date": current_time.strftime("%-d/%-m/%Y"),
+        "date": current_time.strftime("%d/%m/%Y"),
         "len": str(len(raw_bytes)),
         "packet_type": packet_type,
         "route": route,
         "payload_len": payload_len,
-        "raw": raw_hex,
+        "raw": raw_hex.upper(),
         "SNR": snr,
         "RSSI": rssi,
-        "score": "0",
-        "duration": "0",
         "hash": packet_hash,
     }
 
@@ -259,8 +233,8 @@ def _build_radio_info() -> str:
     from app.services.radio_runtime import radio_runtime as radio_manager
 
     try:
-        if radio_manager.backend and radio_manager.backend.self_info:
-            info = radio_manager.backend.self_info
+        if radio_manager.meshcore and radio_manager.meshcore.self_info:
+            info = radio_manager.meshcore.self_info
             freq = info.get("radio_freq", 0)
             bw = info.get("radio_bw", 0)
             sf = info.get("radio_sf", 0)
@@ -272,18 +246,16 @@ def _build_radio_info() -> str:
 
 
 def _get_client_version() -> str:
-    """Return a client version string like ``'RemoteTerm 2.4.0'``."""
-    try:
-        version = importlib.metadata.version("remoteterm-meshcore")
-        return f"RemoteTerm {version}"
-    except Exception:
-        return "RemoteTerm unknown"
+    """Return the canonical client/version identifier for community MQTT."""
+    build = get_app_build_info()
+    commit_hash = build.commit_hash or "unknown"
+    return f"{_CLIENT_ID}/{build.version}-{commit_hash}"
 
 
 class CommunityMqttPublisher(BaseMqttPublisher):
     """Manages the community MQTT connection and publishes raw packets."""
 
-    _backoff_max = 60
+    _backoff_max = 3600
     _log_prefix = "Community MQTT"
     _not_configured_timeout: float | None = 30
 
@@ -347,6 +319,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         public_key = get_public_key()
         assert public_key is not None  # guaranteed by _pre_connect
 
+        pubkey_hex = public_key.hex().upper()
         broker_host = s.community_mqtt_broker_host or _DEFAULT_BROKER
         broker_port = s.community_mqtt_broker_port or _DEFAULT_PORT
         transport = s.community_mqtt_transport or "websockets"
@@ -354,20 +327,6 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         tls_verify = bool(s.community_mqtt_tls_verify)
         auth_mode = s.community_mqtt_auth_mode or "token"
         secure_connection = use_tls and tls_verify
-
-        if auth_mode == "token":
-            assert private_key is not None
-            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
-            email_val = (s.community_mqtt_email or "").strip() if secure_connection else ""
-            jwt_token, jwt_pubkey_hex = _generate_jwt_token(
-                private_key,
-                public_key,
-                audience=token_audience,
-                email=email_val,
-            )
-            pubkey_hex = jwt_pubkey_hex
-        else:
-            pubkey_hex = public_key.hex().upper()
 
         tls_context: ssl.SSLContext | None = None
         if use_tls:
@@ -377,8 +336,8 @@ class CommunityMqttPublisher(BaseMqttPublisher):
                 tls_context.verify_mode = ssl.CERT_NONE
 
         device_name = ""
-        if radio_manager.backend and radio_manager.backend.self_info:
-            device_name = radio_manager.backend.self_info.get("name", "")
+        if radio_manager.meshcore and radio_manager.meshcore.self_info:
+            device_name = radio_manager.meshcore.self_info.get("name", "")
 
         status_topic = _build_status_topic(s, pubkey_hex)
         offline_payload = json.dumps(
@@ -398,13 +357,21 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             "will": aiomqtt.Will(status_topic, offline_payload, retain=True),
         }
         if auth_mode == "token":
+            assert private_key is not None
+            token_audience = (s.community_mqtt_token_audience or "").strip() or broker_host
+            jwt_token = _generate_jwt_token(
+                private_key,
+                public_key,
+                audience=token_audience,
+                email=(s.community_mqtt_email or "") if secure_connection else "",
+            )
             kwargs["username"] = f"v1_{pubkey_hex}"
             kwargs["password"] = jwt_token
         elif auth_mode == "password":
             kwargs["username"] = s.community_mqtt_username or None
             kwargs["password"] = s.community_mqtt_password or None
         if transport == "websockets":
-            kwargs["websocket_path"] = "/"
+            kwargs["websocket_path"] = (s.community_mqtt_websocket_path or "").strip() or "/"
         return kwargs
 
     def _on_connected(self, settings: object) -> tuple[str, str]:
@@ -426,7 +393,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             async with radio_manager.radio_operation(
                 "community_stats_device_info", blocking=False
             ) as mc:
-                event = await mc.send_device_query()
+                event = await mc.commands.send_device_query()
                 from meshcore.events import EventType
 
                 if event.type == EventType.DEVICE_INFO:
@@ -475,7 +442,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
 
                 result: dict[str, Any] = {}
 
-                core_event = await mc.get_stats_core()
+                core_event = await mc.commands.get_stats_core()
                 if core_event.type == EventType.ERROR:
                     logger.info("Community MQTT: firmware does not support stats commands")
                     self._stats_supported = False
@@ -483,7 +450,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
                 if core_event.type == EventType.STATS_CORE:
                     result.update(core_event.payload)
 
-                radio_event = await mc.get_stats_radio()
+                radio_event = await mc.commands.get_stats_radio()
                 if radio_event.type == EventType.ERROR:
                     logger.info("Community MQTT: firmware does not support stats commands")
                     self._stats_supported = False
@@ -517,10 +484,24 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         pubkey_hex = public_key.hex().upper()
 
         device_name = ""
-        if radio_manager.backend and radio_manager.backend.self_info:
-            device_name = radio_manager.backend.self_info.get("name", "")
+        if radio_manager.meshcore and radio_manager.meshcore.self_info:
+            device_name = radio_manager.meshcore.self_info.get("name", "")
 
-        device_info = await self._fetch_device_info()
+        # Prefer the always-fresh radio_manager fields (populated on every reconnect by
+        # radio_lifecycle) over the per-module _cached_device_info, which was only
+        # cleared on module restart and therefore served stale firmware versions after
+        # a radio firmware update.  Fall back to _fetch_device_info() for older firmware
+        # where device_info_loaded is False.
+        if radio_manager.device_info_loaded:
+            raw_ver = radio_manager.firmware_version or "unknown"
+            fw_build = radio_manager.firmware_build or ""
+            fw_str = f"{raw_ver} (Build: {fw_build})" if fw_build else f"{raw_ver}"
+            device_info = {
+                "model": radio_manager.device_model or "unknown",
+                "firmware_version": fw_str,
+            }
+        else:
+            device_info = await self._fetch_device_info()
         stats = await self._fetch_stats() if refresh_stats else self._cached_stats
 
         status_topic = _build_status_topic(settings, pubkey_hex)
@@ -581,7 +562,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
             self._version_event.clear()
             try:
                 await asyncio.wait_for(self._version_event.wait(), timeout=30)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             return False
         return True

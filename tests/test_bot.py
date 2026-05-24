@@ -709,7 +709,7 @@ class TestBotMessageRateLimiting:
             patch(
                 "app.routers.messages.send_direct_message",
                 new_callable=AsyncMock,
-                side_effect=HTTPException(status_code=500, detail="Send failed"),
+                side_effect=HTTPException(status_code=422, detail="Send failed"),
             ),
         ):
             await process_bot_response(

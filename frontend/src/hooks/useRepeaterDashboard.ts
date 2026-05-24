@@ -15,6 +15,11 @@ import type {
   RepeaterLppTelemetryResponse,
   CommandResponse,
 } from '../types';
+import {
+  buildServerLoginAttemptFromError,
+  buildServerLoginAttemptFromResponse,
+  type ServerLoginAttemptState,
+} from '../utils/serverLoginState';
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
@@ -41,6 +46,7 @@ interface PaneData {
 interface RepeaterDashboardCacheEntry {
   loggedIn: boolean;
   loginError: string | null;
+  lastLoginAttempt: ServerLoginAttemptState | null;
   paneData: PaneData;
   paneStates: Record<PaneName, PaneState>;
   consoleHistory: ConsoleEntry[];
@@ -76,6 +82,17 @@ function createInitialPaneData(): PaneData {
 
 const repeaterDashboardCache = new Map<string, RepeaterDashboardCacheEntry>();
 
+function getLoginToastTitle(status: string): string {
+  switch (status) {
+    case 'timeout':
+      return 'Login confirmation not heard';
+    case 'error':
+      return 'Login not confirmed';
+    default:
+      return 'Repeater login not confirmed';
+  }
+}
+
 function clonePaneData(data: PaneData): PaneData {
   return { ...data };
 }
@@ -108,6 +125,7 @@ function getCachedState(publicKey: string | null): RepeaterDashboardCacheEntry |
   return {
     loggedIn: cached.loggedIn,
     loginError: cached.loginError,
+    lastLoginAttempt: cached.lastLoginAttempt,
     paneData: clonePaneData(cached.paneData),
     paneStates: normalizePaneStates(cached.paneStates),
     consoleHistory: cloneConsoleHistory(cached.consoleHistory),
@@ -119,6 +137,7 @@ function cacheState(publicKey: string, entry: RepeaterDashboardCacheEntry) {
   repeaterDashboardCache.set(publicKey, {
     loggedIn: entry.loggedIn,
     loginError: entry.loginError,
+    lastLoginAttempt: entry.lastLoginAttempt,
     paneData: clonePaneData(entry.paneData),
     paneStates: normalizePaneStates(entry.paneStates),
     consoleHistory: cloneConsoleHistory(entry.consoleHistory),
@@ -162,6 +181,7 @@ export interface UseRepeaterDashboardResult {
   loggedIn: boolean;
   loginLoading: boolean;
   loginError: string | null;
+  lastLoginAttempt: ServerLoginAttemptState | null;
   paneData: PaneData;
   paneStates: Record<PaneName, PaneState>;
   consoleHistory: ConsoleEntry[];
@@ -177,8 +197,13 @@ export interface UseRepeaterDashboardResult {
   syncClock: () => Promise<void>;
 }
 
+interface UseRepeaterDashboardOptions {
+  hasAdvertLocation?: boolean;
+}
+
 export function useRepeaterDashboard(
-  activeConversation: Conversation | null
+  activeConversation: Conversation | null,
+  options: UseRepeaterDashboardOptions = {}
 ): UseRepeaterDashboardResult {
   const conversationId =
     activeConversation && activeConversation.type === 'contact' ? activeConversation.id : null;
@@ -187,6 +212,9 @@ export function useRepeaterDashboard(
   const [loggedIn, setLoggedIn] = useState(cachedState?.loggedIn ?? false);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(cachedState?.loginError ?? null);
+  const [lastLoginAttempt, setLastLoginAttempt] = useState<ServerLoginAttemptState | null>(
+    cachedState?.lastLoginAttempt ?? null
+  );
 
   const [paneData, setPaneData] = useState<PaneData>(
     cachedState?.paneData ?? createInitialPaneData
@@ -227,11 +255,20 @@ export function useRepeaterDashboard(
     cacheState(conversationId, {
       loggedIn,
       loginError,
+      lastLoginAttempt,
       paneData,
       paneStates,
       consoleHistory,
     });
-  }, [consoleHistory, conversationId, loggedIn, loginError, paneData, paneStates]);
+  }, [
+    consoleHistory,
+    conversationId,
+    loggedIn,
+    loginError,
+    lastLoginAttempt,
+    paneData,
+    paneStates,
+  ]);
 
   useEffect(() => {
     paneDataRef.current = paneData;
@@ -251,17 +288,29 @@ export function useRepeaterDashboard(
       const publicKey = getPublicKey();
       if (!publicKey) return;
       const conversationId = publicKey;
+      const method = password.trim().length > 0 ? 'password' : 'blank';
 
       setLoginLoading(true);
       setLoginError(null);
       try {
-        await api.repeaterLogin(publicKey, password);
+        const result = await api.repeaterLogin(publicKey, password);
         if (activeIdRef.current !== conversationId) return;
+        setLastLoginAttempt(buildServerLoginAttemptFromResponse(method, result, 'repeater'));
         setLoggedIn(true);
+        if (!result.authenticated) {
+          const msg = result.message ?? 'Repeater login was not confirmed';
+          setLoginError(msg);
+          toast.error(getLoginToastTitle(result.status), { description: msg });
+        }
       } catch (err) {
         if (activeIdRef.current !== conversationId) return;
         const msg = err instanceof Error ? err.message : 'Login failed';
+        setLastLoginAttempt(buildServerLoginAttemptFromError(method, msg, 'repeater'));
+        setLoggedIn(true);
         setLoginError(msg);
+        toast.error('Login request failed', {
+          description: `${msg}. The dashboard is still available, but repeater operations may fail until a login succeeds.`,
+        });
       } finally {
         if (activeIdRef.current === conversationId) {
           setLoginLoading(false);
@@ -281,7 +330,7 @@ export function useRepeaterDashboard(
       if (!publicKey) return;
       const conversationId = publicKey;
 
-      if (pane === 'neighbors') {
+      if (pane === 'neighbors' && !options.hasAdvertLocation) {
         const nodeInfoState = paneStatesRef.current.nodeInfo;
         const nodeInfoData = paneDataRef.current.nodeInfo;
         const needsNodeInfoPrefetch =
@@ -365,7 +414,7 @@ export function useRepeaterDashboard(
         }
       }
     },
-    [getPublicKey]
+    [getPublicKey, options.hasAdvertLocation]
   );
 
   const loadAll = useCallback(async () => {
@@ -450,6 +499,7 @@ export function useRepeaterDashboard(
     loggedIn,
     loginLoading,
     loginError,
+    lastLoginAttempt,
     paneData,
     paneStates,
     consoleHistory,

@@ -1,0 +1,76 @@
+name: Publish AUR package
+
+# Pushes the contents of pkg/aur/ to the remoteterm-meshcore AUR repository
+# whenever a GitHub release is published. Can also be triggered manually for
+# testing or out-of-band republishes.
+#
+# Required secrets:
+#   AUR_SSH_PRIVATE_KEY  Private SSH key registered with the AUR maintainer
+#                        account that owns the remoteterm-meshcore package.
+#   AUR_COMMIT_EMAIL     Email used for the AUR git commit identity.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (no v prefix, e.g. 3.9.1)'
+        required: true
+
+concurrency:
+  # Serialize publishes so a fast back-to-back release sequence cannot race
+  # two pushes against the AUR repo. The later one wins by virtue of being
+  # the final state.
+  group: publish-aur
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish-aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version from event
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing AUR package for version $VERSION"
+
+      - name: Stamp pkgver into PKGBUILD
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/" pkg/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" pkg/aur/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        with:
+          pkgname: remoteterm-meshcore
+          pkgbuild: pkg/aur/PKGBUILD
+          assets: |
+            pkg/aur/remoteterm-meshcore.install
+            pkg/aur/remoteterm-meshcore.service
+            pkg/aur/remoteterm-meshcore.sysusers
+            pkg/aur/remoteterm-meshcore.tmpfiles
+            pkg/aur/remoteterm.env
+          commit_username: jackkingsman
+          commit_email: ${{ secrets.AUR_COMMIT_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.version.outputs.version }}"
+          # Recompute sha256sums from the live release tarball + the bundled
+          # service/env files. The committed PKGBUILD has SKIP placeholders.
+          updpkgsums: true
+          # Validate the PKGBUILD parses and sources download, but skip the
+          # actual build (which would run uv sync + npm install for several
+          # minutes of CI time on every release).
+          test: true
+          test_flags: --clean --cleanbuild --nodeps --nobuild

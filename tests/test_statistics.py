@@ -1,6 +1,8 @@
 """Tests for the statistics repository and endpoint."""
 
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +31,9 @@ class TestStatisticsEmpty:
         assert result["repeaters_heard"]["last_hour"] == 0
         assert result["repeaters_heard"]["last_24_hours"] == 0
         assert result["repeaters_heard"]["last_week"] == 0
+        assert result["known_channels_active"]["last_hour"] == 0
+        assert result["known_channels_active"]["last_24_hours"] == 0
+        assert result["known_channels_active"]["last_week"] == 0
         assert result["path_hash_width_24h"] == {
             "total_packets": 0,
             "single_byte": 0,
@@ -38,6 +43,7 @@ class TestStatisticsEmpty:
             "double_byte_pct": 0.0,
             "triple_byte_pct": 0.0,
         }
+        assert result["packets_per_hour_72h"] == []
 
 
 class TestStatisticsCounts:
@@ -256,6 +262,51 @@ class TestActivityWindows:
         assert result["repeaters_heard"]["last_24_hours"] == 1
         assert result["repeaters_heard"]["last_week"] == 1
 
+    @pytest.mark.asyncio
+    async def test_known_channels_active_windows(self, test_db):
+        """Known channels are counted by distinct active keys in each time window."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        known_1h = "AA" * 16
+        known_24h = "BB" * 16
+        known_7d = "CC" * 16
+        unknown_key = "DD" * 16
+
+        await conn.execute("INSERT INTO channels (key, name) VALUES (?, ?)", (known_1h, "chan-1h"))
+        await conn.execute(
+            "INSERT INTO channels (key, name) VALUES (?, ?)", (known_24h, "chan-24h")
+        )
+        await conn.execute("INSERT INTO channels (key, name) VALUES (?, ?)", (known_7d, "chan-7d"))
+
+        await conn.execute(
+            "INSERT INTO messages (type, conversation_key, text, received_at) VALUES (?, ?, ?, ?)",
+            ("CHAN", known_1h, "recent-1", now - 1200),
+        )
+        await conn.execute(
+            "INSERT INTO messages (type, conversation_key, text, received_at) VALUES (?, ?, ?, ?)",
+            ("CHAN", known_1h, "recent-2", now - 600),
+        )
+        await conn.execute(
+            "INSERT INTO messages (type, conversation_key, text, received_at) VALUES (?, ?, ?, ?)",
+            ("CHAN", known_24h, "day-old", now - 43200),
+        )
+        await conn.execute(
+            "INSERT INTO messages (type, conversation_key, text, received_at) VALUES (?, ?, ?, ?)",
+            ("CHAN", known_7d, "week-old", now - 259200),
+        )
+        await conn.execute(
+            "INSERT INTO messages (type, conversation_key, text, received_at) VALUES (?, ?, ?, ?)",
+            ("CHAN", unknown_key, "unknown", now - 600),
+        )
+        await conn.commit()
+
+        result = await StatisticsRepository.get_all()
+
+        assert result["known_channels_active"]["last_hour"] == 1
+        assert result["known_channels_active"]["last_24_hours"] == 2
+        assert result["known_channels_active"]["last_week"] == 3
+
 
 class TestPathHashWidthStats:
     @pytest.mark.asyncio
@@ -299,3 +350,113 @@ class TestPathHashWidthStats:
         assert breakdown["single_byte_pct"] == pytest.approx(100 / 3, rel=1e-3)
         assert breakdown["double_byte_pct"] == pytest.approx(100 / 3, rel=1e-3)
         assert breakdown["triple_byte_pct"] == pytest.approx(100 / 3, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_path_hash_width_scan_fetches_all_then_buckets(self, test_db):
+        """Hash-width stats should fetchall() then bucket synchronously.
+
+        Uses real DB rows + a patched parser so it exercises the lock-aware
+        readonly path. Mocking ``conn.execute`` on the pre-refactor code no
+        longer reflects the actual call pattern (we use ``async with``).
+        """
+
+        now = int(time.time())
+        # Seed three raw packets in the last 24h with arbitrary distinguishing bytes.
+        for i, data in enumerate((b"a", b"b", b"c")):
+            await test_db.conn.execute(
+                "INSERT INTO raw_packets (timestamp, data) VALUES (?, ?)",
+                (now - (i + 1), data),
+            )
+        await test_db.conn.commit()
+
+        def fake_parse(raw_packet: bytes):
+            hash_sizes = {
+                b"a": 1,
+                b"b": 2,
+                b"c": 3,
+            }
+            hash_size = hash_sizes.get(raw_packet)
+            if hash_size is None:
+                return None
+            return SimpleNamespace(hash_size=hash_size)
+
+        with patch("app.path_utils.parse_packet_envelope", side_effect=fake_parse):
+            breakdown = await StatisticsRepository._path_hash_width_24h()
+
+        assert breakdown["total_packets"] == 3
+        assert breakdown["single_byte"] == 1
+        assert breakdown["double_byte"] == 1
+        assert breakdown["triple_byte"] == 1
+
+
+class TestPacketsPerHour:
+    @pytest.mark.asyncio
+    async def test_buckets_packets_by_hour(self, test_db):
+        """Packets within 72h are bucketed by hour."""
+        now = int(time.time())
+        hour_start = (now // 3600) * 3600
+        conn = test_db.conn
+
+        # 3 packets in the current hour, 1 in the previous hour
+        for i in range(3):
+            await conn.execute(
+                "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+                (hour_start + i, b"\x01", bytes([i]) * 32),
+            )
+        await conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (hour_start - 1800, b"\x02", b"\xaa" * 32),
+        )
+        # 1 packet outside the 72h window — should be excluded
+        await conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (now - 260000, b"\x03", b"\xbb" * 32),
+        )
+        await conn.commit()
+
+        result = await StatisticsRepository.get_all()
+        buckets = result["packets_per_hour_72h"]
+
+        assert len(buckets) == 2
+        by_ts = {b["timestamp"]: b["count"] for b in buckets}
+        assert by_ts[hour_start] == 3
+        assert by_ts[hour_start - 3600] == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_recent_packets(self, test_db):
+        """Returns empty list when all packets are older than 72h."""
+        now = int(time.time())
+        conn = test_db.conn
+        await conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (now - 300000, b"\x01", b"\x01" * 32),
+        )
+        await conn.commit()
+
+        result = await StatisticsRepository.get_all()
+        assert result["packets_per_hour_72h"] == []
+
+
+class TestStatisticsEndpoint:
+    @pytest.mark.asyncio
+    async def test_statistics_endpoint_includes_noise_floor_history(self, test_db, client):
+        noise_floor_history = {
+            "sample_interval_seconds": 60,
+            "coverage_seconds": 1800,
+            "latest_noise_floor_dbm": -119,
+            "latest_timestamp": 1_700_000_000,
+            "samples": [
+                {"timestamp": 1_699_998_200, "noise_floor_dbm": -121},
+                {"timestamp": 1_700_000_000, "noise_floor_dbm": -119},
+            ],
+        }
+
+        with patch(
+            "app.routers.statistics.get_noise_floor_history",
+            return_value=noise_floor_history,
+        ):
+            response = await client.get("/api/statistics")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["noise_floor_24h"] == noise_floor_history

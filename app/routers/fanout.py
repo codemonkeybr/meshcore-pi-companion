@@ -9,14 +9,23 @@ import string
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import settings as server_settings
 from app.fanout.bot_exec import _analyze_bot_signature
+from app.fanout.manager import fanout_manager
 from app.repository.fanout import FanoutConfigRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fanout", tags=["fanout"])
 
-_VALID_TYPES = {"mqtt_private", "mqtt_community", "bot", "webhook", "apprise", "sqs"}
+_VALID_TYPES = {
+    "mqtt_private",
+    "mqtt_community",
+    "mqtt_ha",
+    "bot",
+    "webhook",
+    "apprise",
+    "sqs",
+    "map_upload",
+}
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 _DEFAULT_COMMUNITY_MQTT_TOPIC_TEMPLATE = "meshcore/{IATA}/{PUBLIC_KEY}/packets"
@@ -76,6 +85,30 @@ class FanoutConfigUpdate(BaseModel):
     config: dict | None = Field(default=None, description="Updated config blob")
     scope: dict | None = Field(default=None, description="Updated scope controls")
     enabled: bool | None = Field(default=None, description="Enable/disable toggle")
+
+
+def _validate_and_normalize_config(config_type: str, config: dict) -> dict:
+    """Validate a config blob and return the canonical persisted form."""
+    normalized = dict(config)
+
+    if config_type == "mqtt_private":
+        _validate_mqtt_private_config(normalized)
+    elif config_type == "mqtt_community":
+        _validate_mqtt_community_config(normalized)
+    elif config_type == "bot":
+        _validate_bot_config(normalized)
+    elif config_type == "webhook":
+        _validate_webhook_config(normalized)
+    elif config_type == "apprise":
+        _validate_apprise_config(normalized)
+    elif config_type == "sqs":
+        _validate_sqs_config(normalized)
+    elif config_type == "map_upload":
+        _validate_map_upload_config(normalized)
+    elif config_type == "mqtt_ha":
+        _validate_mqtt_ha_config(normalized)
+
+    return normalized
 
 
 def _validate_mqtt_private_config(config: dict) -> None:
@@ -226,6 +259,25 @@ def _validate_apprise_config(config: dict) -> None:
     if not urls or not urls.strip():
         raise HTTPException(status_code=400, detail="At least one Apprise URL is required")
 
+    from app.fanout.apprise_mod import FORMAT_VARIABLES, _apply_format
+
+    dummy_vars: dict[str, str] = dict.fromkeys(FORMAT_VARIABLES, "test")
+    for field in ("body_format_dm", "body_format_channel"):
+        value = config.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"{field} must be a string")
+        if isinstance(value, str) and value.strip():
+            try:
+                _apply_format(value, dummy_vars)
+            except Exception:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid format string in {field}"
+                ) from None
+
+    markdown_format = config.get("markdown_format")
+    if markdown_format is not None:
+        config["markdown_format"] = bool(markdown_format)
+
 
 def _validate_webhook_config(config: dict) -> None:
     """Validate webhook config blob."""
@@ -275,13 +327,48 @@ def _validate_sqs_config(config: dict) -> None:
         )
 
 
+def _validate_map_upload_config(config: dict) -> None:
+    """Validate and normalize map_upload config blob."""
+    api_url = str(config.get("api_url", "")).strip()
+    if api_url and not api_url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="api_url must start with http:// or https://",
+        )
+    config["api_url"] = api_url
+    config["dry_run"] = bool(config.get("dry_run", True))
+    config["geofence_enabled"] = bool(config.get("geofence_enabled", False))
+    try:
+        radius = float(config.get("geofence_radius_km", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="geofence_radius_km must be a number") from None
+    if radius < 0:
+        raise HTTPException(status_code=400, detail="geofence_radius_km must be >= 0")
+    config["geofence_radius_km"] = radius
+
+
+def _validate_mqtt_ha_config(config: dict) -> None:
+    """Validate mqtt_ha config blob."""
+    if not config.get("broker_host"):
+        raise HTTPException(status_code=400, detail="broker_host is required for mqtt_ha")
+    port = config.get("broker_port", 1883)
+    if not isinstance(port, int) or port < 1 or port > 65535:
+        raise HTTPException(status_code=400, detail="broker_port must be between 1 and 65535")
+    for field in ("tracked_contacts", "tracked_repeaters"):
+        value = config.get(field)
+        if value is not None and not isinstance(value, list):
+            raise HTTPException(status_code=400, detail=f"{field} must be a list of public keys")
+
+
 def _enforce_scope(config_type: str, scope: dict) -> dict:
     """Enforce type-specific scope constraints. Returns normalized scope."""
     if config_type == "mqtt_community":
         return {"messages": "none", "raw_packets": "all"}
+    if config_type == "map_upload":
+        return {"messages": "none", "raw_packets": "all"}
     if config_type == "bot":
         return {"messages": "all", "raw_packets": "none"}
-    if config_type in ("webhook", "apprise"):
+    if config_type in ("webhook", "apprise", "mqtt_ha"):
         messages = scope.get("messages", "all")
         if messages not in ("all", "none") and not isinstance(messages, dict):
             raise HTTPException(
@@ -305,6 +392,15 @@ def _enforce_scope(config_type: str, scope: dict) -> dict:
     return {"messages": messages, "raw_packets": raw_packets}
 
 
+def _bot_system_disabled_detail() -> str | None:
+    source = fanout_manager.get_bots_disabled_source()
+    if source == "env":
+        return "Bot system disabled by server configuration (MESHCORE_DISABLE_BOTS)"
+    if source == "until_restart":
+        return "Bot system disabled until the server restarts"
+    return None
+
+
 @router.get("")
 async def list_fanout_configs() -> list[dict]:
     """List all fanout configs."""
@@ -320,39 +416,24 @@ async def create_fanout_config(body: FanoutConfigCreate) -> dict:
             detail=f"Invalid type '{body.type}'. Must be one of: {', '.join(sorted(_VALID_TYPES))}",
         )
 
-    if body.type == "bot" and server_settings.disable_bots:
-        raise HTTPException(status_code=403, detail="Bot system disabled by server configuration")
+    if body.type == "bot":
+        disabled_detail = _bot_system_disabled_detail()
+        if disabled_detail:
+            raise HTTPException(status_code=403, detail=disabled_detail)
 
-    # Only validate config when creating as enabled — disabled configs
-    # are drafts the user hasn't finished configuring yet.
-    if body.enabled:
-        if body.type == "mqtt_private":
-            _validate_mqtt_private_config(body.config)
-        elif body.type == "mqtt_community":
-            _validate_mqtt_community_config(body.config)
-        elif body.type == "bot":
-            _validate_bot_config(body.config)
-        elif body.type == "webhook":
-            _validate_webhook_config(body.config)
-        elif body.type == "apprise":
-            _validate_apprise_config(body.config)
-        elif body.type == "sqs":
-            _validate_sqs_config(body.config)
-
+    normalized_config = _validate_and_normalize_config(body.type, body.config)
     scope = _enforce_scope(body.type, body.scope)
 
     cfg = await FanoutConfigRepository.create(
         config_type=body.type,
         name=body.name,
-        config=body.config,
+        config=normalized_config,
         scope=scope,
         enabled=body.enabled,
     )
 
     # Start the module if enabled
     if cfg["enabled"]:
-        from app.fanout.manager import fanout_manager
-
         await fanout_manager.reload_config(cfg["id"])
 
     logger.info("Created fanout config %s (type=%s, name=%s)", cfg["id"], body.type, body.name)
@@ -366,43 +447,27 @@ async def update_fanout_config(config_id: str, body: FanoutConfigUpdate) -> dict
     if existing is None:
         raise HTTPException(status_code=404, detail="Fanout config not found")
 
-    if existing["type"] == "bot" and server_settings.disable_bots:
-        raise HTTPException(status_code=403, detail="Bot system disabled by server configuration")
+    if existing["type"] == "bot":
+        disabled_detail = _bot_system_disabled_detail()
+        if disabled_detail:
+            raise HTTPException(status_code=403, detail=disabled_detail)
 
     kwargs = {}
     if body.name is not None:
         kwargs["name"] = body.name
     if body.enabled is not None:
         kwargs["enabled"] = body.enabled
-    if body.config is not None:
-        kwargs["config"] = body.config
     if body.scope is not None:
         kwargs["scope"] = _enforce_scope(existing["type"], body.scope)
 
-    # Validate config when the result will be enabled
-    will_be_enabled = body.enabled if body.enabled is not None else existing["enabled"]
-    if will_be_enabled:
-        config_to_validate = body.config if body.config is not None else existing["config"]
-        if existing["type"] == "mqtt_private":
-            _validate_mqtt_private_config(config_to_validate)
-        elif existing["type"] == "mqtt_community":
-            _validate_mqtt_community_config(config_to_validate)
-        elif existing["type"] == "bot":
-            _validate_bot_config(config_to_validate)
-        elif existing["type"] == "webhook":
-            _validate_webhook_config(config_to_validate)
-        elif existing["type"] == "apprise":
-            _validate_apprise_config(config_to_validate)
-        elif existing["type"] == "sqs":
-            _validate_sqs_config(config_to_validate)
+    config_to_validate = body.config if body.config is not None else existing["config"]
+    kwargs["config"] = _validate_and_normalize_config(existing["type"], config_to_validate)
 
     updated = await FanoutConfigRepository.update(config_id, **kwargs)
     if updated is None:
         raise HTTPException(status_code=404, detail="Fanout config not found")
 
     # Reload the module to pick up changes
-    from app.fanout.manager import fanout_manager
-
     await fanout_manager.reload_config(config_id)
 
     logger.info("Updated fanout config %s", config_id)
@@ -417,10 +482,24 @@ async def delete_fanout_config(config_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Fanout config not found")
 
     # Stop the module first
-    from app.fanout.manager import fanout_manager
-
     await fanout_manager.remove_config(config_id)
     await FanoutConfigRepository.delete(config_id)
 
     logger.info("Deleted fanout config %s", config_id)
     return {"deleted": True}
+
+
+@router.post("/bots/disable-until-restart")
+async def disable_bots_until_restart() -> dict:
+    """Stop active bot modules and prevent them from running again until restart."""
+    source = await fanout_manager.disable_bots_until_restart()
+
+    from app.services.radio_runtime import radio_runtime as radio_manager
+    from app.websocket import broadcast_health
+
+    broadcast_health(radio_manager.is_connected, radio_manager.connection_info)
+    return {
+        "status": "ok",
+        "bots_disabled": True,
+        "bots_disabled_source": source,
+    }

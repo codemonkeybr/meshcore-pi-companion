@@ -17,6 +17,15 @@ set -e
 cd "$(dirname "$0")/.."
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$(pwd)"
 
+# Use the project venv if it exists and no uvicorn is on PATH
+if [ -f .venv/bin/uvicorn ] && ! command -v uvicorn &>/dev/null; then
+  UVICORN=".venv/bin/uvicorn"
+elif [ -f .venv/bin/python ] && ! command -v uvicorn &>/dev/null; then
+  UVICORN=".venv/bin/python -m uvicorn"
+else
+  UVICORN="uvicorn"
+fi
+
 UV_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,4 +40,4 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-exec uvicorn app.main:app "${UV_ARGS[@]}"
+exec $UVICORN app.main:app "${UV_ARGS[@]}"

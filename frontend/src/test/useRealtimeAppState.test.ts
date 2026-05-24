@@ -12,12 +12,6 @@ const mocks = vi.hoisted(() => ({
     success: vi.fn(),
     error: vi.fn(),
   },
-  messageCache: {
-    addMessage: vi.fn(),
-    remove: vi.fn(),
-    rename: vi.fn(),
-    updateAck: vi.fn(),
-  },
 }));
 
 vi.mock('../api', () => ({
@@ -28,14 +22,14 @@ vi.mock('../components/ui/sonner', () => ({
   toast: mocks.toast,
 }));
 
-vi.mock('../messageCache', () => mocks.messageCache);
-
 const publicChannel: Channel = {
   key: '8B3387E9C5CDEA6AC9E5EDBAA115CD72',
   name: 'Public',
   is_hashtag: false,
   on_radio: false,
   last_read_at: null,
+  favorite: false,
+  muted: false,
 };
 
 const incomingDm: Message = {
@@ -66,23 +60,25 @@ function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppS
       setHealth,
       fetchConfig: vi.fn(),
       setRawPackets,
-      triggerReconcile: vi.fn(),
+      reconcileOnReconnect: vi.fn(),
       refreshUnreads: vi.fn(async () => {}),
       setChannels,
       fetchAllContacts: vi.fn(async () => [] as Contact[]),
       setContacts,
       blockedKeysRef: { current: [] as string[] },
+      channelsRef: { current: [publicChannel] },
       blockedNamesRef: { current: [] as string[] },
       activeConversationRef: { current: null as Conversation | null },
-      hasNewerMessagesRef: { current: false },
-      addMessageIfNew: vi.fn(),
-      trackNewMessage: vi.fn(),
-      incrementUnread: vi.fn(),
+      observeMessage: vi.fn(() => ({ added: false, activeConversation: false })),
+      recordMessageEvent: vi.fn(),
       renameConversationState: vi.fn(),
+      removeConversationState: vi.fn(),
       checkMention: vi.fn(() => false),
       pendingDeleteFallbackRef: { current: false },
       setActiveConversation: vi.fn(),
-      updateMessageAck: vi.fn(),
+      renameConversationMessages: vi.fn(),
+      removeConversationMessages: vi.fn(),
+      receiveMessageAck: vi.fn(),
       notifyIncomingMessage: vi.fn(),
       ...overrides,
     },
@@ -108,14 +104,15 @@ describe('useRealtimeAppState', () => {
         name: 'Bob',
         type: 1,
         flags: 0,
-        last_path: null,
-        last_path_len: 0,
-        out_path_hash_mode: 0,
+        direct_path: null,
+        direct_path_len: 0,
+        direct_path_hash_mode: 0,
         last_advert: null,
         lat: null,
         lon: null,
         last_seen: null,
         on_radio: false,
+        favorite: false,
         last_contacted: null,
         last_read_at: null,
         first_seen: null,
@@ -133,7 +130,50 @@ describe('useRealtimeAppState', () => {
     });
 
     await waitFor(() => {
-      expect(args.triggerReconcile).toHaveBeenCalledTimes(1);
+      expect(args.reconcileOnReconnect).toHaveBeenCalledTimes(1);
+      expect(args.refreshUnreads).toHaveBeenCalledTimes(1);
+      expect(mocks.api.getChannels).toHaveBeenCalledTimes(1);
+      expect(args.fetchAllContacts).toHaveBeenCalledTimes(1);
+      expect(fns.setRawPackets).toHaveBeenCalledWith([]);
+      expect(fns.setChannels).toHaveBeenCalledWith([publicChannel]);
+      expect(fns.setContacts).toHaveBeenCalledWith(contacts);
+    });
+  });
+
+  it('reconnect skips active-conversation reconcile while browsing mid-history', async () => {
+    const contacts: Contact[] = [
+      {
+        public_key: 'bb'.repeat(32),
+        name: 'Bob',
+        type: 1,
+        flags: 0,
+        direct_path: null,
+        direct_path_len: 0,
+        direct_path_hash_mode: 0,
+        last_advert: null,
+        lat: null,
+        lon: null,
+        last_seen: null,
+        on_radio: false,
+        favorite: false,
+        last_contacted: null,
+        last_read_at: null,
+        first_seen: null,
+      },
+    ];
+
+    const { args, fns } = createRealtimeArgs({
+      fetchAllContacts: vi.fn(async () => contacts),
+    });
+
+    const { result } = renderHook(() => useRealtimeAppState(args));
+
+    act(() => {
+      result.current.onReconnect?.();
+    });
+
+    await waitFor(() => {
+      expect(args.reconcileOnReconnect).toHaveBeenCalledTimes(1);
       expect(args.refreshUnreads).toHaveBeenCalledTimes(1);
       expect(mocks.api.getChannels).toHaveBeenCalledTimes(1);
       expect(args.fetchAllContacts).toHaveBeenCalledTimes(1);
@@ -144,9 +184,9 @@ describe('useRealtimeAppState', () => {
   });
 
   it('tracks unread state for a new non-active incoming message', () => {
-    mocks.messageCache.addMessage.mockReturnValue(true);
     const { args } = createRealtimeArgs({
       checkMention: vi.fn(() => true),
+      observeMessage: vi.fn(() => ({ added: true, activeConversation: false })),
     });
 
     const { result } = renderHook(() => useRealtimeAppState(args));
@@ -155,17 +195,13 @@ describe('useRealtimeAppState', () => {
       result.current.onMessage?.(incomingDm);
     });
 
-    expect(args.addMessageIfNew).not.toHaveBeenCalled();
-    expect(args.trackNewMessage).toHaveBeenCalledWith(incomingDm);
-    expect(mocks.messageCache.addMessage).toHaveBeenCalledWith(
-      incomingDm.conversation_key,
-      incomingDm,
-      expect.any(String)
-    );
-    expect(args.incrementUnread).toHaveBeenCalledWith(
-      `contact-${incomingDm.conversation_key}`,
-      true
-    );
+    expect(args.observeMessage).toHaveBeenCalledWith(incomingDm);
+    expect(args.recordMessageEvent).toHaveBeenCalledWith({
+      msg: incomingDm,
+      activeConversation: false,
+      isNewMessage: true,
+      hasMention: true,
+    });
     expect(args.notifyIncomingMessage).toHaveBeenCalledWith(incomingDm);
   });
 
@@ -190,7 +226,7 @@ describe('useRealtimeAppState', () => {
     });
 
     expect(fns.setContacts).toHaveBeenCalledWith(expect.any(Function));
-    expect(mocks.messageCache.remove).toHaveBeenCalledWith(incomingDm.conversation_key);
+    expect(args.removeConversationMessages).toHaveBeenCalledWith(incomingDm.conversation_key);
     expect(args.setActiveConversation).toHaveBeenCalledWith(null);
     expect(pendingDeleteFallbackRef.current).toBe(true);
   });
@@ -202,14 +238,15 @@ describe('useRealtimeAppState', () => {
       name: null,
       type: 0,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
-      out_path_hash_mode: -1,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: -1,
       last_advert: null,
       lat: null,
       lon: null,
       last_seen: null,
       on_radio: false,
+      favorite: false,
       last_contacted: 1700000000,
       last_read_at: null,
       first_seen: 1700000000,
@@ -232,7 +269,7 @@ describe('useRealtimeAppState', () => {
     });
 
     expect(fns.setContacts).toHaveBeenCalledWith(expect.any(Function));
-    expect(mocks.messageCache.rename).toHaveBeenCalledWith(
+    expect(args.renameConversationMessages).toHaveBeenCalledWith(
       previousPublicKey,
       resolvedContact.public_key
     );

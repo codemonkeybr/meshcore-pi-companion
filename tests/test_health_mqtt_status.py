@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from app.routers.health import build_health_data
+from app.version_info import AppBuildInfo
 
 
 class TestHealthFanoutStatus:
@@ -27,11 +28,17 @@ class TestHealthFanoutStatus:
     async def test_fanout_statuses_reflect_manager(self, test_db):
         """fanout_statuses should return whatever the manager reports."""
         mock_statuses = {
-            "uuid-1": {"name": "Private MQTT", "type": "mqtt_private", "status": "connected"},
+            "uuid-1": {
+                "name": "Private MQTT",
+                "type": "mqtt_private",
+                "status": "connected",
+                "last_error": None,
+            },
             "uuid-2": {
                 "name": "Community MQTT",
                 "type": "mqtt_community",
-                "status": "disconnected",
+                "status": "error",
+                "last_error": "auth failed",
             },
         }
         with patch("app.fanout.manager.fanout_manager") as mock_fm:
@@ -48,6 +55,15 @@ class TestHealthFanoutStatus:
                 "app.routers.health.RawPacketRepository.get_oldest_undecrypted", return_value=None
             ),
             patch("app.routers.health.radio_manager") as mock_rm,
+            patch(
+                "app.routers.health.get_app_build_info",
+                return_value=AppBuildInfo(
+                    version="3.4.1",
+                    version_source="pyproject",
+                    commit_hash="abcdef12",
+                    commit_source="git",
+                ),
+            ),
         ):
             mock_rm.is_setup_in_progress = False
             mock_rm.is_setup_complete = True
@@ -58,6 +74,39 @@ class TestHealthFanoutStatus:
         assert data["radio_initializing"] is False
         assert data["radio_state"] == "connected"
         assert data["connection_info"] == "Serial: /dev/ttyUSB0"
+        assert data["app_info"] == {
+            "version": "3.4.1",
+            "commit_hash": "abcdef12",
+        }
+
+    @pytest.mark.asyncio
+    async def test_health_includes_cached_radio_device_info(self, test_db):
+        """Health includes device metadata captured during post-connect setup."""
+        with (
+            patch(
+                "app.routers.health.RawPacketRepository.get_oldest_undecrypted", return_value=None
+            ),
+            patch("app.routers.health.radio_manager") as mock_rm,
+        ):
+            mock_rm.is_setup_in_progress = False
+            mock_rm.is_setup_complete = True
+            mock_rm.connection_desired = True
+            mock_rm.is_reconnecting = False
+            mock_rm.device_info_loaded = True
+            mock_rm.device_model = "T-Echo"
+            mock_rm.firmware_build = "2025-02-01"
+            mock_rm.firmware_version = "1.2.3"
+            mock_rm.max_contacts = 350
+            mock_rm.max_channels = 64
+            data = await build_health_data(True, "Serial: /dev/ttyUSB0")
+
+        assert data["radio_device_info"] == {
+            "model": "T-Echo",
+            "firmware_build": "2025-02-01",
+            "firmware_version": "1.2.3",
+            "max_contacts": 350,
+            "max_channels": 64,
+        }
 
     @pytest.mark.asyncio
     async def test_health_status_degraded_when_disconnected(self, test_db):

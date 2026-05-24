@@ -2,18 +2,16 @@ import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useConversationActions } from '../hooks/useConversationActions';
-import type { Channel, Conversation, Message } from '../types';
+import type { Channel, Contact, Conversation, Message, PathDiscoveryResponse } from '../types';
 
 const mocks = vi.hoisted(() => ({
   api: {
+    requestPathDiscovery: vi.fn(),
     requestTrace: vi.fn(),
     resendChannelMessage: vi.fn(),
     sendChannelMessage: vi.fn(),
     sendDirectMessage: vi.fn(),
     setChannelFloodScopeOverride: vi.fn(),
-  },
-  messageCache: {
-    clear: vi.fn(),
   },
   toast: {
     success: vi.fn(),
@@ -25,8 +23,6 @@ vi.mock('../api', () => ({
   api: mocks.api,
 }));
 
-vi.mock('../messageCache', () => mocks.messageCache);
-
 vi.mock('../components/ui/sonner', () => ({
   toast: mocks.toast,
 }));
@@ -37,6 +33,8 @@ const publicChannel: Channel = {
   is_hashtag: false,
   on_radio: false,
   last_read_at: null,
+  favorite: false,
+  muted: false,
 };
 
 const sentMessage: Message = {
@@ -65,13 +63,10 @@ function createArgs(overrides: Partial<Parameters<typeof useConversationActions>
   return {
     activeConversation,
     activeConversationRef: { current: activeConversation },
-    channels: [{ ...publicChannel, on_radio: true }],
+    setContacts: vi.fn(),
     setChannels: vi.fn(),
-    addMessageIfNew: vi.fn(() => true),
-    jumpToBottom: vi.fn(),
-    handleToggleBlockedKey: vi.fn(async () => {}),
-    handleToggleBlockedName: vi.fn(async () => {}),
-    messageInputRef: { current: { appendText: vi.fn() } },
+    observeMessage: vi.fn(() => ({ added: true, activeConversation: true })),
+    messageInputRef: { current: { appendText: vi.fn(), focus: vi.fn() } },
     ...overrides,
   };
 }
@@ -92,7 +87,7 @@ describe('useConversationActions', () => {
     });
 
     expect(mocks.api.sendChannelMessage).toHaveBeenCalledWith(publicChannel.key, sentMessage.text);
-    expect(args.addMessageIfNew).toHaveBeenCalledWith(sentMessage);
+    expect(args.observeMessage).toHaveBeenCalledWith(sentMessage);
   });
 
   it('does not append a sent message after the active conversation changes', async () => {
@@ -118,34 +113,7 @@ describe('useConversationActions', () => {
       await sendPromise;
     });
 
-    expect(args.addMessageIfNew).not.toHaveBeenCalled();
-  });
-
-  it('clears cached messages and jumps to the latest page after blocking a key', async () => {
-    const args = createArgs();
-    const { result } = renderHook(() => useConversationActions(args));
-
-    await act(async () => {
-      await result.current.handleBlockKey('cc'.repeat(32));
-    });
-
-    expect(args.handleToggleBlockedKey).toHaveBeenCalledWith('cc'.repeat(32));
-    expect(mocks.messageCache.clear).toHaveBeenCalledTimes(1);
-    expect(args.jumpToBottom).toHaveBeenCalledTimes(1);
-  });
-
-  it('throws when the active channel is not on the radio', async () => {
-    const args = createArgs({ channels: [publicChannel] }); // on_radio: false
-
-    const { result } = renderHook(() => useConversationActions(args));
-
-    await expect(
-      act(async () => {
-        await result.current.handleSendMessage('hello');
-      })
-    ).rejects.toThrow('Channel is not on the radio');
-
-    expect(mocks.api.sendChannelMessage).not.toHaveBeenCalled();
+    expect(args.observeMessage).not.toHaveBeenCalled();
   });
 
   it('appends sender mentions into the message input', () => {
@@ -157,5 +125,118 @@ describe('useConversationActions', () => {
     });
 
     expect(args.messageInputRef.current?.appendText).toHaveBeenCalledWith('@[Alice] ');
+  });
+
+  it('appends a new-timestamp resend immediately for the active channel', async () => {
+    const resentMessage: Message = {
+      ...sentMessage,
+      id: 99,
+      sender_timestamp: 1700000100,
+      received_at: 1700000100,
+    };
+    mocks.api.resendChannelMessage.mockResolvedValue({
+      status: 'ok',
+      message_id: resentMessage.id,
+      message: resentMessage,
+    });
+    const args = createArgs();
+
+    const { result } = renderHook(() => useConversationActions(args));
+
+    await act(async () => {
+      await result.current.handleResendChannelMessage(sentMessage.id, true);
+    });
+
+    expect(mocks.api.resendChannelMessage).toHaveBeenCalledWith(sentMessage.id, true);
+    expect(args.observeMessage).toHaveBeenCalledWith(resentMessage);
+  });
+
+  it('does not append a byte-perfect resend locally', async () => {
+    mocks.api.resendChannelMessage.mockResolvedValue({
+      status: 'ok',
+      message_id: sentMessage.id,
+    });
+    const args = createArgs();
+
+    const { result } = renderHook(() => useConversationActions(args));
+
+    await act(async () => {
+      await result.current.handleResendChannelMessage(sentMessage.id, false);
+    });
+
+    expect(args.observeMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not append a resend if the user has switched conversations', async () => {
+    const resentMessage: Message = {
+      ...sentMessage,
+      id: 100,
+      sender_timestamp: 1700000200,
+      received_at: 1700000200,
+    };
+    mocks.api.resendChannelMessage.mockResolvedValue({
+      status: 'ok',
+      message_id: resentMessage.id,
+      message: resentMessage,
+    });
+    const args = createArgs();
+    const { result } = renderHook(() => useConversationActions(args));
+
+    await act(async () => {
+      const resendPromise = result.current.handleResendChannelMessage(sentMessage.id, true);
+      args.activeConversationRef.current = {
+        type: 'channel',
+        id: 'AA'.repeat(16),
+        name: 'Other',
+      };
+      await resendPromise;
+    });
+
+    expect(args.observeMessage).not.toHaveBeenCalled();
+  });
+
+  it('merges returned contact data after path discovery', async () => {
+    const contactKey = 'aa'.repeat(32);
+    const discoveredContact: Contact = {
+      public_key: contactKey,
+      name: 'Alice',
+      type: 1,
+      flags: 0,
+      direct_path: 'AABB',
+      direct_path_len: 2,
+      direct_path_hash_mode: 0,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+    const response: PathDiscoveryResponse = {
+      contact: discoveredContact,
+      forward_path: { path: 'AABB', path_len: 2, path_hash_mode: 0 },
+      return_path: { path: 'CC', path_len: 1, path_hash_mode: 0 },
+    };
+    mocks.api.requestPathDiscovery.mockResolvedValue(response);
+    const setContacts = vi.fn();
+    const args = createArgs({
+      activeConversation: { type: 'contact', id: contactKey, name: 'Alice' },
+      activeConversationRef: { current: { type: 'contact', id: contactKey, name: 'Alice' } },
+      setContacts,
+    });
+
+    const { result } = renderHook(() => useConversationActions(args));
+
+    await act(async () => {
+      await result.current.handlePathDiscovery(contactKey);
+    });
+
+    expect(mocks.api.requestPathDiscovery).toHaveBeenCalledWith(contactKey);
+    expect(setContacts).toHaveBeenCalledTimes(1);
+    const updater = setContacts.mock.calls[0][0] as (contacts: Contact[]) => Contact[];
+    expect(updater([])).toEqual([discoveredContact]);
   });
 });

@@ -1,6 +1,15 @@
 import { RepeaterPane, NotFetched, KvRow } from './repeaterPaneShared';
 import type { RepeaterOwnerInfoResponse, PaneState } from '../../types';
 
+function LabeledBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="py-0.5">
+      <span className="text-sm text-muted-foreground whitespace-nowrap">{label}</span>
+      <p className="text-sm font-medium mt-0.5 break-words">{value}</p>
+    </div>
+  );
+}
+
 export function OwnerInfoPane({
   data,
   state,
@@ -17,8 +26,8 @@ export function OwnerInfoPane({
       {!data ? (
         <NotFetched />
       ) : (
-        <div className="break-all">
-          <KvRow label="Owner Info" value={data.owner_info ?? '—'} />
+        <div className="space-y-1">
+          <LabeledBlock label="Owner Info" value={data.owner_info ?? '—'} />
           <KvRow label="Guest Password" value={data.guest_password ?? '—'} />
         </div>
       )}

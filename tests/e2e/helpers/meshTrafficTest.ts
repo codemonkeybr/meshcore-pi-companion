@@ -17,7 +17,8 @@
  * long polling timeout for environments without the bot.
  */
 import { test as base, expect } from '@playwright/test';
-import { ensureFlightlessChannel, sendChannelMessage } from './api';
+import { ensureChannel, sendChannelMessage } from './api';
+import { E2E_ECHO_CHANNEL, E2E_ECHO_TRIGGER_MESSAGE } from './env';
 
 export { expect };
 
@@ -26,15 +27,18 @@ const TRAFFIC_ADVISORY =
   'network. Failure may indicate insufficient mesh traffic rather than a bug.';
 
 /**
- * Best-effort: send a message to #flightless that triggers a remote echo
- * bot. If the bot is within radio range it will reply, generating the
- * incoming traffic the test needs. Failures are silently ignored — the
- * test will fall back to waiting for organic mesh traffic.
+ * Best-effort: send a message to the echo channel that triggers a remote
+ * echo bot on a partner radio. If the bot is within radio range it will
+ * reply, generating the incoming traffic the test needs. Failures are
+ * silently ignored — the test will fall back to waiting for organic mesh
+ * traffic.
+ *
+ * Configure the channel via E2E_ECHO_CHANNEL (default: #flightless).
  */
 export async function nudgeEchoBot(): Promise<void> {
   try {
-    const channel = await ensureFlightlessChannel();
-    await sendChannelMessage(channel.key, '!echo please give incoming message');
+    const channel = await ensureChannel(E2E_ECHO_CHANNEL);
+    await sendChannelMessage(channel.key, E2E_ECHO_TRIGGER_MESSAGE);
   } catch {
     // Best-effort — bot may not be reachable
   }

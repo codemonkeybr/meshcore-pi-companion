@@ -35,6 +35,8 @@ vi.mock('../components/ui/sonner', () => ({
 // Get mock reference — cast to Record<string, Mock> for type-safe mock method access
 const { api: _rawApi } = await import('../api');
 const mockApi = _rawApi as unknown as Record<string, Mock>;
+const { toast } = await import('../components/ui/sonner');
+const mockToast = toast as unknown as Record<string, Mock>;
 
 const REPEATER_KEY = 'aa'.repeat(32);
 
@@ -58,7 +60,11 @@ describe('useRepeaterDashboard', () => {
   });
 
   it('login sets loggedIn on success', async () => {
-    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok' });
+    mockApi.repeaterLogin.mockResolvedValueOnce({
+      status: 'ok',
+      authenticated: true,
+      message: null,
+    });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
@@ -68,11 +74,17 @@ describe('useRepeaterDashboard', () => {
 
     expect(result.current.loggedIn).toBe(true);
     expect(result.current.loginError).toBe(null);
+    expect(result.current.lastLoginAttempt?.heardBack).toBe(true);
+    expect(result.current.lastLoginAttempt?.outcome).toBe('confirmed');
     expect(mockApi.repeaterLogin).toHaveBeenCalledWith(REPEATER_KEY, 'secret');
   });
 
   it('login sets error on failure', async () => {
-    mockApi.repeaterLogin.mockRejectedValueOnce(new Error('Auth failed'));
+    mockApi.repeaterLogin.mockResolvedValueOnce({
+      status: 'error',
+      authenticated: false,
+      message: 'Auth failed',
+    });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
@@ -80,12 +92,21 @@ describe('useRepeaterDashboard', () => {
       await result.current.login('bad');
     });
 
-    expect(result.current.loggedIn).toBe(false);
+    expect(result.current.loggedIn).toBe(true);
     expect(result.current.loginError).toBe('Auth failed');
+    expect(result.current.lastLoginAttempt?.heardBack).toBe(true);
+    expect(result.current.lastLoginAttempt?.outcome).toBe('not_confirmed');
+    expect(mockToast.error).toHaveBeenCalledWith('Login not confirmed', {
+      description: 'Auth failed',
+    });
   });
 
   it('loginAsGuest calls login with empty password', async () => {
-    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok' });
+    mockApi.repeaterLogin.mockResolvedValueOnce({
+      status: 'ok',
+      authenticated: true,
+      message: null,
+    });
 
     const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
 
@@ -95,6 +116,25 @@ describe('useRepeaterDashboard', () => {
 
     expect(mockApi.repeaterLogin).toHaveBeenCalledWith(REPEATER_KEY, '');
     expect(result.current.loggedIn).toBe(true);
+  });
+
+  it('login still opens dashboard when request rejects', async () => {
+    mockApi.repeaterLogin.mockRejectedValueOnce(new Error('Network error'));
+
+    const { result } = renderHook(() => useRepeaterDashboard(repeaterConversation));
+
+    await act(async () => {
+      await result.current.login('secret');
+    });
+
+    expect(result.current.loggedIn).toBe(true);
+    expect(result.current.loginError).toBe('Network error');
+    expect(result.current.lastLoginAttempt?.heardBack).toBe(false);
+    expect(result.current.lastLoginAttempt?.outcome).toBe('request_failed');
+    expect(mockToast.error).toHaveBeenCalledWith('Login request failed', {
+      description:
+        'Network error. The dashboard is still available, but repeater operations may fail until a login succeeds.',
+    });
   });
 
   it('refreshPane stores data on success', async () => {
@@ -374,9 +414,29 @@ describe('useRepeaterDashboard', () => {
     expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(2);
   });
 
+  it('refreshing neighbors skips node info prefetch when advert location already exists', async () => {
+    mockApi.repeaterNeighbors.mockResolvedValueOnce({ neighbors: [] });
+
+    const { result } = renderHook(() =>
+      useRepeaterDashboard(repeaterConversation, { hasAdvertLocation: true })
+    );
+
+    await act(async () => {
+      await result.current.refreshPane('neighbors');
+    });
+
+    expect(mockApi.repeaterNodeInfo).not.toHaveBeenCalled();
+    expect(mockApi.repeaterNeighbors).toHaveBeenCalledTimes(1);
+    expect(result.current.paneData.neighbors).toEqual({ neighbors: [] });
+  });
+
   it('restores dashboard state when navigating away and back to the same repeater', async () => {
     const statusData = { battery_volts: 4.2 };
-    mockApi.repeaterLogin.mockResolvedValueOnce({ status: 'ok' });
+    mockApi.repeaterLogin.mockResolvedValueOnce({
+      status: 'ok',
+      authenticated: true,
+      message: null,
+    });
     mockApi.repeaterStatus.mockResolvedValueOnce(statusData);
     mockApi.sendRepeaterCommand.mockResolvedValueOnce({
       command: 'ver',

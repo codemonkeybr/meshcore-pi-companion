@@ -112,9 +112,9 @@ describe('useWebSocket dispatch', () => {
       name: null,
       type: 0,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
-      out_path_hash_mode: -1,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: -1,
       last_advert: null,
       lat: null,
       lon: null,
@@ -136,7 +136,7 @@ describe('useWebSocket dispatch', () => {
     expect(onContactResolved).toHaveBeenCalledWith('abc123def456', contact);
   });
 
-  it('routes message_acked to onMessageAcked with (messageId, ackCount, paths)', () => {
+  it('routes message_acked to onMessageAcked with (messageId, ackCount, paths, packetId)', () => {
     const onMessageAcked = vi.fn();
     renderHook(() => useWebSocket({ onMessageAcked }));
 
@@ -144,7 +144,7 @@ describe('useWebSocket dispatch', () => {
     fireMessage({ type, data });
 
     expect(onMessageAcked).toHaveBeenCalledOnce();
-    expect(onMessageAcked).toHaveBeenCalledWith(42, 1, undefined);
+    expect(onMessageAcked).toHaveBeenCalledWith(42, 1, undefined, undefined);
   });
 
   it('routes message_acked with paths', () => {
@@ -154,7 +154,16 @@ describe('useWebSocket dispatch', () => {
     const paths = [{ path: 'aabb', received_at: 1700000000 }];
     fireMessage({ type: 'message_acked', data: { message_id: 7, ack_count: 2, paths } });
 
-    expect(onMessageAcked).toHaveBeenCalledWith(7, 2, paths);
+    expect(onMessageAcked).toHaveBeenCalledWith(7, 2, paths, undefined);
+  });
+
+  it('routes message_acked with packet_id', () => {
+    const onMessageAcked = vi.fn();
+    renderHook(() => useWebSocket({ onMessageAcked }));
+
+    fireMessage({ type: 'message_acked', data: { message_id: 7, ack_count: 2, packet_id: 99 } });
+
+    expect(onMessageAcked).toHaveBeenCalledWith(7, 2, undefined, 99);
   });
 
   it('routes error event to onError', () => {

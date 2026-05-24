@@ -21,7 +21,12 @@ export interface UseWebSocketOptions {
   onChannel?: (channel: Channel) => void;
   onChannelDeleted?: (key: string) => void;
   onRawPacket?: (packet: RawPacket) => void;
-  onMessageAcked?: (messageId: number, ackCount: number, paths?: MessagePath[]) => void;
+  onMessageAcked?: (
+    messageId: number,
+    ackCount: number,
+    paths?: MessagePath[],
+    packetId?: number | null
+  ) => void;
   onError?: (error: ErrorEvent) => void;
   onSuccess?: (success: SuccessEvent) => void;
   onReconnect?: () => void;
@@ -49,7 +54,9 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const connect = useCallback(() => {
     // Determine WebSocket URL based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/ws`;
+    // Resolve relative to the page so sub-path reverse proxies work
+    const base = new URL('./api/ws', window.location.href);
+    const wsUrl = `${protocol}//${base.host}${base.pathname}`;
 
     const ws = new WebSocket(wsUrl);
 
@@ -128,8 +135,14 @@ export function useWebSocket(options: UseWebSocketOptions) {
               message_id: number;
               ack_count: number;
               paths?: MessagePath[];
+              packet_id?: number | null;
             };
-            handlers.onMessageAcked?.(ackData.message_id, ackData.ack_count, ackData.paths);
+            handlers.onMessageAcked?.(
+              ackData.message_id,
+              ackData.ack_count,
+              ackData.paths,
+              ackData.packet_id
+            );
             break;
           }
           case 'error':

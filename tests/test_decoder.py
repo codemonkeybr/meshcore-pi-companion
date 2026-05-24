@@ -13,27 +13,17 @@ from app.decoder import (
     DecryptedDirectMessage,
     PayloadType,
     RouteType,
-    _clamp_scalar,
     decrypt_direct_message,
     decrypt_group_text,
+    decrypt_path_payload,
     derive_public_key,
     derive_shared_secret,
     extract_payload,
     parse_packet,
     try_decrypt_dm,
     try_decrypt_packet_with_channel_key,
+    try_decrypt_path,
 )
-
-
-class TestChannelKeyDerivation:
-    """Test channel key derivation from hashtag names."""
-
-    def test_hashtag_key_derivation(self):
-        """Hashtag channel keys are derived as SHA256(name)[:16]."""
-        channel_name = "#test"
-        expected_key = hashlib.sha256(channel_name.encode("utf-8")).digest()[:16]
-
-        assert len(expected_key) == 16
 
 
 class TestPacketParsing:
@@ -298,6 +288,181 @@ class TestGroupTextDecryption:
         assert result is None
 
 
+class TestPathDecryption:
+    """Test PATH payload decryption against the firmware wire format."""
+
+    WORKED_PATH_PACKET = bytes.fromhex("22007EDE577469F4134F9B00EDD57EB4353A1B5999B7")
+    WORKED_PATH_SENDER_PRIV = bytes.fromhex(
+        "489E11DCC0A5E037E65C90D2327AA11A42EAFE0C9F68DEBE82B0F71C88C0874B"
+        "CC291D9B2B98A54F5C1426B7AB8156B0D684EAA4EBA755AC614A9FD32B74C308"
+    )
+    WORKED_PATH_DEST_PUB = bytes.fromhex(
+        "7e23132922070404863fe855248ce414b64012c891342c1fc7ee5bd3d51ea405"
+    )
+
+    @staticmethod
+    def _create_encrypted_path_payload(
+        *,
+        shared_secret: bytes,
+        dest_hash: int,
+        src_hash: int,
+        packed_path_len: int,
+        path_bytes: bytes,
+        extra_type: int,
+        extra: bytes,
+    ) -> bytes:
+        plaintext = bytes([packed_path_len]) + path_bytes + bytes([extra_type]) + extra
+        pad_len = (16 - len(plaintext) % 16) % 16
+        if pad_len == 0:
+            pad_len = 16
+        plaintext += bytes(pad_len)
+
+        cipher = AES.new(shared_secret[:16], AES.MODE_ECB)
+        ciphertext = cipher.encrypt(plaintext)
+        mac = hmac.new(shared_secret, ciphertext, hashlib.sha256).digest()[:2]
+        return bytes([dest_hash, src_hash]) + mac + ciphertext
+
+    def test_decrypt_path_payload_matches_firmware_layout(self):
+        """PATH packets are dest/src hashes plus MAC+ciphertext; decrypted data is path+extra."""
+        shared_secret = bytes(range(32))
+        payload = self._create_encrypted_path_payload(
+            shared_secret=shared_secret,
+            dest_hash=0xAE,
+            src_hash=0x11,
+            packed_path_len=0x42,  # mode 1 (2-byte hops), 2 hops
+            path_bytes=bytes.fromhex("aabbccdd"),
+            extra_type=PayloadType.ACK,
+            extra=bytes.fromhex("01020304"),
+        )
+
+        result = decrypt_path_payload(payload, shared_secret)
+
+        assert result is not None
+        assert result.dest_hash == "ae"
+        assert result.src_hash == "11"
+        assert result.returned_path == bytes.fromhex("aabbccdd")
+        assert result.returned_path_len == 2
+        assert result.returned_path_hash_mode == 1
+        assert result.extra_type == PayloadType.ACK
+        assert result.extra[:4] == bytes.fromhex("01020304")
+
+    def test_decrypt_path_payload_rejects_corrupted_mac(self):
+        """PATH payloads with a bad MAC must be rejected."""
+        shared_secret = bytes(range(32))
+        payload = self._create_encrypted_path_payload(
+            shared_secret=shared_secret,
+            dest_hash=0xAE,
+            src_hash=0x11,
+            packed_path_len=0x00,
+            path_bytes=b"",
+            extra_type=PayloadType.RESPONSE,
+            extra=b"\x99\x88",
+        )
+        corrupted = payload[:2] + bytes([payload[2] ^ 0xFF, payload[3]]) + payload[4:]
+
+        result = decrypt_path_payload(corrupted, shared_secret)
+
+        assert result is None
+
+    def test_decrypt_worked_path_packet_fixture(self):
+        """Worked PATH sample from the design doc decrypts as a direct route."""
+        packet = parse_packet(self.WORKED_PATH_PACKET)
+        assert packet is not None
+        assert packet.payload_type == PayloadType.PATH
+
+        shared_secret = derive_shared_secret(
+            self.WORKED_PATH_SENDER_PRIV, self.WORKED_PATH_DEST_PUB
+        )
+        result = decrypt_path_payload(packet.payload, shared_secret)
+
+        assert result is not None
+        assert result.dest_hash == "7e"
+        assert result.src_hash == "de"
+        assert result.returned_path == b""
+        assert result.returned_path_len == 0
+        assert result.returned_path_hash_mode == 0
+        assert result.extra_type == 0x0F
+
+
+class TestTryDecryptPath:
+    """Test the full PATH decryption wrapper."""
+
+    OUR_PRIV = bytes.fromhex(
+        "58BA1940E97099CBB4357C62CE9C7F4B245C94C90D722E67201B989F9FEACF7B"
+        "77ACADDB84438514022BDB0FC3140C2501859BE1772AC7B8C7E41DC0F40490A1"
+    )
+    THEIR_PUB = bytes.fromhex("a1b2c3d3ba9f5fa8705b9845fe11cc6f01d1d49caaf4d122ac7121663c5beec7")
+
+    @classmethod
+    def _make_path_packet(
+        cls,
+        *,
+        packed_path_len: int,
+        path_bytes: bytes,
+        extra_type: int,
+        extra: bytes,
+    ) -> bytes:
+        shared_secret = derive_shared_secret(cls.OUR_PRIV, cls.THEIR_PUB)
+        plaintext = bytes([packed_path_len]) + path_bytes + bytes([extra_type]) + extra
+        pad_len = (16 - len(plaintext) % 16) % 16
+        if pad_len == 0:
+            pad_len = 16
+        plaintext += bytes(pad_len)
+
+        cipher = AES.new(shared_secret[:16], AES.MODE_ECB)
+        ciphertext = cipher.encrypt(plaintext)
+        mac = hmac.new(shared_secret, ciphertext, hashlib.sha256).digest()[:2]
+        our_public = derive_public_key(cls.OUR_PRIV)
+        return (
+            bytes([(PayloadType.PATH << 2) | RouteType.DIRECT, 0x00])
+            + bytes([our_public[0], cls.THEIR_PUB[0]])
+            + mac
+            + ciphertext
+        )
+
+    def test_try_decrypt_path_decrypts_full_packet(self):
+        """try_decrypt_path validates hashes, derives ECDH, and returns the route."""
+        raw_packet = self._make_path_packet(
+            packed_path_len=0x42,
+            path_bytes=bytes.fromhex("aabbccdd"),
+            extra_type=PayloadType.ACK,
+            extra=bytes.fromhex("01020304"),
+        )
+
+        result = try_decrypt_path(
+            raw_packet=raw_packet,
+            our_private_key=self.OUR_PRIV,
+            their_public_key=self.THEIR_PUB,
+            our_public_key=derive_public_key(self.OUR_PRIV),
+        )
+
+        assert result is not None
+        assert result.returned_path == bytes.fromhex("aabbccdd")
+        assert result.returned_path_len == 2
+        assert result.returned_path_hash_mode == 1
+        assert result.extra_type == PayloadType.ACK
+        assert result.extra[:4] == bytes.fromhex("01020304")
+
+    def test_try_decrypt_path_rejects_hash_mismatch(self):
+        """Packets addressed to another destination are rejected before decryption."""
+        raw_packet = self._make_path_packet(
+            packed_path_len=0x00,
+            path_bytes=b"",
+            extra_type=PayloadType.RESPONSE,
+            extra=b"\xaa",
+        )
+        wrong_our_public = bytes.fromhex("ff") + derive_public_key(self.OUR_PRIV)[1:]
+
+        result = try_decrypt_path(
+            raw_packet=raw_packet,
+            our_private_key=self.OUR_PRIV,
+            their_public_key=self.THEIR_PUB,
+            our_public_key=wrong_our_public,
+        )
+
+        assert result is None
+
+
 class TestTryDecryptPacket:
     """Test the full packet decryption pipeline."""
 
@@ -448,6 +613,33 @@ class TestAdvertisementParsing:
         assert result.lat is None
         assert result.lon is None
 
+    def test_parse_advertisement_discards_out_of_range_gps(self):
+        """Out-of-range advert coordinates are treated as missing."""
+        from app.decoder import parse_advertisement
+
+        payload = bytearray()
+        payload.extend(
+            bytes.fromhex("f29fdc7c560f9d813d1593a8587fa46a9e7efe2f5506d38c0af41307bf9e517a")
+        )
+        payload.extend((1718749967).to_bytes(4, byteorder="little"))
+        payload.extend(bytes(64))
+        payload.append(0x92)
+        payload.extend((-593497573).to_bytes(4, byteorder="little", signed=True))
+        payload.extend((-1659939204).to_bytes(4, byteorder="little", signed=True))
+        payload.extend(b"Tacompton")
+        raw_packet = bytes.fromhex("11") + bytes(payload)
+
+        result = parse_advertisement(bytes(payload), raw_packet=raw_packet)
+
+        assert result is not None
+        assert (
+            result.public_key == "f29fdc7c560f9d813d1593a8587fa46a9e7efe2f5506d38c0af41307bf9e517a"
+        )
+        assert result.name == "Tacompton"
+        assert result.device_role == 2
+        assert result.lat is None
+        assert result.lon is None
+
     def test_parse_advertisement_extracts_public_key(self):
         """Advertisement parsing extracts the public key correctly."""
         from app.decoder import parse_advertisement, parse_packet
@@ -481,49 +673,6 @@ class TestAdvertisementParsing:
 
         result = parse_advertisement(info.payload)
         assert result is None
-
-
-class TestScalarClamping:
-    """Test X25519 scalar clamping for ECDH."""
-
-    def test_clamp_scalar_modifies_first_byte(self):
-        """Clamping clears the lower 3 bits of the first byte."""
-        # Input with all bits set in first byte
-        scalar = bytes([0xFF]) + bytes(31)
-
-        result = _clamp_scalar(scalar)
-
-        # First byte should have lower 3 bits cleared: 0xFF & 248 = 0xF8
-        assert result[0] == 0xF8
-
-    def test_clamp_scalar_modifies_last_byte(self):
-        """Clamping modifies the last byte for correct group operations."""
-        # Input with all bits set in last byte
-        scalar = bytes(31) + bytes([0xFF])
-
-        result = _clamp_scalar(scalar)
-
-        # Last byte: (0xFF & 63) | 64 = 0x7F
-        assert result[31] == 0x7F
-
-    def test_clamp_scalar_preserves_middle_bytes(self):
-        """Clamping preserves the middle bytes unchanged."""
-        # Known middle bytes
-        scalar = bytes([0xAB]) + bytes([0x12, 0x34, 0x56] * 10)[:30] + bytes([0xCD])
-
-        result = _clamp_scalar(scalar)
-
-        # Middle bytes should be unchanged
-        assert result[1:31] == scalar[1:31]
-
-    def test_clamp_scalar_truncates_to_32_bytes(self):
-        """Clamping uses only first 32 bytes of input."""
-        # 64-byte input (typical Ed25519 private key)
-        scalar = bytes(64)
-
-        result = _clamp_scalar(scalar)
-
-        assert len(result) == 32
 
 
 class TestPublicKeyDerivation:
@@ -562,13 +711,6 @@ class TestPublicKeyDerivation:
         assert len(result) == 32
         assert result == self.FACE12_PUB_EXPECTED
 
-    def test_derive_public_key_deterministic(self):
-        """Same private key always produces same public key."""
-        result1 = derive_public_key(self.FACE12_PRIV)
-        result2 = derive_public_key(self.FACE12_PRIV)
-
-        assert result1 == result2
-
 
 class TestSharedSecretDerivation:
     """Test ECDH shared secret derivation from Ed25519 keys."""
@@ -588,13 +730,6 @@ class TestSharedSecretDerivation:
         result = derive_shared_secret(self.FACE12_PRIV, self.A1B2C3_PUB)
 
         assert len(result) == 32
-
-    def test_derive_shared_secret_deterministic(self):
-        """Same inputs always produce same shared secret."""
-        result1 = derive_shared_secret(self.FACE12_PRIV, self.A1B2C3_PUB)
-        result2 = derive_shared_secret(self.FACE12_PRIV, self.A1B2C3_PUB)
-
-        assert result1 == result2
 
     def test_derive_shared_secret_different_keys_different_result(self):
         """Different key pairs produce different shared secrets."""
@@ -693,6 +828,33 @@ class TestDirectMessageDecryption:
         result = decrypt_direct_message(invalid_payload, shared_secret)
 
         assert result is None
+
+    def test_decrypt_signed_room_post_extracts_author_prefix(self):
+        """TXT_TYPE_SIGNED_PLAIN room posts expose the 4-byte author prefix separately."""
+        shared_secret = bytes(range(32))
+        timestamp = 1_700_000_000
+        flags = (2 << 2) | 1
+        author_prefix = bytes.fromhex("aabbccdd")
+        plaintext = (
+            timestamp.to_bytes(4, "little")
+            + bytes([flags])
+            + author_prefix
+            + b"hello room"
+            + b"\x00"
+        )
+        padded = plaintext + (b"\x00" * ((16 - (len(plaintext) % 16)) % 16))
+        cipher = AES.new(shared_secret[:16], AES.MODE_ECB)
+        ciphertext = cipher.encrypt(padded)
+        mac = hmac.new(shared_secret, ciphertext, hashlib.sha256).digest()[:2]
+        payload = bytes.fromhex("1020") + mac + ciphertext
+
+        result = decrypt_direct_message(payload, shared_secret)
+
+        assert result is not None
+        assert result.txt_type == 2
+        assert result.attempt == 1
+        assert result.signed_sender_prefix == "aabbccdd"
+        assert result.message == "hello room"
 
 
 class TestTryDecryptDM:

@@ -3,7 +3,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from app.models import CONTACT_TYPE_REPEATER, Message, MessagePath
+from app.models import Message, MessagePath
 from app.repository import ContactRepository, MessageRepository, RawPacketRepository
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ BroadcastFn = Callable[..., Any]
 LOG_MESSAGE_PREVIEW_LEN = 32
 
 
-def _truncate_for_log(text: str, max_chars: int = LOG_MESSAGE_PREVIEW_LEN) -> str:
+def truncate_for_log(text: str, max_chars: int = LOG_MESSAGE_PREVIEW_LEN) -> str:
     """Return a compact single-line message preview for log output."""
     normalized = " ".join(text.split())
     if len(normalized) <= max_chars:
@@ -28,7 +28,7 @@ def _format_channel_log_target(channel_name: str | None, channel_key: str) -> st
     return channel_name or channel_key
 
 
-def _format_contact_log_target(contact_name: str | None, public_key: str) -> str:
+def format_contact_log_target(contact_name: str | None, public_key: str) -> str:
     """Return a human-friendly DM target label for logs."""
     return contact_name or public_key[:12]
 
@@ -37,10 +37,16 @@ def build_message_paths(
     path: str | None,
     received_at: int,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
 ) -> list[MessagePath] | None:
     """Build the single-path list used by message payloads."""
     return (
-        [MessagePath(path=path or "", received_at=received_at, path_len=path_len)]
+        [
+            MessagePath(
+                path=path or "", received_at=received_at, path_len=path_len, rssi=rssi, snr=snr
+            )
+        ]
         if path is not None
         else None
     )
@@ -62,6 +68,7 @@ def build_message_model(
     acked: int = 0,
     sender_name: str | None = None,
     channel_name: str | None = None,
+    packet_id: int | None = None,
 ) -> Message:
     """Build a Message model with the canonical backend payload shape."""
     return Message(
@@ -79,6 +86,7 @@ def build_message_model(
         acked=acked,
         sender_name=sender_name,
         channel_name=channel_name,
+        packet_id=packet_id,
     )
 
 
@@ -96,11 +104,42 @@ def broadcast_message(
         broadcast_fn("message", payload, realtime=realtime)
 
 
+async def build_stored_outgoing_channel_message(
+    *,
+    message_id: int,
+    conversation_key: str,
+    text: str,
+    sender_timestamp: int,
+    received_at: int,
+    sender_name: str | None,
+    sender_key: str | None,
+    channel_name: str | None,
+    message_repository=MessageRepository,
+) -> Message:
+    """Build the current payload for a stored outgoing channel message."""
+    acked_count, paths = await message_repository.get_ack_and_paths(message_id)
+    return build_message_model(
+        message_id=message_id,
+        msg_type="CHAN",
+        conversation_key=conversation_key,
+        text=text,
+        sender_timestamp=sender_timestamp,
+        received_at=received_at,
+        paths=paths,
+        outgoing=True,
+        acked=acked_count,
+        sender_name=sender_name,
+        sender_key=sender_key,
+        channel_name=channel_name,
+    )
+
+
 def broadcast_message_acked(
     *,
     message_id: int,
     ack_count: int,
     paths: list[MessagePath] | None,
+    packet_id: int | None,
     broadcast_fn: BroadcastFn,
 ) -> None:
     """Broadcast a message_acked payload."""
@@ -110,6 +149,7 @@ def broadcast_message_acked(
             "message_id": message_id,
             "ack_count": ack_count,
             "paths": [path.model_dump() for path in paths] if paths else [],
+            "packet_id": packet_id,
         },
     )
 
@@ -125,6 +165,54 @@ async def increment_ack_and_broadcast(
     return ack_count
 
 
+async def reconcile_duplicate_message(
+    *,
+    existing_msg: Message,
+    packet_id: int | None,
+    path: str | None,
+    received_at: int,
+    path_len: int | None,
+    rssi: int | None = None,
+    snr: float | None = None,
+    broadcast_fn: BroadcastFn,
+) -> None:
+    logger.debug(
+        "Duplicate %s for %s (msg_id=%d, outgoing=%s) - adding path",
+        existing_msg.type,
+        existing_msg.conversation_key[:12],
+        existing_msg.id,
+        existing_msg.outgoing,
+    )
+
+    if path is not None:
+        paths = await MessageRepository.add_path(
+            existing_msg.id, path, received_at, path_len, rssi=rssi, snr=snr
+        )
+    else:
+        paths = existing_msg.paths or []
+
+    if existing_msg.outgoing and existing_msg.type == "CHAN":
+        ack_count = await MessageRepository.increment_ack_count(existing_msg.id)
+    else:
+        ack_count = existing_msg.acked
+
+    representative_packet_id = (
+        existing_msg.packet_id if existing_msg.packet_id is not None else packet_id
+    )
+
+    if existing_msg.outgoing or path is not None:
+        broadcast_message_acked(
+            message_id=existing_msg.id,
+            ack_count=ack_count,
+            paths=paths,
+            packet_id=representative_packet_id,
+            broadcast_fn=broadcast_fn,
+        )
+
+    if packet_id is not None:
+        await RawPacketRepository.mark_decrypted(packet_id, existing_msg.id)
+
+
 async def handle_duplicate_message(
     *,
     packet_id: int | None,
@@ -132,9 +220,12 @@ async def handle_duplicate_message(
     conversation_key: str,
     text: str,
     sender_timestamp: int,
+    outgoing: bool | None = None,
     path: str | None,
     received_at: int,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
     broadcast_fn: BroadcastFn,
 ) -> None:
     """Handle a duplicate message by updating paths/acks on the existing record."""
@@ -143,6 +234,7 @@ async def handle_duplicate_message(
         conversation_key=conversation_key,
         text=text,
         sender_timestamp=sender_timestamp,
+        outgoing=outgoing,
     )
     if not existing_msg:
         label = "message" if msg_type == "CHAN" else "DM"
@@ -153,34 +245,16 @@ async def handle_duplicate_message(
         )
         return
 
-    logger.debug(
-        "Duplicate %s for %s (msg_id=%d, outgoing=%s) - adding path",
-        msg_type,
-        conversation_key[:12],
-        existing_msg.id,
-        existing_msg.outgoing,
+    await reconcile_duplicate_message(
+        existing_msg=existing_msg,
+        packet_id=packet_id,
+        path=path,
+        received_at=received_at,
+        path_len=path_len,
+        rssi=rssi,
+        snr=snr,
+        broadcast_fn=broadcast_fn,
     )
-
-    if path is not None:
-        paths = await MessageRepository.add_path(existing_msg.id, path, received_at, path_len)
-    else:
-        paths = existing_msg.paths or []
-
-    if existing_msg.outgoing:
-        ack_count = await MessageRepository.increment_ack_count(existing_msg.id)
-    else:
-        ack_count = existing_msg.acked
-
-    if existing_msg.outgoing or path is not None:
-        broadcast_message_acked(
-            message_id=existing_msg.id,
-            ack_count=ack_count,
-            paths=paths,
-            broadcast_fn=broadcast_fn,
-        )
-
-    if packet_id is not None:
-        await RawPacketRepository.mark_decrypted(packet_id, existing_msg.id)
 
 
 async def create_message_from_decrypted(
@@ -193,6 +267,8 @@ async def create_message_from_decrypted(
     received_at: int | None = None,
     path: str | None = None,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
     channel_name: str | None = None,
     realtime: bool = True,
     broadcast_fn: BroadcastFn,
@@ -216,6 +292,8 @@ async def create_message_from_decrypted(
         received_at=received,
         path=path,
         path_len=path_len,
+        rssi=rssi,
+        snr=snr,
         sender_name=sender,
         sender_key=resolved_sender_key,
     )
@@ -227,16 +305,19 @@ async def create_message_from_decrypted(
             conversation_key=channel_key_normalized,
             text=text,
             sender_timestamp=timestamp,
+            outgoing=None,
             path=path,
             received_at=received,
             path_len=path_len,
+            rssi=rssi,
+            snr=snr,
             broadcast_fn=broadcast_fn,
         )
         return None
 
     logger.info(
         'Stored channel message "%s" for %r (msg ID %d in chan ID %s)',
-        _truncate_for_log(text),
+        truncate_for_log(text),
         _format_channel_log_target(channel_name, channel_key_normalized),
         msg_id,
         channel_key_normalized,
@@ -251,10 +332,11 @@ async def create_message_from_decrypted(
             text=text,
             sender_timestamp=timestamp,
             received_at=received,
-            paths=build_message_paths(path, received, path_len),
+            paths=build_message_paths(path, received, path_len, rssi=rssi, snr=snr),
             sender_name=sender,
             sender_key=resolved_sender_key,
             channel_name=channel_name,
+            packet_id=packet_id,
         ),
         broadcast_fn=broadcast_fn,
         realtime=realtime,
@@ -272,133 +354,29 @@ async def create_dm_message_from_decrypted(
     received_at: int | None = None,
     path: str | None = None,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
     outgoing: bool = False,
     realtime: bool = True,
     broadcast_fn: BroadcastFn,
 ) -> int | None:
     """Store and broadcast a decrypted direct message."""
-    contact = await ContactRepository.get_by_key(their_public_key)
-    if contact and contact.type == CONTACT_TYPE_REPEATER:
-        logger.debug(
-            "Skipping message from repeater %s (CLI responses not stored): %s",
-            their_public_key[:12],
-            (decrypted.message or "")[:50],
-        )
-        # Deliver to batch CLI waiter (e.g. Radio Settings load) when using SPI
-        from app.cli_response_queue import put as cli_queue_put
+    from app.services.dm_ingest import ingest_decrypted_direct_message
 
-        cli_queue_put(their_public_key[:12], decrypted.message or "")
-        return None
-
-    received = received_at or int(time.time())
-    conversation_key = their_public_key.lower()
-    sender_name = contact.name if contact and not outgoing else None
-
-    msg_id = await MessageRepository.create(
-        msg_type="PRIV",
-        text=decrypted.message,
-        conversation_key=conversation_key,
-        sender_timestamp=decrypted.timestamp,
-        received_at=received,
+    message = await ingest_decrypted_direct_message(
+        packet_id=packet_id,
+        decrypted=decrypted,
+        their_public_key=their_public_key,
+        received_at=received_at,
         path=path,
         path_len=path_len,
+        rssi=rssi,
+        snr=snr,
         outgoing=outgoing,
-        sender_key=conversation_key if not outgoing else None,
-        sender_name=sender_name,
-    )
-
-    if msg_id is None:
-        await handle_duplicate_message(
-            packet_id=packet_id,
-            msg_type="PRIV",
-            conversation_key=conversation_key,
-            text=decrypted.message,
-            sender_timestamp=decrypted.timestamp,
-            path=path,
-            received_at=received,
-            path_len=path_len,
-            broadcast_fn=broadcast_fn,
-        )
-        return None
-
-    logger.info(
-        'Stored direct message "%s" for %r (msg ID %d in contact ID %s, outgoing=%s)',
-        _truncate_for_log(decrypted.message),
-        _format_contact_log_target(contact.name if contact else None, conversation_key),
-        msg_id,
-        conversation_key,
-        outgoing,
-    )
-    await RawPacketRepository.mark_decrypted(packet_id, msg_id)
-
-    broadcast_message(
-        message=build_message_model(
-            message_id=msg_id,
-            msg_type="PRIV",
-            conversation_key=conversation_key,
-            text=decrypted.message,
-            sender_timestamp=decrypted.timestamp,
-            received_at=received,
-            paths=build_message_paths(path, received, path_len),
-            outgoing=outgoing,
-            sender_name=sender_name,
-            sender_key=conversation_key if not outgoing else None,
-        ),
-        broadcast_fn=broadcast_fn,
         realtime=realtime,
+        broadcast_fn=broadcast_fn,
     )
-
-    await ContactRepository.update_last_contacted(conversation_key, received)
-    return msg_id
-
-
-async def create_fallback_direct_message(
-    *,
-    conversation_key: str,
-    text: str,
-    sender_timestamp: int,
-    received_at: int,
-    path: str | None,
-    path_len: int | None,
-    txt_type: int,
-    signature: str | None,
-    sender_name: str | None,
-    sender_key: str | None,
-    broadcast_fn: BroadcastFn,
-    message_repository=MessageRepository,
-) -> Message | None:
-    """Store and broadcast a CONTACT_MSG_RECV fallback direct message."""
-    msg_id = await message_repository.create(
-        msg_type="PRIV",
-        text=text,
-        conversation_key=conversation_key,
-        sender_timestamp=sender_timestamp,
-        received_at=received_at,
-        path=path,
-        path_len=path_len,
-        txt_type=txt_type,
-        signature=signature,
-        sender_key=sender_key,
-        sender_name=sender_name,
-    )
-    if msg_id is None:
-        return None
-
-    message = build_message_model(
-        message_id=msg_id,
-        msg_type="PRIV",
-        conversation_key=conversation_key,
-        text=text,
-        sender_timestamp=sender_timestamp,
-        received_at=received_at,
-        paths=build_message_paths(path, received_at, path_len),
-        txt_type=txt_type,
-        signature=signature,
-        sender_key=sender_key,
-        sender_name=sender_name,
-    )
-    broadcast_message(message=message, broadcast_fn=broadcast_fn)
-    return message
+    return message.id if message is not None else None
 
 
 async def create_fallback_channel_message(
@@ -444,6 +422,7 @@ async def create_fallback_channel_message(
             conversation_key=conversation_key_normalized,
             text=text,
             sender_timestamp=sender_timestamp,
+            outgoing=None,
             path=path,
             received_at=received_at,
             path_len=path_len,
@@ -513,6 +492,7 @@ async def create_outgoing_channel_message(
     sender_key: str | None,
     channel_name: str | None,
     broadcast_fn: BroadcastFn,
+    broadcast: bool = True,
     message_repository=MessageRepository,
 ) -> Message | None:
     """Store and broadcast an outgoing channel message."""
@@ -529,18 +509,17 @@ async def create_outgoing_channel_message(
     if msg_id is None:
         return None
 
-    message = build_message_model(
+    message = await build_stored_outgoing_channel_message(
         message_id=msg_id,
-        msg_type="CHAN",
         conversation_key=conversation_key,
         text=text,
         sender_timestamp=sender_timestamp,
         received_at=received_at,
-        outgoing=True,
-        acked=0,
         sender_name=sender_name,
         sender_key=sender_key,
         channel_name=channel_name,
+        message_repository=message_repository,
     )
-    broadcast_message(message=message, broadcast_fn=broadcast_fn)
+    if broadcast:
+        broadcast_message(message=message, broadcast_fn=broadcast_fn)
     return message

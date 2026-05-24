@@ -11,24 +11,28 @@ import pytest
 
 from app.event_handlers import (
     _active_subscriptions,
-    _pending_acks,
     cleanup_expired_acks,
     register_event_handlers,
     track_pending_ack,
 )
 from app.repository import (
+    ContactAdvertPathRepository,
+    ContactNameHistoryRepository,
     ContactRepository,
     MessageRepository,
 )
+from app.services.dm_ack_tracker import _buffered_acks, _pending_acks
 
 
 @pytest.fixture(autouse=True)
 def clear_test_state():
     """Clear pending ACKs and subscriptions before each test."""
     _pending_acks.clear()
+    _buffered_acks.clear()
     _active_subscriptions.clear()
     yield
     _pending_acks.clear()
+    _buffered_acks.clear()
     _active_subscriptions.clear()
 
 
@@ -107,6 +111,28 @@ class TestAckTracking:
         assert len(_pending_acks) == 50
         assert all(k.startswith("valid_") for k in _pending_acks)
 
+    def test_track_pending_ack_consumes_buffered_ack(self):
+        """A buffered ACK should be matched immediately when the send registers later."""
+        _buffered_acks["early"] = time.time()
+
+        matched = track_pending_ack("early", message_id=42, timeout_ms=5000)
+
+        assert matched is True
+        assert "early" not in _buffered_acks
+        assert "early" not in _pending_acks
+
+    def test_cleanup_removes_expired_buffered_acks(self):
+        """Buffered ACKs should expire so unmatched early ACKs do not leak forever."""
+        from app.services.dm_ack_tracker import BUFFERED_ACK_TTL_SECONDS
+
+        _buffered_acks["stale"] = time.time() - (BUFFERED_ACK_TTL_SECONDS + 1)
+        _buffered_acks["fresh"] = time.time()
+
+        cleanup_expired_acks()
+
+        assert "stale" not in _buffered_acks
+        assert "fresh" in _buffered_acks
+
 
 class TestAckEventHandler:
     """Test the on_ack event handler."""
@@ -174,6 +200,43 @@ class TestAckEventHandler:
 
             mock_broadcast.assert_not_called()
             assert "expected" in _pending_acks
+            assert "different" in _buffered_acks
+
+    @pytest.mark.asyncio
+    async def test_first_dm_ack_clears_sibling_retry_codes(self, test_db):
+        """A DM should stop at ack_count=1 even if retry ACK codes arrive later."""
+        from app.event_handlers import on_ack
+
+        msg_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Hello",
+            received_at=1700000000,
+            conversation_key="aa" * 32,
+            sender_timestamp=1700000000,
+            outgoing=True,
+        )
+
+        track_pending_ack("ack1", message_id=msg_id, timeout_ms=10000)
+        track_pending_ack("ack2", message_id=msg_id, timeout_ms=10000)
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class FirstAckEvent:
+                payload = {"code": "ack1"}
+
+            class SecondAckEvent:
+                payload = {"code": "ack2"}
+
+            await on_ack(FirstAckEvent())
+            await on_ack(SecondAckEvent())
+
+            ack_count, _ = await MessageRepository.get_ack_and_paths(msg_id)
+            assert ack_count == 1
+            assert "ack2" not in _pending_acks
+            assert "ack2" in _buffered_acks
+            mock_broadcast.assert_called_once_with(
+                "message_acked", {"message_id": msg_id, "ack_count": 1}
+            )
 
     @pytest.mark.asyncio
     async def test_ack_empty_code_ignored(self, test_db):
@@ -187,6 +250,35 @@ class TestAckEventHandler:
 
             await on_ack(MockEvent())
 
+            mock_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_buffered_ack_can_be_claimed_after_early_arrival(self, test_db):
+        """An ACK that arrives before registration should be recoverable."""
+        from app.event_handlers import on_ack
+
+        msg_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Hello",
+            received_at=1700000000,
+            conversation_key="aa" * 32,
+            sender_timestamp=1700000000,
+            outgoing=True,
+        )
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {"code": "earlyack"}
+
+            await on_ack(MockEvent())
+
+            assert "earlyack" in _buffered_acks
+            assert track_pending_ack("earlyack", message_id=msg_id, timeout_ms=10000) is True
+            assert "earlyack" not in _buffered_acks
+            assert "earlyack" not in _pending_acks
+            ack_count, _ = await MessageRepository.get_ack_and_paths(msg_id)
+            assert ack_count == 0
             mock_broadcast.assert_not_called()
 
 
@@ -291,6 +383,7 @@ class TestContactMessageCLIFiltering:
             "acked",
             "sender_name",
             "channel_name",
+            "packet_id",
         }
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:
@@ -337,6 +430,121 @@ class TestContactMessageCLIFiltering:
             event_type, payload = mock_broadcast.call_args[0]
             assert event_type == "message_acked"
             assert set(payload.keys()) == EXPECTED_ACK_KEYS
+
+    @pytest.mark.asyncio
+    async def test_room_server_message_uses_author_prefix_for_sender_metadata(self, test_db):
+        from app.event_handlers import on_contact_message
+
+        room_key = "ab" * 32
+        author_key = "12345678" + ("cd" * 28)
+        await ContactRepository.upsert(
+            {
+                "public_key": room_key,
+                "name": "Ops Board",
+                "type": 3,
+                "flags": 0,
+                "direct_path": None,
+                "direct_path_len": -1,
+                "direct_path_hash_mode": -1,
+                "last_advert": None,
+                "lat": None,
+                "lon": None,
+                "last_seen": None,
+                "on_radio": False,
+                "last_contacted": None,
+                "first_seen": None,
+            }
+        )
+        await ContactRepository.upsert(
+            {
+                "public_key": author_key,
+                "name": "Alice",
+                "type": 1,
+                "flags": 0,
+                "direct_path": None,
+                "direct_path_len": -1,
+                "direct_path_hash_mode": -1,
+                "last_advert": None,
+                "lat": None,
+                "lon": None,
+                "last_seen": None,
+                "on_radio": False,
+                "last_contacted": None,
+                "first_seen": None,
+            }
+        )
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {
+                    "pubkey_prefix": room_key[:12],
+                    "text": "hello room",
+                    "txt_type": 2,
+                    "signature": author_key[:8],
+                    "sender_timestamp": 1700000000,
+                }
+
+            await on_contact_message(MockEvent())
+
+            event_type, payload = mock_broadcast.call_args_list[-1][0]
+            assert event_type == "message"
+            assert payload["conversation_key"] == room_key
+            assert payload["sender_name"] == "Alice"
+            assert payload["sender_key"] == author_key
+            assert payload["signature"] == author_key[:8]
+
+    @pytest.mark.asyncio
+    async def test_room_server_message_does_not_create_placeholder_contact_for_unknown_author(
+        self, test_db
+    ):
+        from app.event_handlers import on_contact_message
+
+        room_key = "ab" * 32
+        author_prefix = "12345678"
+        await ContactRepository.upsert(
+            {
+                "public_key": room_key,
+                "name": "Ops Board",
+                "type": 3,
+                "flags": 0,
+                "direct_path": None,
+                "direct_path_len": -1,
+                "direct_path_hash_mode": -1,
+                "last_advert": None,
+                "lat": None,
+                "lon": None,
+                "last_seen": None,
+                "on_radio": False,
+                "last_contacted": None,
+                "first_seen": None,
+            }
+        )
+
+        with patch("app.event_handlers.broadcast_event") as mock_broadcast:
+
+            class MockEvent:
+                payload = {
+                    "pubkey_prefix": room_key[:12],
+                    "text": "hello room",
+                    "txt_type": 2,
+                    "signature": author_prefix,
+                    "sender_timestamp": 1700000000,
+                }
+
+            await on_contact_message(MockEvent())
+
+            message = (await MessageRepository.get_all(msg_type="PRIV", conversation_key=room_key))[
+                0
+            ]
+            assert message.sender_name is None
+            assert message.sender_key == author_prefix
+            assert await ContactRepository.get_by_key(author_prefix) is None
+
+            assert len(mock_broadcast.call_args_list) == 1
+            event_type, payload = mock_broadcast.call_args_list[0][0]
+            assert event_type == "message"
+            assert payload["sender_key"] == author_prefix
 
     @pytest.mark.asyncio
     async def test_missing_txt_type_defaults_to_normal(self, test_db):
@@ -412,6 +620,8 @@ class TestContactMessageCLIFiltering:
             sender_timestamp=1700000000,
             received_at=1700000000,
         )
+        await ContactNameHistoryRepository.record_name(prefix, "Prefix Sender", 1699999990)
+        await ContactAdvertPathRepository.record_observation(prefix, "1122", 1699999995)
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:
 
@@ -439,6 +649,19 @@ class TestContactMessageCLIFiltering:
             messages = await MessageRepository.get_all(conversation_key=full_key)
             assert len(messages) == 1
             assert messages[0].conversation_key == full_key
+
+            assert await ContactNameHistoryRepository.get_history(prefix) == []
+            assert await ContactAdvertPathRepository.get_recent_for_contact(prefix) == []
+
+            resolved_history = await ContactNameHistoryRepository.get_history(full_key)
+            assert {entry.name for entry in resolved_history} == {
+                "Prefix Sender",
+                "Resolved Sender",
+            }
+
+            resolved_paths = await ContactAdvertPathRepository.get_recent_for_contact(full_key)
+            assert len(resolved_paths) == 1
+            assert resolved_paths[0].path == "1122"
 
             event_types = [call.args[0] for call in mock_broadcast.call_args_list]
             assert "contact" in event_types
@@ -650,32 +873,32 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_tracks_subscriptions(self):
         """Registering handlers populates _active_subscriptions."""
-        mock_backend = MagicMock()
+        mock_meshcore = MagicMock()
         mock_subscription = MagicMock()
-        mock_backend.subscribe.return_value = mock_subscription
+        mock_meshcore.subscribe.return_value = mock_subscription
 
-        register_event_handlers(mock_backend)
+        register_event_handlers(mock_meshcore)
 
         # Should have 5 subscriptions (one per event type)
         assert len(_active_subscriptions) == 5
-        assert mock_backend.subscribe.call_count == 5
+        assert mock_meshcore.subscribe.call_count == 5
 
     def test_register_handlers_twice_does_not_duplicate(self):
         """Calling register_event_handlers twice unsubscribes old handlers first."""
-        mock_backend = MagicMock()
+        mock_meshcore = MagicMock()
 
         # First call: create mock subscriptions
         first_subs = [MagicMock() for _ in range(5)]
-        mock_backend.subscribe.side_effect = first_subs
-        register_event_handlers(mock_backend)
+        mock_meshcore.subscribe.side_effect = first_subs
+        register_event_handlers(mock_meshcore)
 
         assert len(_active_subscriptions) == 5
         first_sub_objects = list(_active_subscriptions)
 
         # Second call: create new mock subscriptions
         second_subs = [MagicMock() for _ in range(5)]
-        mock_backend.subscribe.side_effect = second_subs
-        register_event_handlers(mock_backend)
+        mock_meshcore.subscribe.side_effect = second_subs
+        register_event_handlers(mock_meshcore)
 
         # Old subscriptions should have been unsubscribed
         for sub in first_sub_objects:
@@ -690,15 +913,15 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_clears_before_adding(self):
         """The subscription list is cleared before adding new subscriptions."""
-        mock_backend = MagicMock()
-        mock_backend.subscribe.return_value = MagicMock()
+        mock_meshcore = MagicMock()
+        mock_meshcore.subscribe.return_value = MagicMock()
 
         # Pre-populate with stale subscriptions (simulating a bug scenario)
         stale_sub = MagicMock()
         _active_subscriptions.append(stale_sub)
         _active_subscriptions.append(stale_sub)
 
-        register_event_handlers(mock_backend)
+        register_event_handlers(mock_meshcore)
 
         # Stale subscriptions should have been unsubscribed
         assert stale_sub.unsubscribe.call_count == 2
@@ -708,8 +931,8 @@ class TestEventHandlerRegistration:
 
     def test_register_handlers_survives_unsubscribe_exception(self):
         """If unsubscribe() throws, registration still completes successfully."""
-        mock_backend = MagicMock()
-        mock_backend.subscribe.return_value = MagicMock()
+        mock_meshcore = MagicMock()
+        mock_meshcore.subscribe.return_value = MagicMock()
 
         # Create subscriptions where unsubscribe raises an exception
         bad_sub = MagicMock()
@@ -720,7 +943,7 @@ class TestEventHandlerRegistration:
         _active_subscriptions.append(good_sub)
 
         # Should not raise despite the exception
-        register_event_handlers(mock_backend)
+        register_event_handlers(mock_meshcore)
 
         # Both unsubscribe methods should have been called
         bad_sub.unsubscribe.assert_called_once()
@@ -759,9 +982,9 @@ class TestOnPathUpdate:
         # Verify path was updated in DB
         contact = await ContactRepository.get_by_key("aa" * 32)
         assert contact is not None
-        assert contact.last_path == "0102"
-        assert contact.last_path_len == 2
-        assert contact.out_path_hash_mode == 0
+        assert contact.direct_path == "0102"
+        assert contact.direct_path_len == 2
+        assert contact.direct_path_hash_mode == 0
 
     @pytest.mark.asyncio
     async def test_updates_path_hash_mode_when_present(self, test_db):
@@ -789,9 +1012,9 @@ class TestOnPathUpdate:
 
         contact = await ContactRepository.get_by_key("ab" * 32)
         assert contact is not None
-        assert contact.last_path == "aa00bb00"
-        assert contact.last_path_len == 2
-        assert contact.out_path_hash_mode == 1
+        assert contact.direct_path == "aa00bb00"
+        assert contact.direct_path_len == 2
+        assert contact.direct_path_hash_mode == 1
 
     @pytest.mark.asyncio
     async def test_does_nothing_when_contact_not_found(self, test_db):
@@ -833,8 +1056,8 @@ class TestOnPathUpdate:
 
         contact = await ContactRepository.get_by_key("bb" * 32)
         assert contact is not None
-        assert contact.last_path == "0a0b"
-        assert contact.last_path_len == 2
+        assert contact.direct_path == "0a0b"
+        assert contact.direct_path_len == 2
 
     @pytest.mark.asyncio
     async def test_missing_path_fields_does_not_modify_contact(self, test_db):
@@ -849,7 +1072,7 @@ class TestOnPathUpdate:
                 "flags": 0,
             }
         )
-        await ContactRepository.update_path("dd" * 32, "beef", 2)
+        await ContactRepository.update_direct_path("dd" * 32, "beef", 2)
 
         class MockEvent:
             payload = {"public_key": "dd" * 32}
@@ -858,8 +1081,8 @@ class TestOnPathUpdate:
 
         contact = await ContactRepository.get_by_key("dd" * 32)
         assert contact is not None
-        assert contact.last_path == "beef"
-        assert contact.last_path_len == 2
+        assert contact.direct_path == "beef"
+        assert contact.direct_path_len == 2
 
     @pytest.mark.asyncio
     async def test_missing_identity_fields_noop(self, test_db):
@@ -874,7 +1097,7 @@ class TestOnPathUpdate:
                 "flags": 0,
             }
         )
-        await ContactRepository.update_path("ee" * 32, "abcd", 2)
+        await ContactRepository.update_direct_path("ee" * 32, "abcd", 2)
 
         class MockEvent:
             payload = {}
@@ -883,8 +1106,8 @@ class TestOnPathUpdate:
 
         contact = await ContactRepository.get_by_key("ee" * 32)
         assert contact is not None
-        assert contact.last_path == "abcd"
-        assert contact.last_path_len == 2
+        assert contact.direct_path == "abcd"
+        assert contact.direct_path_len == 2
 
 
 class TestOnNewContact:
@@ -911,12 +1134,14 @@ class TestOnNewContact:
 
             await on_new_contact(MockEvent())
 
-            # Verify contact was created in real DB
+            # Verify contact was created in real DB. NEW_CONTACT is the radio's
+            # stored contact DB, not an RF observation, so last_seen stays NULL
+            # until we actually hear the contact on the air.
             contact = await ContactRepository.get_by_key("cc" * 32)
             assert contact is not None
             assert contact.name == "Charlie"
             assert contact.on_radio is False
-            assert contact.last_seen == 1700000000
+            assert contact.last_seen is None
 
             mock_broadcast.assert_called_once()
             event_type, contact_data = mock_broadcast.call_args[0]
@@ -957,3 +1182,62 @@ class TestOnNewContact:
 
             contacts = await ContactRepository.get_all()
             assert len(contacts) == 0
+
+    @pytest.mark.asyncio
+    async def test_blocks_new_contact_with_discovery_blocked_type(self, test_db):
+        """NEW_CONTACT for a blocked type should not create a contact."""
+        from app.event_handlers import on_new_contact
+        from app.repository import AppSettingsRepository
+
+        # Block clients (type 1) and rooms (type 3)
+        await AppSettingsRepository.update(discovery_blocked_types=[1, 3])
+
+        with (
+            patch("app.event_handlers.broadcast_event") as mock_broadcast,
+            patch("app.event_handlers.time") as mock_time,
+        ):
+            mock_time.time.return_value = 1700000000
+
+            class MockEvent:
+                payload = {
+                    "public_key": "dd" * 32,
+                    "adv_name": "BlockedClient",
+                    "type": 1,
+                    "flags": 0,
+                }
+
+            await on_new_contact(MockEvent())
+
+            contact = await ContactRepository.get_by_key("dd" * 32)
+            assert contact is None
+            mock_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allows_new_contact_with_non_blocked_type(self, test_db):
+        """NEW_CONTACT for a non-blocked type should still be created."""
+        from app.event_handlers import on_new_contact
+        from app.repository import AppSettingsRepository
+
+        # Block only clients (type 1)
+        await AppSettingsRepository.update(discovery_blocked_types=[1])
+
+        with (
+            patch("app.event_handlers.broadcast_event") as mock_broadcast,
+            patch("app.event_handlers.time") as mock_time,
+        ):
+            mock_time.time.return_value = 1700000000
+
+            class MockEvent:
+                payload = {
+                    "public_key": "ee" * 32,
+                    "adv_name": "AllowedRepeater",
+                    "type": 2,
+                    "flags": 0,
+                }
+
+            await on_new_contact(MockEvent())
+
+            contact = await ContactRepository.get_by_key("ee" * 32)
+            assert contact is not None
+            assert contact.name == "AllowedRepeater"
+            mock_broadcast.assert_called_once()

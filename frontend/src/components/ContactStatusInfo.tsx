@@ -1,18 +1,18 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { toast } from './ui/sonner';
-import { api } from '../api';
 import { formatTime } from '../utils/messageParser';
 import {
   isValidLocation,
   calculateDistance,
   formatDistance,
   formatRouteLabel,
-  formatRoutingOverrideInput,
   getEffectiveContactRoute,
 } from '../utils/pathUtils';
 import { getMapFocusHash } from '../utils/urlHash';
 import { handleKeyboardActivate } from '../utils/a11y';
 import type { Contact } from '../types';
+import { useDistanceUnit } from '../contexts/DistanceUnitContext';
+import { ContactRoutingOverrideModal } from './ContactRoutingOverrideModal';
 
 interface ContactStatusInfoProps {
   contact: Contact;
@@ -25,27 +25,10 @@ interface ContactStatusInfoProps {
  * shared between ChatHeader and RepeaterDashboard.
  */
 export function ContactStatusInfo({ contact, ourLat, ourLon }: ContactStatusInfoProps) {
+  const { distanceUnit } = useDistanceUnit();
+  const [routingModalOpen, setRoutingModalOpen] = useState(false);
   const parts: ReactNode[] = [];
   const effectiveRoute = getEffectiveContactRoute(contact);
-
-  const editRoutingOverride = () => {
-    const route = window.prompt(
-      'Enter explicit path as comma-separated 1, 2, or 3 byte hops (for example "ae,f1" or "ae92,f13e").\nEnter 0 to force direct always.\nEnter -1 to force flooding always.\nLeave blank to clear the override and reset to flood until a new path is heard.',
-      formatRoutingOverrideInput(contact)
-    );
-    if (route === null) {
-      return;
-    }
-
-    api.setContactRoutingOverride(contact.public_key, route).then(
-      () =>
-        toast.success(
-          route.trim() === '' ? 'Routing override cleared' : 'Routing override updated'
-        ),
-      (err: unknown) =>
-        toast.error(err instanceof Error ? err.message : 'Failed to update routing override')
-    );
-  };
 
   if (contact.last_seen) {
     parts.push(`Last heard: ${formatTime(contact.last_seen)}`);
@@ -54,13 +37,13 @@ export function ContactStatusInfo({ contact, ourLat, ourLon }: ContactStatusInfo
   parts.push(
     <span
       key="path"
-      className="cursor-pointer hover:text-primary hover:underline"
+      className="cursor-pointer underline underline-offset-2 decoration-muted-foreground/50 hover:text-primary"
       role="button"
       tabIndex={0}
       onKeyDown={handleKeyboardActivate}
       onClick={(e) => {
         e.stopPropagation();
-        editRoutingOverride();
+        setRoutingModalOpen(true);
       }}
       title="Click to edit routing override"
     >
@@ -93,7 +76,7 @@ export function ContactStatusInfo({ contact, ourLat, ourLon }: ContactStatusInfo
         >
           {contact.lat!.toFixed(3)}, {contact.lon!.toFixed(3)}
         </span>
-        {distFromUs !== null && ` (${formatDistance(distFromUs)})`}
+        {distFromUs !== null && ` (${formatDistance(distFromUs, distanceUnit)})`}
       </span>
     );
   }
@@ -101,15 +84,24 @@ export function ContactStatusInfo({ contact, ourLat, ourLon }: ContactStatusInfo
   if (parts.length === 0) return null;
 
   return (
-    <span className="font-normal text-sm text-muted-foreground flex-shrink-0">
-      (
-      {parts.map((part, i) => (
-        <span key={i}>
-          {i > 0 && ', '}
-          {part}
-        </span>
-      ))}
-      )
-    </span>
+    <>
+      <span className="font-normal text-sm text-muted-foreground flex-shrink-0">
+        (
+        {parts.map((part, i) => (
+          <span key={i}>
+            {i > 0 && ', '}
+            {part}
+          </span>
+        ))}
+        )
+      </span>
+      <ContactRoutingOverrideModal
+        open={routingModalOpen}
+        onClose={() => setRoutingModalOpen(false)}
+        contact={contact}
+        onSaved={(message) => toast.success(message)}
+        onError={(message) => toast.error(message)}
+      />
+    </>
   );
 }

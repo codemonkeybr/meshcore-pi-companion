@@ -200,16 +200,16 @@ class TestParseExplicitHopRoute:
 
 
 class TestContactToRadioDictHashMode:
-    """Test that Contact.to_radio_dict() preserves the stored out_path_hash_mode."""
+    """Test that Contact.to_radio_dict() preserves the stored direct-route hash mode."""
 
     def test_preserves_1byte_mode(self):
         from app.models import Contact
 
         c = Contact(
             public_key="aa" * 32,
-            last_path="1a2b3c",
-            last_path_len=3,
-            out_path_hash_mode=0,
+            direct_path="1a2b3c",
+            direct_path_len=3,
+            direct_path_hash_mode=0,
         )
         d = c.to_radio_dict()
         assert d["out_path_hash_mode"] == 0
@@ -219,9 +219,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="bb" * 32,
-            last_path="1a2b3c4d",
-            last_path_len=2,
-            out_path_hash_mode=1,
+            direct_path="1a2b3c4d",
+            direct_path_len=2,
+            direct_path_hash_mode=1,
         )
         d = c.to_radio_dict()
         assert d["out_path_hash_mode"] == 1
@@ -231,9 +231,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="cc" * 32,
-            last_path="1a2b3c4d5e6f",
-            last_path_len=2,
-            out_path_hash_mode=2,
+            direct_path="1a2b3c4d5e6f",
+            direct_path_len=2,
+            direct_path_hash_mode=2,
         )
         d = c.to_radio_dict()
         assert d["out_path_hash_mode"] == 2
@@ -243,9 +243,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="dd" * 32,
-            last_path=None,
-            last_path_len=-1,
-            out_path_hash_mode=-1,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
         )
         d = c.to_radio_dict()
         assert d["out_path_hash_mode"] == -1
@@ -255,9 +255,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="ee" * 32,
-            last_path="aa00bb00",
-            last_path_len=2,
-            out_path_hash_mode=1,
+            direct_path="aa00bb00",
+            direct_path_len=2,
+            direct_path_hash_mode=1,
         )
         d = c.to_radio_dict()
         assert d["out_path_hash_mode"] == 1
@@ -267,9 +267,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="ff" * 32,
-            last_path="3f3f69de1c7b7e7662",
-            last_path_len=-125,
-            out_path_hash_mode=2,
+            direct_path="3f3f69de1c7b7e7662",
+            direct_path_len=-125,
+            direct_path_hash_mode=2,
         )
         d = c.to_radio_dict()
         assert d["out_path"] == "3f3f69de1c7b7e7662"
@@ -281,9 +281,9 @@ class TestContactToRadioDictHashMode:
 
         c = Contact(
             public_key="11" * 32,
-            last_path="aabb",
-            last_path_len=1,
-            out_path_hash_mode=0,
+            direct_path="aabb",
+            direct_path_len=1,
+            direct_path_hash_mode=0,
             route_override_path="cc00dd00",
             route_override_len=2,
             route_override_hash_mode=1,
@@ -295,12 +295,12 @@ class TestContactToRadioDictHashMode:
 
 
 class TestContactFromRadioDictHashMode:
-    """Test that Contact.from_radio_dict() preserves explicit path hash mode."""
+    """Test that ContactUpsert.from_radio_dict() preserves explicit path hash mode."""
 
     def test_preserves_mode_from_radio_payload(self):
-        from app.models import Contact
+        from app.models import ContactUpsert
 
-        d = Contact.from_radio_dict(
+        upsert = ContactUpsert.from_radio_dict(
             "aa" * 32,
             {
                 "adv_name": "Alice",
@@ -309,12 +309,14 @@ class TestContactFromRadioDictHashMode:
                 "out_path_hash_mode": 1,
             },
         )
-        assert d["out_path_hash_mode"] == 1
+        assert upsert.direct_path == "aa00bb00"
+        assert upsert.direct_path_len == 2
+        assert upsert.direct_path_hash_mode == 1
 
     def test_flood_falls_back_to_minus_one(self):
-        from app.models import Contact
+        from app.models import ContactUpsert
 
-        d = Contact.from_radio_dict(
+        upsert = ContactUpsert.from_radio_dict(
             "bb" * 32,
             {
                 "adv_name": "Bob",
@@ -322,4 +324,6 @@ class TestContactFromRadioDictHashMode:
                 "out_path_len": -1,
             },
         )
-        assert d["out_path_hash_mode"] == -1
+        assert upsert.direct_path == ""
+        assert upsert.direct_path_len == -1
+        assert upsert.direct_path_hash_mode == -1

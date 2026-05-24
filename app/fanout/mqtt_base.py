@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -21,6 +22,14 @@ import aiomqtt
 logger = logging.getLogger(__name__)
 
 _BACKOFF_MIN = 5
+
+
+def _format_error_detail(exc: Exception) -> str:
+    """Return a short operator-facing error string."""
+    message = str(exc).strip()
+    if message:
+        return message
+    return type(exc).__name__
 
 
 def _broadcast_health() -> None:
@@ -54,12 +63,31 @@ class BaseMqttPublisher(ABC):
         self._settings_version: int = 0
         self._version_event: asyncio.Event = asyncio.Event()
         self.connected: bool = False
+        self.integration_name: str = ""
+        self._last_error: str | None = None
+        self._error_notified: bool = False
+
+    def set_integration_name(self, name: str) -> None:
+        """Attach the configured fanout-module name for operator-facing logs."""
+        self.integration_name = name.strip()
+
+    def _integration_label(self) -> str:
+        """Return a concise label for logs, including the configured module name."""
+        if self.integration_name:
+            return f"{self._log_prefix} [{self.integration_name}]"
+        return self._log_prefix
+
+    @property
+    def last_error(self) -> str | None:
+        """Return the most recent retained connection/publish error."""
+        return self._last_error
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self, settings: object) -> None:
         """Start the background connection loop."""
         self._settings = settings
+        self._last_error = None
         self._settings_version += 1
         self._version_event.set()
         if self._task is None or self._task.done():
@@ -76,6 +104,8 @@ class BaseMqttPublisher(ABC):
         self._task = None
         self._client = None
         self.connected = False
+        self._last_error = None
+        self._error_notified = False
 
     async def restart(self, settings: object) -> None:
         """Called when settings change — stop + start."""
@@ -90,13 +120,15 @@ class BaseMqttPublisher(ABC):
             await self._client.publish(topic, json.dumps(payload), retain=retain)
         except Exception as e:
             logger.warning(
-                "%s publish failed on %s: %s",
-                self._log_prefix,
+                "%s publish failed on %s. This is usually transient network noise; "
+                "if it self-resolves and reconnects, it is generally not a concern. Persistent errors may indicate a problem with your network connection or MQTT broker. Original error: %s",
+                self._integration_label(),
                 topic,
                 e,
                 exc_info=True,
             )
             self.connected = False
+            self._last_error = _format_error_detail(e)
             # Wake the connection loop so it exits the wait and reconnects
             self._settings_version += 1
             self._version_event.set()
@@ -166,7 +198,7 @@ class BaseMqttPublisher(ABC):
                             self._version_event.wait(),
                             timeout=self._not_configured_timeout,
                         )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 except asyncio.CancelledError:
                     return
@@ -186,6 +218,8 @@ class BaseMqttPublisher(ABC):
                 async with aiomqtt.Client(**client_kwargs) as client:
                     self._client = client
                     self.connected = True
+                    self._last_error = None
+                    self._error_notified = False
                     backoff = _BACKOFF_MIN
 
                     title, detail = self._on_connected(settings)
@@ -200,7 +234,7 @@ class BaseMqttPublisher(ABC):
                         self._version_event.clear()
                         try:
                             await asyncio.wait_for(self._version_event.wait(), timeout=60)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             elapsed = time.monotonic() - connect_time
                             await self._on_periodic_wake(elapsed)
                             if self._should_break_wait(elapsed):
@@ -220,20 +254,49 @@ class BaseMqttPublisher(ABC):
             except Exception as e:
                 self.connected = False
                 self._client = None
+                self._last_error = _format_error_detail(e)
 
-                title, detail = self._on_error()
-                broadcast_error(title, detail)
-                _broadcast_health()
-                # Avoid full traceback for expected connection failures (auth, refused, etc.)
-                exc_info = not isinstance(
-                    e, getattr(aiomqtt.exceptions, "MqttConnectError", type(None))
+                # Windows ProactorEventLoop does not implement add_reader /
+                # add_writer, which paho-mqtt requires.  The failure can
+                # surface as a direct NotImplementedError (add_writer in
+                # __aenter__) or as a generic timeout (add_reader fails
+                # inside an event-loop callback, so paho never hears back).
+                # Either way, if we're on Windows with Proactor the root
+                # cause is the same and retrying won't help.
+                _on_proactor = (
+                    sys.platform == "win32"
+                    and type(asyncio.get_event_loop()).__name__ == "ProactorEventLoop"
                 )
+                if _on_proactor:
+                    broadcast_error(
+                        "MQTT unavailable — Windows event loop incompatible",
+                        "The default Windows event loop (ProactorEventLoop) does "
+                        "not support MQTT. Add --loop none to your uvicorn "
+                        "command and restart. See README.md for details.",
+                    )
+                    _broadcast_health()
+                    logger.error(
+                        "%s cannot run: Windows ProactorEventLoop does not "
+                        "implement add_reader/add_writer required by paho-mqtt. "
+                        "Restart uvicorn with '--loop none' to use "
+                        "SelectorEventLoop instead. Giving up (will not retry).",
+                        self._integration_label(),
+                    )
+                    return
+
+                if not self._error_notified:
+                    title, detail = self._on_error()
+                    broadcast_error(title, detail)
+                    _broadcast_health()
+                    self._error_notified = True
                 logger.warning(
-                    "%s connection error: %s (reconnecting in %ds)",
-                    self._log_prefix,
+                    "%s connection error. This is usually transient network noise; "
+                    "if it self-resolves, it is generally not a concern: %s "
+                    "(reconnecting in %ds). If this error persists, check your network connection and MQTT broker status.",
+                    self._integration_label(),
                     e,
                     backoff,
-                    exc_info=exc_info,
+                    exc_info=True,
                 )
 
                 try:

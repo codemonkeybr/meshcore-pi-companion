@@ -1,11 +1,23 @@
-import { lazy, Suspense, useRef, type ComponentProps } from 'react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+} from 'react';
+import { useSwipeable } from 'react-swipeable';
 
 import { StatusBar } from './StatusBar';
 import { Sidebar } from './Sidebar';
 import { ConversationPane } from './ConversationPane';
 import { NewMessageModal } from './NewMessageModal';
+import { BulkAddChannelResultModal } from './BulkAddChannelResultModal';
 import { ContactInfoPane } from './ContactInfoPane';
 import { ChannelInfoPane } from './ChannelInfoPane';
+import { CommandPalette } from './CommandPalette';
+import { SecurityWarningModal } from './SecurityWarningModal';
 import { Toaster } from './ui/sonner';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import {
@@ -31,22 +43,29 @@ const SearchView = lazy(() => import('./SearchView').then((m) => ({ default: m.S
 type SidebarProps = ComponentProps<typeof Sidebar>;
 type ConversationPaneProps = ComponentProps<typeof ConversationPane>;
 type NewMessageModalProps = Omit<ComponentProps<typeof NewMessageModal>, 'open' | 'onClose'>;
+type BulkAddChannelResultModalProps = Omit<
+  ComponentProps<typeof BulkAddChannelResultModal>,
+  'open' | 'onClose'
+>;
 type ContactInfoPaneProps = ComponentProps<typeof ContactInfoPane>;
 type ChannelInfoPaneProps = ComponentProps<typeof ChannelInfoPane>;
 
 interface AppShellProps {
   localLabel: LocalLabel;
   showNewMessage: boolean;
+  showBulkAddResults: boolean;
   showSettings: boolean;
   settingsSection: SettingsSection;
   sidebarOpen: boolean;
   showCracker: boolean;
+  disabledSettingsSections?: SettingsSection[];
   onSettingsSectionChange: (section: SettingsSection) => void;
   onSidebarOpenChange: (open: boolean) => void;
   onCrackerRunningChange: (running: boolean) => void;
   onToggleSettingsView: () => void;
   onCloseSettingsView: () => void;
   onCloseNewMessage: () => void;
+  onCloseBulkAddResults: () => void;
   onLocalLabelChange: (label: LocalLabel) => void;
   statusProps: Pick<ComponentProps<typeof StatusBar>, 'health' | 'config'>;
   sidebarProps: SidebarProps;
@@ -58,23 +77,28 @@ interface AppShellProps {
   >;
   crackerProps: Omit<CrackerPanelProps, 'visible' | 'onRunningChange'>;
   newMessageModalProps: NewMessageModalProps;
+  bulkAddChannelResultModalProps: BulkAddChannelResultModalProps;
   contactInfoPaneProps: ContactInfoPaneProps;
   channelInfoPaneProps: ChannelInfoPaneProps;
+  onRepeaterAutoLogin: (publicKey: string, displayName: string) => void;
 }
 
 export function AppShell({
   localLabel,
   showNewMessage,
+  showBulkAddResults,
   showSettings,
   settingsSection,
   sidebarOpen,
   showCracker,
+  disabledSettingsSections = [],
   onSettingsSectionChange,
   onSidebarOpenChange,
   onCrackerRunningChange,
   onToggleSettingsView,
   onCloseSettingsView,
   onCloseNewMessage,
+  onCloseBulkAddResults,
   onLocalLabelChange,
   statusProps,
   sidebarProps,
@@ -83,9 +107,37 @@ export function AppShell({
   settingsProps,
   crackerProps,
   newMessageModalProps,
+  bulkAddChannelResultModalProps,
   contactInfoPaneProps,
   channelInfoPaneProps,
+  onRepeaterAutoLogin,
 }: AppShellProps) {
+  const swipeHandlers = useSwipeable({
+    onSwipedRight: ({ initial }) => {
+      if (initial[0] < 30 && !sidebarOpen && window.innerWidth < 768) {
+        onSidebarOpenChange(true);
+      }
+    },
+    trackTouch: true,
+    trackMouse: false,
+    preventScrollOnSwipe: true,
+  });
+
+  const closeSwipeHandlers = useSwipeable({
+    onSwipedLeft: () => onSidebarOpenChange(false),
+    trackTouch: true,
+    trackMouse: false,
+    preventScrollOnSwipe: false,
+  });
+
+  const handleOpenSettings = useCallback(
+    (section: SettingsSection) => {
+      onSettingsSectionChange(section);
+      if (!showSettings) onToggleSettingsView();
+    },
+    [onSettingsSectionChange, onToggleSettingsView, showSettings]
+  );
+
   const searchMounted = useRef(false);
   if (conversationPaneProps.activeConversation?.type === 'search') {
     searchMounted.current = true;
@@ -96,13 +148,33 @@ export function AppShell({
     crackerMounted.current = true;
   }
 
+  // Position toasts below the conversation header when in chat, otherwise below the status bar
+  const TOAST_TOP_PADDING = 10;
+  const [toastTopOffset, setToastTopOffset] = useState<number | undefined>(undefined);
+  const hasLocalLabel = !!localLabel.text;
+  const activeType = conversationPaneProps.activeConversation?.type;
+  const activeId = conversationPaneProps.activeConversation?.id;
+  useEffect(() => {
+    const measure = () => {
+      const anchor =
+        document.querySelector('[data-toast-anchor="conversation"]') ??
+        document.querySelector('[data-toast-anchor="statusbar"]');
+      setToastTopOffset(
+        anchor ? anchor.getBoundingClientRect().top + TOAST_TOP_PADDING : undefined
+      );
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [hasLocalLabel, activeType, activeId, showSettings]);
+
   const settingsSidebarContent = (
     <nav
       className="sidebar w-60 h-full min-h-0 overflow-hidden bg-card border-r border-border flex flex-col"
       aria-label="Settings"
     >
       <div className="flex justify-between items-center px-3 py-2.5 border-b border-border">
-        <h2 className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+        <h2 className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
           Settings
         </h2>
         <button
@@ -118,13 +190,16 @@ export function AppShell({
       <div className="flex-1 min-h-0 overflow-y-auto py-1 [contain:layout_paint]">
         {SETTINGS_SECTION_ORDER.map((section) => {
           const Icon = SETTINGS_SECTION_ICONS[section];
+          const disabled = disabledSettingsSections.includes(section);
           return (
             <button
               key={section}
               type="button"
+              disabled={disabled}
               className={cn(
-                'w-full px-3 py-2 text-left text-[13px] border-l-2 border-transparent hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
-                settingsSection === section && 'bg-accent border-l-primary'
+                'w-full px-3 py-2 text-left text-[0.8125rem] border-l-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-not-allowed disabled:opacity-50',
+                !disabled && 'hover:bg-accent',
+                settingsSection === section && !disabled && 'bg-accent border-l-primary'
               )}
               aria-current={settingsSection === section ? 'true' : undefined}
               onClick={() => onSettingsSectionChange(section)}
@@ -147,7 +222,7 @@ export function AppShell({
   );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" {...swipeHandlers}>
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:p-2 focus:bg-primary focus:text-primary-foreground"
@@ -173,6 +248,7 @@ export function AppShell({
         onSettingsClick={onToggleSettingsView}
         onMenuClick={showSettings ? undefined : () => onSidebarOpenChange(true)}
       />
+      <div data-toast-anchor="statusbar" aria-hidden="true" />
 
       <div className="flex flex-1 overflow-hidden">
         <div className="hidden md:block min-h-0 overflow-hidden">{activeSidebarContent}</div>
@@ -190,7 +266,9 @@ export function AppShell({
               <SheetTitle>Navigation</SheetTitle>
               <SheetDescription>Sidebar navigation</SheetDescription>
             </SheetHeader>
-            <div className="flex-1 overflow-hidden">{activeSidebarContent}</div>
+            <div className="flex-1 overflow-hidden" {...closeSwipeHandlers}>
+              {activeSidebarContent}
+            </div>
           </SheetContent>
         </Sheet>
 
@@ -252,14 +330,6 @@ export function AppShell({
       </div>
 
       <div
-        ref={(el) => {
-          if (showCracker && el) {
-            const focusable = el.querySelector<HTMLElement>('input, button:not([disabled])');
-            if (focusable) {
-              setTimeout(() => focusable.focus(), 210);
-            }
-          }
-        }}
         className={cn(
           'border-t border-border bg-background transition-all duration-200 overflow-hidden',
           showCracker ? 'h-[275px]' : 'h-0'
@@ -269,7 +339,7 @@ export function AppShell({
           <Suspense
             fallback={
               <div className="flex items-center justify-center h-full text-muted-foreground">
-                Loading cracker...
+                Loading channel finder...
               </div>
             }
           >
@@ -286,15 +356,28 @@ export function AppShell({
         {...newMessageModalProps}
         open={showNewMessage}
         onClose={onCloseNewMessage}
-        onSelectConversation={(conv) => {
-          newMessageModalProps.onSelectConversation(conv);
-          onCloseNewMessage();
-        }}
+      />
+      <BulkAddChannelResultModal
+        {...bulkAddChannelResultModalProps}
+        open={showBulkAddResults}
+        onClose={onCloseBulkAddResults}
       />
 
+      <CommandPalette
+        contacts={sidebarProps.contacts}
+        channels={sidebarProps.channels}
+        onSelectConversation={sidebarProps.onSelectConversation}
+        onOpenSettings={handleOpenSettings}
+        onRepeaterAutoLogin={onRepeaterAutoLogin}
+      />
+      <SecurityWarningModal health={statusProps.health} />
       <ContactInfoPane {...contactInfoPaneProps} />
       <ChannelInfoPane {...channelInfoPaneProps} />
-      <Toaster position="top-right" />
+      <Toaster
+        position="top-right"
+        offset={toastTopOffset !== undefined ? { top: toastTopOffset } : undefined}
+        mobileOffset={toastTopOffset !== undefined ? { top: toastTopOffset } : undefined}
+      />
     </div>
   );
 }

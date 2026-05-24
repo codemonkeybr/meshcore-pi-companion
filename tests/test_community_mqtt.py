@@ -10,6 +10,7 @@ import nacl.bindings
 import pytest
 
 from app.fanout.community_mqtt import (
+    _CLIENT_ID,
     _DEFAULT_BROKER,
     _STATS_REFRESH_INTERVAL,
     CommunityMqttPublisher,
@@ -18,7 +19,6 @@ from app.fanout.community_mqtt import (
     _build_status_topic,
     _calculate_packet_hash,
     _decode_packet_fields,
-    _ed25519_sign_expanded,
     _format_raw_packet,
     _generate_jwt_token,
     _get_client_version,
@@ -28,6 +28,7 @@ from app.fanout.mqtt_community import (
     _publish_community_packet,
     _render_packet_topic,
 )
+from app.keystore import ed25519_sign_expanded
 
 
 def _make_test_keys() -> tuple[bytes, bytes]:
@@ -68,8 +69,8 @@ def _make_community_settings(**overrides) -> SimpleNamespace:
         "community_mqtt_password": "",
         "community_mqtt_iata": "",
         "community_mqtt_email": "",
-        "community_mqtt_owner": "",
         "community_mqtt_token_audience": "mqtt-us-v1.letsmesh.net",
+        "community_mqtt_websocket_path": "/",
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -90,13 +91,13 @@ class TestBase64UrlEncode:
 class TestJwtGeneration:
     def test_token_has_three_parts(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key)
+        token = _generate_jwt_token(private_key, public_key)
         parts = token.split(".")
         assert len(parts) == 3
 
     def test_header_contains_ed25519_alg(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key)
+        token = _generate_jwt_token(private_key, public_key)
         header_b64 = token.split(".")[0]
         # Add padding for base64 decoding
         import base64
@@ -108,26 +109,28 @@ class TestJwtGeneration:
 
     def test_payload_contains_required_fields(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key)
-        payload_b64 = token.split(".")[1]
-        import base64
+        with patch(
+            "app.fanout.community_mqtt.get_app_build_info",
+            return_value=SimpleNamespace(version="1.2.3", commit_hash="abcdef"),
+        ):
+            token = _generate_jwt_token(private_key, public_key)
+            payload_b64 = token.split(".")[1]
+            import base64
 
-        padded = payload_b64 + "=" * (4 - len(payload_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded))
-        assert payload["publicKey"] == public_key.hex().upper()
-        assert "iat" in payload
-        assert "exp" in payload
-        assert payload["exp"] - payload["iat"] == 86400
-        assert payload["aud"] == _DEFAULT_BROKER
-        # Main branch / broker format: owner = pubkey hex, client = identifier
-        assert payload["owner"] == public_key.hex().upper()
-        assert "client" in payload
-        # email only present when provided
-        assert payload.get("email", "") == ""
+            padded = payload_b64 + "=" * (4 - len(payload_b64) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded))
+            assert payload["publicKey"] == public_key.hex().upper()
+            assert "iat" in payload
+            assert "exp" in payload
+            assert payload["exp"] - payload["iat"] == 3300
+            assert payload["aud"] == _DEFAULT_BROKER
+            assert payload["owner"] == public_key.hex().upper()
+            assert payload["client"] == f"{_CLIENT_ID}/1.2.3-abcdef"
+            assert "email" not in payload  # omitted when empty
 
     def test_payload_includes_email_when_provided(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key, email="test@example.com")
+        token = _generate_jwt_token(private_key, public_key, email="test@example.com")
         payload_b64 = token.split(".")[1]
         import base64
 
@@ -137,7 +140,7 @@ class TestJwtGeneration:
 
     def test_payload_uses_custom_audience(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key, audience="custom.broker.net")
+        token = _generate_jwt_token(private_key, public_key, audience="custom.broker.net")
         payload_b64 = token.split(".")[1]
         import base64
 
@@ -147,7 +150,7 @@ class TestJwtGeneration:
 
     def test_signature_is_valid_hex(self):
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key)
+        token = _generate_jwt_token(private_key, public_key)
         sig_hex = token.split(".")[2]
         sig_bytes = bytes.fromhex(sig_hex)
         assert len(sig_bytes) == 64
@@ -155,7 +158,7 @@ class TestJwtGeneration:
     def test_signature_verifies(self):
         """Verify the JWT signature using nacl.bindings.crypto_sign_open."""
         private_key, public_key = _make_test_keys()
-        token, _ = _generate_jwt_token(private_key, public_key)
+        token = _generate_jwt_token(private_key, public_key)
         parts = token.split(".")
         signing_input = f"{parts[0]}.{parts[1]}".encode()
         signature = bytes.fromhex(parts[2])
@@ -166,33 +169,18 @@ class TestJwtGeneration:
         verified = nacl.bindings.crypto_sign_open(signed_message, public_key)
         assert verified == signing_input
 
-    def test_spi_seed_jwt_returns_standard_pubkey_and_verifies(self):
-        """With 32-byte SPI seed, JWT uses standard Ed25519 and returns (token, pubkey_hex)."""
-        from nacl.signing import SigningKey
-
-        seed = b"\x00" * 31 + b"\x01"  # deterministic test seed
-        standard_pubkey = SigningKey(seed).verify_key.encode()
-        token, jwt_pubkey_hex = _generate_jwt_token(seed, standard_pubkey)
-        assert jwt_pubkey_hex == standard_pubkey.hex().upper()
-        parts = token.split(".")
-        signing_input = f"{parts[0]}.{parts[1]}".encode()
-        signature = bytes.fromhex(parts[2])
-        signed_message = signature + signing_input
-        verified = nacl.bindings.crypto_sign_open(signed_message, standard_pubkey)
-        assert verified == signing_input
-
 
 class TestEddsaSignExpanded:
     def test_produces_64_byte_signature(self):
         private_key, public_key = _make_test_keys()
         message = b"test message"
-        sig = _ed25519_sign_expanded(message, private_key[:32], private_key[32:], public_key)
+        sig = ed25519_sign_expanded(message, private_key[:32], private_key[32:], public_key)
         assert len(sig) == 64
 
     def test_signature_verifies_with_nacl(self):
         private_key, public_key = _make_test_keys()
         message = b"hello world"
-        sig = _ed25519_sign_expanded(message, private_key[:32], private_key[32:], public_key)
+        sig = ed25519_sign_expanded(message, private_key[:32], private_key[32:], public_key)
 
         signed_message = sig + message
         verified = nacl.bindings.crypto_sign_open(signed_message, public_key)
@@ -200,18 +188,19 @@ class TestEddsaSignExpanded:
 
     def test_different_messages_produce_different_signatures(self):
         private_key, public_key = _make_test_keys()
-        sig1 = _ed25519_sign_expanded(b"msg1", private_key[:32], private_key[32:], public_key)
-        sig2 = _ed25519_sign_expanded(b"msg2", private_key[:32], private_key[32:], public_key)
+        sig1 = ed25519_sign_expanded(b"msg1", private_key[:32], private_key[32:], public_key)
+        sig2 = ed25519_sign_expanded(b"msg2", private_key[:32], private_key[32:], public_key)
         assert sig1 != sig2
 
 
 class TestPacketFormatConversion:
     def test_basic_field_mapping(self):
+        # FLOOD packet: header 0x01, path_len 0x00, payload 0xAA
         data = {
             "id": 1,
             "observation_id": 100,
             "timestamp": 1700000000,
-            "data": "0a1b2c3d",
+            "data": "0100AA",
             "payload_type": "ADVERT",
             "snr": 5.5,
             "rssi": -90,
@@ -220,24 +209,27 @@ class TestPacketFormatConversion:
         }
         result = _format_raw_packet(data, "TestNode", "AABBCCDD" * 8)
 
+        assert result is not None
         assert result["origin"] == "TestNode"
         assert result["origin_id"] == "AABBCCDD" * 8
-        assert result["raw"] == "0a1b2c3d"
-        assert result["SNR"] == "5.5"
-        assert result["RSSI"] == "-90"
+        assert result["raw"] == "0100AA"
+        assert result["SNR"] == 5.5
+        assert result["RSSI"] == -90
         assert result["type"] == "PACKET"
         assert result["direction"] == "rx"
-        assert result["len"] == "4"
+        assert result["len"] == "3"
 
     def test_timestamp_is_iso8601(self):
-        data = {"timestamp": 1700000000, "data": "00", "snr": None, "rssi": None}
+        data = {"timestamp": 1700000000, "data": "0100AA", "snr": None, "rssi": None}
         result = _format_raw_packet(data, "Node", "AA" * 32)
+        assert result is not None
         assert result["timestamp"]
         assert "T" in result["timestamp"]
 
     def test_snr_rssi_unknown_when_none(self):
-        data = {"timestamp": 0, "data": "00", "snr": None, "rssi": None}
+        data = {"timestamp": 0, "data": "0100AA", "snr": None, "rssi": None}
         result = _format_raw_packet(data, "Node", "AA" * 32)
+        assert result is not None
         assert result["SNR"] == "Unknown"
         assert result["RSSI"] == "Unknown"
 
@@ -263,18 +255,18 @@ class TestPacketFormatConversion:
             assert result["route"] == expected
 
     def test_hash_is_16_uppercase_hex_chars(self):
-        data = {"timestamp": 0, "data": "aabb", "snr": None, "rssi": None}
+        # FLOOD packet: header 0x01, path_len 0x00, payload AA
+        data = {"timestamp": 0, "data": "0100AA", "snr": None, "rssi": None}
         result = _format_raw_packet(data, "Node", "AA" * 32)
+        assert result is not None
         assert len(result["hash"]) == 16
         assert result["hash"] == result["hash"].upper()
 
-    def test_empty_data_handled(self):
-        data = {"timestamp": 0, "data": "", "snr": None, "rssi": None}
-        result = _format_raw_packet(data, "Node", "AA" * 32)
-        assert result["raw"] == ""
-        assert result["len"] == "0"
-        assert result["packet_type"] == "0"
-        assert result["route"] == "U"
+    def test_unparseable_packet_returns_none(self):
+        for raw_hex in ("", "aabb"):
+            data = {"timestamp": 0, "data": raw_hex, "snr": None, "rssi": None}
+            result = _format_raw_packet(data, "Node", "AA" * 32)
+            assert result is None, f"Expected None for {raw_hex!r}"
 
     def test_includes_reference_time_fields(self):
         data = {"timestamp": 0, "data": "0100aabb", "snr": 1.0, "rssi": -70}
@@ -312,14 +304,12 @@ class TestPacketFormatConversion:
         assert result["route"] == "F"
         assert "path" not in result
 
-    def test_unknown_version_uses_defaults(self):
+    def test_unknown_version_returns_none(self):
         # version=1 in high bits, type=5, route=1
         header = (1 << 6) | (5 << 2) | 1
         data = {"timestamp": 0, "data": f"{header:02x}00", "snr": 1.0, "rssi": -70}
         result = _format_raw_packet(data, "Node", "AA" * 32)
-        assert result["packet_type"] == "0"
-        assert result["route"] == "U"
-        assert result["payload_len"] == "0"
+        assert result is None
 
 
 class TestCalculatePacketHash:
@@ -648,15 +638,18 @@ class TestCommunityMqttPublisher:
 
 class TestPublishFailureSetsDisconnected:
     @pytest.mark.asyncio
-    async def test_publish_error_sets_connected_false(self):
+    async def test_publish_error_sets_connected_false(self, caplog):
         """A publish error should set connected=False so the loop can detect it."""
         pub = CommunityMqttPublisher()
+        pub.set_integration_name("LetsMesh West")
         pub.connected = True
         mock_client = MagicMock()
         mock_client.publish = MagicMock(side_effect=Exception("broker gone"))
         pub._client = mock_client
         await pub.publish("topic", {"data": "test"})
         assert pub.connected is False
+        assert "LetsMesh West" in caplog.text
+        assert "if it self-resolves" in caplog.text
 
 
 class TestBuildStatusTopic:
@@ -723,8 +716,8 @@ class TestLwtAndStatusPublish:
         settings = _make_community_settings(community_mqtt_iata="SFO")
 
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {"name": "TestNode"}
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "TestNode"}
 
         with (
             patch("app.keystore.get_private_key", return_value=private_key),
@@ -748,6 +741,44 @@ class TestLwtAndStatusPublish:
         assert kwargs["tls_context"] is not None
         assert kwargs["username"] == f"v1_{pubkey_hex}"
 
+    def test_build_client_kwargs_custom_websocket_path(self):
+        pub = CommunityMqttPublisher()
+        private_key, public_key = _make_test_keys()
+        settings = _make_community_settings(
+            community_mqtt_iata="MTL",
+            community_mqtt_websocket_path="/mqtt",
+        )
+
+        with (
+            patch("app.keystore.get_private_key", return_value=private_key),
+            patch("app.keystore.get_public_key", return_value=public_key),
+            patch("app.radio.radio_manager") as mock_radio,
+        ):
+            mock_radio.meshcore = None
+            kwargs = pub._build_client_kwargs(settings)
+
+        assert kwargs["websocket_path"] == "/mqtt"
+
+    def test_build_client_kwargs_empty_websocket_path_defaults_to_root(self):
+        pub = CommunityMqttPublisher()
+        private_key, public_key = _make_test_keys()
+
+        for empty_value in ("", "   ", None):
+            settings = _make_community_settings(
+                community_mqtt_iata="MTL",
+                community_mqtt_websocket_path=empty_value,
+            )
+
+            with (
+                patch("app.keystore.get_private_key", return_value=private_key),
+                patch("app.keystore.get_public_key", return_value=public_key),
+                patch("app.radio.radio_manager") as mock_radio,
+            ):
+                mock_radio.meshcore = None
+                kwargs = pub._build_client_kwargs(settings)
+
+            assert kwargs["websocket_path"] == "/", f"Failed for {empty_value!r}"
+
     def test_build_client_kwargs_supports_tcp_transport_and_custom_audience(self):
         pub = CommunityMqttPublisher()
         private_key, public_key = _make_test_keys()
@@ -767,7 +798,7 @@ class TestLwtAndStatusPublish:
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager") as mock_radio,
         ):
-            mock_radio.backend = None
+            mock_radio.meshcore = None
             kwargs = pub._build_client_kwargs(settings)
 
         assert kwargs["hostname"] == "meshrank.net"
@@ -799,7 +830,7 @@ class TestLwtAndStatusPublish:
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager") as mock_radio,
         ):
-            mock_radio.backend = None
+            mock_radio.meshcore = None
             kwargs = pub._build_client_kwargs(settings)
 
         assert kwargs["hostname"] == "meshrank.net"
@@ -820,23 +851,24 @@ class TestLwtAndStatusPublish:
         )
 
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {"name": "TestNode"}
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.device_info_loaded = True
+        mock_radio.device_model = "T-Deck"
+        mock_radio.firmware_version = "v2.2.2"
+        mock_radio.firmware_build = "2025-01-15"
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager", mock_radio),
             patch.object(
-                pub,
-                "_fetch_device_info",
-                new_callable=AsyncMock,
-                return_value={"model": "T-Deck", "firmware_version": "v2.2.2 (Build: 2025-01-15)"},
-            ),
-            patch.object(
                 pub, "_fetch_stats", new_callable=AsyncMock, return_value={"battery_mv": 4200}
             ),
             patch("app.fanout.community_mqtt._build_radio_info", return_value="915.0,250.0,10,8"),
-            patch("app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm 2.4.0"),
+            patch(
+                "app.fanout.community_mqtt._get_client_version",
+                return_value="RemoteTerm/2.4.0-abcdef",
+            ),
             patch.object(pub, "publish", new_callable=AsyncMock) as mock_publish,
         ):
             await pub._on_connected_async(settings)
@@ -856,8 +888,84 @@ class TestLwtAndStatusPublish:
         assert payload["model"] == "T-Deck"
         assert payload["firmware_version"] == "v2.2.2 (Build: 2025-01-15)"
         assert payload["radio"] == "915.0,250.0,10,8"
-        assert payload["client_version"] == "RemoteTerm 2.4.0"
+        assert payload["client_version"] == "RemoteTerm/2.4.0-abcdef"
         assert payload["stats"] == {"battery_mv": 4200}
+
+    @pytest.mark.asyncio
+    async def test_publish_status_uses_fallback_fetch_when_device_info_not_loaded(self):
+        """When device_info_loaded is False, _fetch_device_info() should be called as fallback."""
+        pub = CommunityMqttPublisher()
+        private_key, public_key = _make_test_keys()
+        settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
+
+        mock_radio = MagicMock()
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "OldNode"}
+        mock_radio.device_info_loaded = False
+
+        with (
+            patch("app.keystore.get_public_key", return_value=public_key),
+            patch("app.radio.radio_manager", mock_radio),
+            patch.object(
+                pub,
+                "_fetch_device_info",
+                new_callable=AsyncMock,
+                return_value={"model": "LegacyBoard", "firmware_version": "v2"},
+            ) as mock_fetch,
+            patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=None),
+            patch("app.fanout.community_mqtt._build_radio_info", return_value="0,0,0,0"),
+            patch("app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm/0-x"),
+            patch.object(pub, "publish", new_callable=AsyncMock) as mock_publish,
+        ):
+            await pub._publish_status(settings)
+
+        mock_fetch.assert_awaited_once()
+        payload = mock_publish.call_args[0][1]
+        assert payload["model"] == "LegacyBoard"
+        assert payload["firmware_version"] == "v2"
+
+    @pytest.mark.asyncio
+    async def test_publish_status_reflects_updated_firmware_version_after_reconnect(self):
+        """After firmware update + radio reconnect, the published firmware_version must be fresh.
+
+        This is a regression test for the stale-cache bug: previously _cached_device_info
+        was never cleared between reconnects, so a radio firmware update was invisible to
+        the Community MQTT status payload until the fanout module itself restarted.
+        """
+        pub = CommunityMqttPublisher()
+        private_key, public_key = _make_test_keys()
+        settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
+
+        mock_radio = MagicMock()
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "MyNode"}
+        mock_radio.device_info_loaded = True
+        mock_radio.device_model = "T-Deck"
+        mock_radio.firmware_version = "1.14.1"
+        mock_radio.firmware_build = ""
+
+        async def _publish_once(radio_mock):
+            with (
+                patch("app.keystore.get_public_key", return_value=public_key),
+                patch("app.radio.radio_manager", radio_mock),
+                patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=None),
+                patch("app.fanout.community_mqtt._build_radio_info", return_value="0,0,0,0"),
+                patch("app.fanout.community_mqtt._get_client_version", return_value="RT/0-x"),
+                patch.object(pub, "publish", new_callable=AsyncMock) as mock_pub,
+            ):
+                await pub._publish_status(settings)
+                return mock_pub.call_args[0][1]
+
+        first_payload = await _publish_once(mock_radio)
+        assert first_payload["firmware_version"] == "1.14.1"
+
+        # Simulate firmware update: radio reboots, radio_lifecycle refreshes the manager fields
+        mock_radio.firmware_version = "1.15.0"
+
+        second_payload = await _publish_once(mock_radio)
+        assert second_payload["firmware_version"] == "1.15.0", (
+            "Expected updated firmware version after reconnect; stale cache bug would return v1.14.1"
+        )
 
     def test_lwt_and_online_share_same_topic(self):
         """LWT and on-connect status should use the same topic path."""
@@ -867,7 +975,7 @@ class TestLwtAndStatusPublish:
         settings = _make_community_settings(community_mqtt_iata="JFK")
 
         mock_radio = MagicMock()
-        mock_radio.backend = None
+        mock_radio.meshcore = None
 
         with (
             patch("app.keystore.get_private_key", return_value=private_key),
@@ -902,7 +1010,8 @@ class TestLwtAndStatusPublish:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.backend = None
+        mock_radio.meshcore = None
+        mock_radio.device_info_loaded = False
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
@@ -916,7 +1025,8 @@ class TestLwtAndStatusPublish:
             patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=None),
             patch("app.fanout.community_mqtt._build_radio_info", return_value="0,0,0,0"),
             patch(
-                "app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm unknown"
+                "app.fanout.community_mqtt._get_client_version",
+                return_value="RemoteTerm/0.0.0-unknown",
             ),
             patch.object(pub, "publish", new_callable=AsyncMock) as mock_publish,
         ):
@@ -938,7 +1048,7 @@ class TestCommunityPacketPublishTopic:
             "id": 1,
             "observation_id": 1,
             "timestamp": 1700000000,
-            "data": "0100",
+            "data": "0100AA",
             "payload_type": "GROUP_TEXT",
             "snr": None,
             "rssi": None,
@@ -948,8 +1058,8 @@ class TestCommunityPacketPublishTopic:
         config = {"iata": "lax", "topic_template": "mesh2mqtt/{IATA}/node/{PUBLIC_KEY}"}
 
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {"name": "Node"}
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "Node"}
 
         with (
             patch("app.keystore.get_public_key", return_value=bytes.fromhex("AA" * 32)),
@@ -980,7 +1090,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.send_device_query = AsyncMock(
+        mc_mock.commands.send_device_query = AsyncMock(
             return_value=Event(
                 EventType.DEVICE_INFO,
                 {"fw ver": 3, "model": "T-Deck", "ver": "2.2.2", "fw_build": "2025-01-15"},
@@ -1003,7 +1113,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.send_device_query = AsyncMock(
+        mc_mock.commands.send_device_query = AsyncMock(
             return_value=Event(EventType.DEVICE_INFO, {"fw ver": 2})
         )
 
@@ -1023,7 +1133,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.send_device_query = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.commands.send_device_query = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1067,7 +1177,7 @@ class TestFetchDeviceInfo:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.send_device_query = AsyncMock(
+        mc_mock.commands.send_device_query = AsyncMock(
             return_value=Event(
                 EventType.DEVICE_INFO,
                 {"fw ver": 3, "model": "Heltec", "ver": "1.0.0", "fw_build": ""},
@@ -1089,13 +1199,13 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.get_stats_core = AsyncMock(
+        mc_mock.commands.get_stats_core = AsyncMock(
             return_value=Event(
                 EventType.STATS_CORE,
                 {"battery_mv": 4200, "uptime_secs": 3600, "errors": 0, "queue_len": 0},
             )
         )
-        mc_mock.get_stats_radio = AsyncMock(
+        mc_mock.commands.get_stats_radio = AsyncMock(
             return_value=Event(
                 EventType.STATS_RADIO,
                 {
@@ -1124,7 +1234,7 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.get_stats_core = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.commands.get_stats_core = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1140,13 +1250,13 @@ class TestFetchStats:
 
         pub = CommunityMqttPublisher()
         mc_mock = MagicMock()
-        mc_mock.get_stats_core = AsyncMock(
+        mc_mock.commands.get_stats_core = AsyncMock(
             return_value=Event(
                 EventType.STATS_CORE,
                 {"battery_mv": 4200, "uptime_secs": 3600, "errors": 0, "queue_len": 0},
             )
         )
-        mc_mock.get_stats_radio = AsyncMock(return_value=Event(EventType.ERROR, {}))
+        mc_mock.commands.get_stats_radio = AsyncMock(return_value=Event(EventType.ERROR, {}))
 
         with patch("app.radio.radio_manager") as mock_rm:
             mock_rm.radio_operation = _mock_radio_operation(mc_mock)
@@ -1193,8 +1303,8 @@ class TestBuildRadioInfo:
     def test_formatted_string(self):
         """Should return comma-separated radio info matching reference format."""
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {
             "radio_freq": 915.0,
             "radio_bw": 250.0,
             "radio_sf": 10,
@@ -1209,7 +1319,7 @@ class TestBuildRadioInfo:
     def test_fallback_when_no_meshcore(self):
         """Should return '0,0,0,0' when meshcore is None."""
         mock_radio = MagicMock()
-        mock_radio.backend = None
+        mock_radio.meshcore = None
 
         with patch("app.radio.radio_manager", mock_radio):
             result = _build_radio_info()
@@ -1219,8 +1329,8 @@ class TestBuildRadioInfo:
     def test_fallback_when_self_info_missing_fields(self):
         """Should use 0 defaults when self_info lacks radio fields."""
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {"name": "TestNode"}
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "TestNode"}
 
         with patch("app.radio.radio_manager", mock_radio):
             result = _build_radio_info()
@@ -1229,25 +1339,21 @@ class TestBuildRadioInfo:
 
 
 class TestGetClientVersion:
-    def test_returns_remoteterm_prefix(self):
-        """Should return 'RemoteTerm ...' string."""
-        result = _get_client_version()
-        assert result.startswith("RemoteTerm ")
-
-    def test_returns_version_from_metadata(self):
-        """Should use importlib.metadata to get version."""
-        with patch("app.fanout.community_mqtt.importlib.metadata.version", return_value="1.2.3"):
+    def test_returns_canonical_client_identifier(self):
+        """Should return the canonical client/version/hash identifier."""
+        with patch("app.fanout.community_mqtt.get_app_build_info") as mock_build_info:
+            mock_build_info.return_value.version = "1.2.3"
+            mock_build_info.return_value.commit_hash = "abcdef"
             result = _get_client_version()
-        assert result == "RemoteTerm 1.2.3"
+        assert result == "RemoteTerm/1.2.3-abcdef"
 
-    def test_fallback_on_error(self):
-        """Should return 'RemoteTerm unknown' if metadata lookup fails."""
-        with patch(
-            "app.fanout.community_mqtt.importlib.metadata.version",
-            side_effect=Exception("not found"),
-        ):
+    def test_falls_back_to_unknown_hash_when_commit_missing(self):
+        """Should keep the canonical shape even when the commit hash is unavailable."""
+        with patch("app.fanout.community_mqtt.get_app_build_info") as mock_build_info:
+            mock_build_info.return_value.version = "1.2.3"
+            mock_build_info.return_value.commit_hash = None
             result = _get_client_version()
-        assert result == "RemoteTerm unknown"
+        assert result == "RemoteTerm/1.2.3-unknown"
 
 
 class TestPublishStatus:
@@ -1260,23 +1366,24 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.backend = MagicMock()
-        mock_radio.backend.self_info = {"name": "TestNode"}
+        mock_radio.meshcore = MagicMock()
+        mock_radio.meshcore.self_info = {"name": "TestNode"}
+        mock_radio.device_info_loaded = True
+        mock_radio.device_model = "T-Deck"
+        mock_radio.firmware_version = "v2.2.2"
+        mock_radio.firmware_build = "2025-01-15"
 
         stats = {"battery_mv": 4200, "uptime_secs": 3600, "noise_floor": -120}
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
             patch("app.radio.radio_manager", mock_radio),
-            patch.object(
-                pub,
-                "_fetch_device_info",
-                new_callable=AsyncMock,
-                return_value={"model": "T-Deck", "firmware_version": "v2.2.2 (Build: 2025-01-15)"},
-            ),
             patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=stats),
             patch("app.fanout.community_mqtt._build_radio_info", return_value="915.0,250.0,10,8"),
-            patch("app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm 2.4.0"),
+            patch(
+                "app.fanout.community_mqtt._get_client_version",
+                return_value="RemoteTerm/2.4.0-abcdef",
+            ),
             patch.object(pub, "publish", new_callable=AsyncMock) as mock_publish,
         ):
             await pub._publish_status(settings)
@@ -1289,7 +1396,7 @@ class TestPublishStatus:
         assert payload["model"] == "T-Deck"
         assert payload["firmware_version"] == "v2.2.2 (Build: 2025-01-15)"
         assert payload["radio"] == "915.0,250.0,10,8"
-        assert payload["client_version"] == "RemoteTerm 2.4.0"
+        assert payload["client_version"] == "RemoteTerm/2.4.0-abcdef"
         assert payload["stats"] == stats
 
     @pytest.mark.asyncio
@@ -1300,7 +1407,8 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.backend = None
+        mock_radio.meshcore = None
+        mock_radio.device_info_loaded = False
 
         with (
             patch("app.keystore.get_public_key", return_value=public_key),
@@ -1314,7 +1422,8 @@ class TestPublishStatus:
             patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=None),
             patch("app.fanout.community_mqtt._build_radio_info", return_value="0,0,0,0"),
             patch(
-                "app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm unknown"
+                "app.fanout.community_mqtt._get_client_version",
+                return_value="RemoteTerm/0.0.0-unknown",
             ),
             patch.object(pub, "publish", new_callable=AsyncMock) as mock_publish,
         ):
@@ -1331,7 +1440,8 @@ class TestPublishStatus:
         settings = SimpleNamespace(community_mqtt_enabled=True, community_mqtt_iata="LAX")
 
         mock_radio = MagicMock()
-        mock_radio.backend = None
+        mock_radio.meshcore = None
+        mock_radio.device_info_loaded = False
 
         before = time.monotonic()
 
@@ -1347,7 +1457,8 @@ class TestPublishStatus:
             patch.object(pub, "_fetch_stats", new_callable=AsyncMock, return_value=None),
             patch("app.fanout.community_mqtt._build_radio_info", return_value="0,0,0,0"),
             patch(
-                "app.fanout.community_mqtt._get_client_version", return_value="RemoteTerm unknown"
+                "app.fanout.community_mqtt._get_client_version",
+                return_value="RemoteTerm/0.0.0-unknown",
             ),
             patch.object(pub, "publish", new_callable=AsyncMock),
         ):

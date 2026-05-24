@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useRef, useState, useMemo, type MouseEvent } from 'react';
 import { api } from './api';
 import { takePrefetchOrFetch } from './prefetch';
 import { useWebSocket } from './useWebSocket';
@@ -14,17 +14,36 @@ import {
   useConversationNavigation,
   useRealtimeAppState,
   useBrowserNotifications,
+  useFaviconBadge,
+  useUnreadTitle,
+  useRawPacketStatsSession,
 } from './hooks';
-import { AppShell } from './components/AppShell';
 import { toast } from './components/ui/sonner';
+import { AppShell } from './components/AppShell';
 import type { MessageInputHandle } from './components/MessageInput';
+import { DistanceUnitProvider } from './contexts/DistanceUnitContext';
+import { usePush } from './contexts/PushSubscriptionContext';
 import { messageContainsMention } from './utils/messageParser';
 import { getStateKey } from './utils/conversationState';
-import type { Conversation, Message, RawPacket } from './types';
+import type {
+  BulkCreateHashtagChannelsResult,
+  Channel,
+  Conversation,
+  Message,
+  RawPacket,
+} from './types';
+import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from './types';
+import { shouldAutoFocusInput } from './utils/autoFocusInput';
 
 interface ChannelUnreadMarker {
   channelId: string;
   lastReadAt: number | null;
+}
+
+interface NewMessagePrefillRequest {
+  tab: 'hashtag';
+  hashtagName: string;
+  nonce: number;
 }
 
 interface UnreadBoundaryBackfillParams {
@@ -73,6 +92,12 @@ export function App() {
   const messageInputRef = useRef<MessageInputHandle>(null);
   const [rawPackets, setRawPackets] = useState<RawPacket[]>([]);
   const [channelUnreadMarker, setChannelUnreadMarker] = useState<ChannelUnreadMarker | null>(null);
+  const [newMessagePrefillRequest, setNewMessagePrefillRequest] =
+    useState<NewMessagePrefillRequest | null>(null);
+  const [showBulkAddChannelTab, setShowBulkAddChannelTab] = useState(false);
+  const [bulkAddResult, setBulkAddResult] = useState<BulkCreateHashtagChannelsResult | null>(null);
+  const [repeaterAutoLoginKey, setRepeaterAutoLoginKey] = useState<string | null>(null);
+  const [visibilityVersion, setVisibilityVersion] = useState(0);
   const lastUnreadBackfillAttemptRef = useRef<string | null>(null);
   const {
     notificationsSupported,
@@ -81,6 +106,8 @@ export function App() {
     toggleConversationNotifications,
     notifyIncomingMessage,
   } = useBrowserNotifications();
+  const pushSubscription = usePush();
+  const { rawPacketStatsSession, recordRawPacketObservation } = useRawPacketStatsSession();
   const {
     showNewMessage,
     showSettings,
@@ -89,14 +116,16 @@ export function App() {
     showCracker,
     crackerRunning,
     localLabel,
+    distanceUnit,
     setSettingsSection,
     setSidebarOpen,
     setCrackerRunning,
     setLocalLabel,
+    setDistanceUnit,
     handleCloseSettingsView,
     handleToggleSettingsView,
-    handleOpenNewMessage,
-    handleCloseNewMessage,
+    handleOpenNewMessage: openNewMessageModal,
+    handleCloseNewMessage: closeNewMessageModal,
     handleToggleCracker,
   } = useAppShell();
 
@@ -108,6 +137,7 @@ export function App() {
   // useConversationRouter, but useConversationRouter needs channels/contacts from
   // useContactsAndChannels. We break the cycle with a ref-based indirection.
   const setActiveConversationRef = useRef<(conv: Conversation | null) => void>(() => {});
+  const removeConversationMessagesRef = useRef<(conversationId: string) => void>(() => {});
 
   // --- Extracted hooks ---
 
@@ -123,18 +153,20 @@ export function App() {
     handleDisconnect,
     handleReconnect,
     handleAdvertise,
+    meshDiscovery,
+    meshDiscoveryLoadingTarget,
+    handleDiscoverMesh,
     handleHealthRefresh,
   } = useRadioControl();
 
   const {
     appSettings,
-    favorites,
     fetchAppSettings,
     handleSaveAppSettings,
-    handleSortOrderChange,
-    handleToggleFavorite,
     handleToggleBlockedKey,
     handleToggleBlockedName,
+    handleToggleTrackedTelemetry,
+    handleToggleTrackedTelemetryContact,
   } = useAppSettings();
 
   // Keep user's name in ref for mention detection in WebSocket callback
@@ -171,13 +203,54 @@ export function App() {
     handleCreateContact,
     handleCreateChannel,
     handleCreateHashtagChannel,
+    handleBulkCreateHashtagChannels,
     handleDeleteChannel,
     handleDeleteContact,
   } = useContactsAndChannels({
     setActiveConversation: (conv) => setActiveConversationRef.current(conv),
     pendingDeleteFallbackRef,
     hasSetDefaultConversation,
+    removeConversationMessages: (conversationId) =>
+      removeConversationMessagesRef.current(conversationId),
   });
+
+  // Keep channels in a ref for WS callback mute filtering
+  const channelsRef = useRef<Channel[]>([]);
+  useEffect(() => {
+    channelsRef.current = channels;
+  }, [channels]);
+
+  const handleToggleFavorite = useCallback(
+    async (type: 'channel' | 'contact', id: string) => {
+      // Optimistically toggle the favorite flag
+      if (type === 'contact') {
+        setContacts((prev) =>
+          prev.map((c) => (c.public_key === id ? { ...c, favorite: !c.favorite } : c))
+        );
+      } else {
+        setChannels((prev) =>
+          prev.map((c) => (c.key === id ? { ...c, favorite: !c.favorite } : c))
+        );
+      }
+
+      try {
+        await api.toggleFavorite(type, id);
+      } catch {
+        // Revert on failure
+        if (type === 'contact') {
+          setContacts((prev) =>
+            prev.map((c) => (c.public_key === id ? { ...c, favorite: !c.favorite } : c))
+          );
+        } else {
+          setChannels((prev) =>
+            prev.map((c) => (c.key === id ? { ...c, favorite: !c.favorite } : c))
+          );
+        }
+        toast.error('Failed to update favorite');
+      }
+    },
+    [setContacts, setChannels]
+  );
 
   // useConversationRouter is called second — it receives channels/contacts as inputs
   const {
@@ -189,6 +262,7 @@ export function App() {
     channels,
     contacts,
     contactsLoaded,
+    suspendHashSync: showSettings,
     setSidebarOpen,
     pendingDeleteFallbackRef,
     hasSetDefaultConversation,
@@ -225,26 +299,76 @@ export function App() {
     hasOlderMessages,
     hasNewerMessages,
     loadingNewer,
-    hasNewerMessagesRef,
     fetchOlderMessages,
     fetchNewerMessages,
     jumpToBottom,
-    addMessageIfNew,
-    updateMessageAck,
-    triggerReconcile,
+    reloadCurrentConversation,
+    observeMessage,
+    receiveMessageAck,
+    reconcileOnReconnect,
+    renameConversationMessages,
+    removeConversationMessages,
+    clearConversationMessages,
   } = useConversationMessages(activeConversation, targetMessageId);
+  removeConversationMessagesRef.current = removeConversationMessages;
+
+  // Auto-focus the message input on conversation change (desktop only by default)
+  useEffect(() => {
+    if (!activeConversation) return;
+    if (activeConversation.type !== 'channel' && activeConversation.type !== 'contact') return;
+    // Repeaters show a login form, not a message input
+    if (activeConversation.type === 'contact') {
+      const contact = contacts.find((c) => c.public_key === activeConversation.id);
+      if (contact?.type === CONTACT_TYPE_REPEATER) return;
+    }
+    if (!shouldAutoFocusInput()) return;
+    // Defer to let the input mount/render first
+    const raf = requestAnimationFrame(() => messageInputRef.current?.focus?.());
+    return () => cancelAnimationFrame(raf);
+  }, [activeConversation?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Room servers replay stored history as a burst of DMs, all arriving with similar received_at
+  // but spanning a wide range of sender_timestamps. Sort by sender_timestamp for room contacts
+  // so the display reflects the original send order rather than our radio's receipt order.
+  const activeContactIsRoom =
+    activeConversation?.type === 'contact' &&
+    contacts.find((c) => c.public_key === activeConversation.id)?.type === CONTACT_TYPE_ROOM;
+  const sortedMessages = useMemo(() => {
+    if (!activeContactIsRoom || messages.length === 0) return messages;
+    return [...messages].sort((a, b) => {
+      const aTs = a.sender_timestamp ?? a.received_at;
+      const bTs = b.sender_timestamp ?? b.received_at;
+      return aTs !== bTs ? aTs - bTs : a.id - b.id;
+    });
+  }, [activeContactIsRoom, messages]);
 
   const {
     unreadCounts,
     mentions,
     lastMessageTimes,
     unreadLastReadAts,
-    incrementUnread,
+    recordMessageEvent,
     renameConversationState,
+    removeConversationState,
     markAllRead,
-    trackNewMessage,
     refreshUnreads,
   } = useUnreadCounts(channels, contacts, activeConversation);
+  useFaviconBadge(unreadCounts, mentions, channels);
+  useUnreadTitle(unreadCounts, contacts, channels);
+
+  const handleToggleMute = useCallback(
+    async (key: string) => {
+      setChannels((prev) => prev.map((c) => (c.key === key ? { ...c, muted: !c.muted } : c)));
+      try {
+        await api.toggleChannelMute(key);
+        await refreshUnreads();
+      } catch {
+        setChannels((prev) => prev.map((c) => (c.key === key ? { ...c, muted: !c.muted } : c)));
+        toast.error('Failed to update mute');
+      }
+    },
+    [setChannels, refreshUnreads]
+  );
 
   useEffect(() => {
     if (activeConversation?.type !== 'channel') {
@@ -304,42 +428,64 @@ export function App() {
     setHealth,
     fetchConfig,
     setRawPackets,
-    triggerReconcile,
+    reconcileOnReconnect,
     refreshUnreads,
     setChannels,
     fetchAllContacts,
     setContacts,
     blockedKeysRef,
     blockedNamesRef,
+    channelsRef,
     activeConversationRef,
-    hasNewerMessagesRef,
-    addMessageIfNew,
-    trackNewMessage,
-    incrementUnread,
+    observeMessage,
+    recordMessageEvent,
     renameConversationState,
+    removeConversationState,
     checkMention,
     pendingDeleteFallbackRef,
     setActiveConversation,
-    updateMessageAck,
+    renameConversationMessages,
+    removeConversationMessages,
+    receiveMessageAck,
     notifyIncomingMessage,
+    recordRawPacketObservation,
   });
+  const handleVisibilityPolicyChanged = useCallback(() => {
+    clearConversationMessages();
+    reloadCurrentConversation();
+    void refreshUnreads();
+    setVisibilityVersion((current) => current + 1);
+  }, [clearConversationMessages, refreshUnreads, reloadCurrentConversation]);
+
+  const handleBlockKey = useCallback(
+    async (key: string) => {
+      await handleToggleBlockedKey(key);
+      handleVisibilityPolicyChanged();
+    },
+    [handleToggleBlockedKey, handleVisibilityPolicyChanged]
+  );
+
+  const handleBlockName = useCallback(
+    async (name: string) => {
+      await handleToggleBlockedName(name);
+      handleVisibilityPolicyChanged();
+    },
+    [handleToggleBlockedName, handleVisibilityPolicyChanged]
+  );
   const {
     handleSendMessage,
     handleResendChannelMessage,
     handleSetChannelFloodScopeOverride,
+    handleSetChannelPathHashModeOverride,
     handleSenderClick,
     handleTrace,
-    handleBlockKey,
-    handleBlockName,
+    handlePathDiscovery,
   } = useConversationActions({
     activeConversation,
     activeConversationRef,
-    channels,
+    setContacts,
     setChannels,
-    addMessageIfNew,
-    jumpToBottom,
-    handleToggleBlockedKey,
-    handleToggleBlockedName,
+    observeMessage,
     messageInputRef,
   });
   const handleCreateCrackedChannel = useCallback(
@@ -357,6 +503,7 @@ export function App() {
     },
     [fetchUndecryptedCount, setChannels]
   );
+
   const handleSyncChannels = useCallback(async () => {
     try {
       const result = await api.syncChannels();
@@ -369,6 +516,64 @@ export function App() {
       });
     }
   }, [setChannels]);
+
+  const handleRepeaterAutoLogin = useCallback(
+    (publicKey: string, displayName: string) => {
+      handleSelectConversationWithTargetReset({
+        type: 'contact',
+        id: publicKey,
+        name: displayName,
+      });
+      setRepeaterAutoLoginKey(publicKey);
+    },
+    [handleSelectConversationWithTargetReset]
+  );
+
+  const handleOpenNewMessage = useCallback(
+    (event?: MouseEvent<HTMLButtonElement>) => {
+      setNewMessagePrefillRequest(null);
+      setShowBulkAddChannelTab(event?.altKey === true);
+      openNewMessageModal();
+    },
+    [openNewMessageModal]
+  );
+
+  const handleCloseNewMessage = useCallback(() => {
+    setNewMessagePrefillRequest(null);
+    setShowBulkAddChannelTab(false);
+    closeNewMessageModal();
+  }, [closeNewMessageModal]);
+
+  const handleCloseBulkAddResults = useCallback(() => {
+    setBulkAddResult(null);
+  }, []);
+
+  const handleChannelReferenceClick = useCallback(
+    (channelName: string) => {
+      const existingChannel = channels.find((channel) => channel.name === channelName);
+      if (existingChannel) {
+        handleNavigateToChannel(existingChannel.key);
+        return;
+      }
+
+      setNewMessagePrefillRequest((previous) => ({
+        tab: 'hashtag',
+        hashtagName: channelName.slice(1),
+        nonce: (previous?.nonce ?? 0) + 1,
+      }));
+      setShowBulkAddChannelTab(false);
+      openNewMessageModal();
+    },
+    [channels, handleNavigateToChannel, openNewMessageModal]
+  );
+
+  const handleBulkAddChannels = useCallback(
+    async (channelNames: string[], tryHistorical: boolean) => {
+      const result = await handleBulkCreateHashtagChannels(channelNames, tryHistorical);
+      setBulkAddResult(result);
+    },
+    [handleBulkCreateHashtagChannels]
+  );
 
   const statusProps = {
     health,
@@ -389,22 +594,23 @@ export function App() {
     onMarkAllRead: () => {
       void markAllRead();
     },
-    favorites,
-    sortOrder: appSettings?.sidebar_sort_order ?? 'recent',
-    onSortOrderChange: (sortOrder: 'recent' | 'alpha') => {
-      void handleSortOrderChange(sortOrder);
-    },
     isConversationNotificationsEnabled,
+    blockedKeys: appSettings?.blocked_keys ?? [],
+    blockedNames: appSettings?.blocked_names ?? [],
+  };
+  const bulkAddChannelResultModalProps = {
+    result: bulkAddResult,
   };
   const conversationPaneProps = {
     activeConversation,
     contacts,
     channels,
     rawPackets,
+    rawPacketStatsSession,
     config,
     health,
-    favorites,
-    messages,
+    messages: sortedMessages,
+    preSorted: activeContactIsRoom,
     messagesLoading,
     loadingOlder,
     hasOlderMessages,
@@ -418,13 +624,19 @@ export function App() {
     loadingNewer,
     messageInputRef,
     onTrace: handleTrace,
+    onRunTracePath: api.requestRadioTrace,
+    onPathDiscovery: handlePathDiscovery,
     onToggleFavorite: handleToggleFavorite,
+    onToggleMute: handleToggleMute,
     onDeleteContact: handleDeleteContact,
     onDeleteChannel: handleDeleteChannel,
     onSetChannelFloodScopeOverride: handleSetChannelFloodScopeOverride,
+    onSetChannelPathHashModeOverride: handleSetChannelPathHashModeOverride,
+    onSelectConversation: handleSelectConversationWithTargetReset,
     onOpenContactInfo: handleOpenContactInfo,
     onOpenChannelInfo: handleOpenChannelInfo,
     onSenderClick: handleSenderClick,
+    onChannelReferenceClick: handleChannelReferenceClick,
     onLoadOlder: fetchOlderMessages,
     onResendChannelMessage: handleResendChannelMessage,
     onTargetReached: () => setTargetMessageId(null),
@@ -447,10 +659,45 @@ export function App() {
         );
       }
     },
+    pushSupported: pushSubscription.isSupported,
+    pushSubscribed: pushSubscription.isSubscribed,
+    pushEnabledForConversation:
+      activeConversation?.type === 'contact' || activeConversation?.type === 'channel'
+        ? pushSubscription.isConversationPushEnabled(
+            getStateKey(activeConversation.type, activeConversation.id)
+          )
+        : false,
+    onTogglePush: async () => {
+      if (
+        !activeConversation ||
+        (activeConversation.type !== 'contact' && activeConversation.type !== 'channel')
+      )
+        return;
+      const key = getStateKey(activeConversation.type, activeConversation.id);
+      const pushEnabled = pushSubscription.isConversationPushEnabled(key);
+
+      if (!pushEnabled && !pushSubscription.isSubscribed) {
+        const subscriptionId = await pushSubscription.subscribe();
+        if (!subscriptionId) {
+          return;
+        }
+      }
+
+      await pushSubscription.toggleConversation(key);
+    },
+    onOpenPushSettings: () => {
+      setSettingsSection('local');
+      if (!showSettings) handleToggleSettingsView();
+    },
+    trackedTelemetryRepeaters: appSettings?.tracked_telemetry_repeaters ?? [],
+    onToggleTrackedTelemetry: handleToggleTrackedTelemetry,
+    repeaterAutoLoginKey,
+    onClearRepeaterAutoLogin: () => setRepeaterAutoLoginKey(null),
   };
   const searchProps = {
     contacts,
     channels,
+    visibilityVersion,
     onNavigateToMessage: handleNavigateToMessage,
     prefillRequest: searchPrefillRequest,
   };
@@ -466,12 +713,25 @@ export function App() {
     onReconnect: handleReconnect,
     onAdvertise: handleAdvertise,
     onSyncChannels: handleSyncChannels,
+    meshDiscovery,
+    meshDiscoveryLoadingTarget,
+    onDiscoverMesh: handleDiscoverMesh,
     onHealthRefresh: handleHealthRefresh,
     onRefreshAppSettings: fetchAppSettings,
     blockedKeys: appSettings?.blocked_keys,
     blockedNames: appSettings?.blocked_names,
     onToggleBlockedKey: handleBlockKey,
     onToggleBlockedName: handleBlockName,
+    contacts,
+    channels,
+    onBulkDeleteContacts: (deletedKeys: string[]) => {
+      const keySet = new Set(deletedKeys.map((k) => k.toLowerCase()));
+      setContacts((prev) => prev.filter((c) => !keySet.has(c.public_key.toLowerCase())));
+    },
+    trackedTelemetryRepeaters: appSettings?.tracked_telemetry_repeaters ?? [],
+    onToggleTrackedTelemetry: handleToggleTrackedTelemetry,
+    trackedTelemetryContacts: appSettings?.tracked_telemetry_contacts ?? [],
+    onToggleTrackedTelemetryContact: handleToggleTrackedTelemetryContact,
   };
   const crackerProps = {
     packets: rawPackets,
@@ -479,12 +739,13 @@ export function App() {
     onChannelCreate: handleCreateCrackedChannel,
   };
   const newMessageModalProps = {
-    contacts,
     undecryptedCount,
-    onSelectConversation: handleSelectConversationWithTargetReset,
+    showBulkAddChannelTab,
+    prefillRequest: newMessagePrefillRequest,
     onCreateContact: handleCreateContact,
     onCreateChannel: handleCreateChannel,
     onCreateHashtagChannel: handleCreateHashtagChannel,
+    onBulkAddHashtagChannels: handleBulkAddChannels,
   };
   const contactInfoPaneProps = {
     contactKey: infoPaneContactKey,
@@ -492,7 +753,6 @@ export function App() {
     onClose: handleCloseContactInfo,
     contacts,
     config,
-    favorites,
     onToggleFavorite: handleToggleFavorite,
     onNavigateToChannel: handleNavigateToChannel,
     onSearchMessagesByKey: (publicKey: string) => {
@@ -505,12 +765,13 @@ export function App() {
     onToggleBlockedName: handleBlockName,
     blockedKeys: appSettings?.blocked_keys ?? [],
     blockedNames: appSettings?.blocked_names ?? [],
+    trackedTelemetryContacts: appSettings?.tracked_telemetry_contacts ?? [],
+    onToggleTrackedTelemetryContact: handleToggleTrackedTelemetryContact,
   };
   const channelInfoPaneProps = {
     channelKey: infoPaneChannelKey,
     onClose: handleCloseChannelInfo,
     channels,
-    favorites,
     onToggleFavorite: handleToggleFavorite,
   };
 
@@ -544,29 +805,35 @@ export function App() {
     setContactsLoaded,
   ]);
   return (
-    <AppShell
-      localLabel={localLabel}
-      showNewMessage={showNewMessage}
-      showSettings={showSettings}
-      settingsSection={settingsSection}
-      sidebarOpen={sidebarOpen}
-      showCracker={showCracker}
-      onSettingsSectionChange={setSettingsSection}
-      onSidebarOpenChange={setSidebarOpen}
-      onCrackerRunningChange={setCrackerRunning}
-      onToggleSettingsView={handleToggleSettingsView}
-      onCloseSettingsView={handleCloseSettingsView}
-      onCloseNewMessage={handleCloseNewMessage}
-      onLocalLabelChange={setLocalLabel}
-      statusProps={statusProps}
-      sidebarProps={sidebarProps}
-      conversationPaneProps={conversationPaneProps}
-      searchProps={searchProps}
-      settingsProps={settingsProps}
-      crackerProps={crackerProps}
-      newMessageModalProps={newMessageModalProps}
-      contactInfoPaneProps={contactInfoPaneProps}
-      channelInfoPaneProps={channelInfoPaneProps}
-    />
+    <DistanceUnitProvider distanceUnit={distanceUnit} setDistanceUnit={setDistanceUnit}>
+      <AppShell
+        localLabel={localLabel}
+        showNewMessage={showNewMessage}
+        showBulkAddResults={bulkAddResult !== null}
+        showSettings={showSettings}
+        settingsSection={settingsSection}
+        sidebarOpen={sidebarOpen}
+        showCracker={showCracker}
+        onSettingsSectionChange={setSettingsSection}
+        onSidebarOpenChange={setSidebarOpen}
+        onCrackerRunningChange={setCrackerRunning}
+        onToggleSettingsView={handleToggleSettingsView}
+        onCloseSettingsView={handleCloseSettingsView}
+        onCloseNewMessage={handleCloseNewMessage}
+        onCloseBulkAddResults={handleCloseBulkAddResults}
+        onLocalLabelChange={setLocalLabel}
+        statusProps={statusProps}
+        sidebarProps={sidebarProps}
+        conversationPaneProps={conversationPaneProps}
+        searchProps={searchProps}
+        settingsProps={settingsProps}
+        crackerProps={crackerProps}
+        newMessageModalProps={newMessageModalProps}
+        bulkAddChannelResultModalProps={bulkAddChannelResultModalProps}
+        contactInfoPaneProps={contactInfoPaneProps}
+        channelInfoPaneProps={channelInfoPaneProps}
+        onRepeaterAutoLogin={handleRepeaterAutoLogin}
+      />
+    </DistanceUnitProvider>
   );
 }

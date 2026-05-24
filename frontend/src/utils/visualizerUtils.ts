@@ -116,7 +116,7 @@ export interface PathStep {
   hiddenLabel?: string | null;
 }
 
-export function normalizeHopToken(hop: string | null | undefined): string | null {
+function normalizeHopToken(hop: string | null | undefined): string | null {
   const normalized = hop?.trim().toLowerCase() ?? '';
   return normalized.length > 0 ? normalized : null;
 }

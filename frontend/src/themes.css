@@ -49,10 +49,6 @@
   --overlay: 220 20% 10%;
 }
 
-:root[data-theme='light'] .sidebar-tool-label {
-  color: hsl(var(--foreground));
-}
-
 /* ── Windows 95 ───────────────────────────────────────────── */
 :root[data-theme='windows-95'] {
   --background: 180 100% 25%;

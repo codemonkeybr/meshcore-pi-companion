@@ -10,6 +10,7 @@ import pytest
 from meshcore import EventType
 
 from app.keystore import (
+    clear_keys,
     export_and_store_private_key,
     get_private_key,
     get_public_key,
@@ -100,16 +101,16 @@ class TestSetPrivateKey:
         assert pub1 != pub2
 
 
-class TestGettersWhenEmpty:
-    """Test getter behavior when no key is stored."""
+class TestClearKeys:
+    """Test clearing in-memory key material."""
 
-    def test_get_private_key_returns_none(self):
+    def test_clear_keys_removes_private_and_public_key(self):
+        set_private_key(VALID_KEY)
+
+        clear_keys()
+
         assert get_private_key() is None
-
-    def test_get_public_key_returns_none(self):
         assert get_public_key() is None
-
-    def test_has_private_key_false(self):
         assert has_private_key() is False
 
 

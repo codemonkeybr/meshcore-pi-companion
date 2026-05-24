@@ -17,7 +17,7 @@ export interface VisualizerSettings {
   hidePacketFeed: boolean;
 }
 
-export const VISUALIZER_DEFAULTS: VisualizerSettings = {
+const VISUALIZER_DEFAULTS: VisualizerSettings = {
   showAmbiguousPaths: true,
   showAmbiguousNodes: false,
   useAdvertPathHints: true,
@@ -27,7 +27,7 @@ export const VISUALIZER_DEFAULTS: VisualizerSettings = {
   observationWindowSec: 15,
   letEmDrift: true,
   particleSpeedMultiplier: 2,
-  pruneStaleNodes: false,
+  pruneStaleNodes: true,
   pruneStaleMinutes: 5,
   autoOrbit: false,
   showControls: true,

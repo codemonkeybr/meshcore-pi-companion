@@ -9,6 +9,8 @@ export interface Theme {
 
 export const THEME_CHANGE_EVENT = 'remoteterm-theme-change';
 
+export const FOLLOW_OS_THEME_ID = 'follow-os';
+
 export const THEMES: Theme[] = [
   {
     id: 'original',
@@ -21,6 +23,13 @@ export const THEMES: Theme[] = [
     name: 'Light',
     swatches: ['#F8F7F4', '#FFFFFF', '#1B7D4E', '#EDEBE7', '#D97706', '#3B82F6'],
     metaThemeColor: '#F8F7F4',
+  },
+  {
+    id: FOLLOW_OS_THEME_ID,
+    name: 'OS Light/Dark Mode',
+    // Top row: light theme preview colors; bottom row: original (dark) preview colors
+    swatches: ['#F8F7F4', '#FFFFFF', '#1B7D4E', '#111419', '#181b21', '#27a05c'],
+    metaThemeColor: '#111419',
   },
   {
     id: 'ios',
@@ -94,6 +103,23 @@ export function getSavedTheme(): string {
   }
 }
 
+/** Resolves "Follow OS" to a concrete theme id by inspecting the OS color-scheme preference. */
+function resolveFollowOS(): 'original' | 'light' {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return 'original';
+  }
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'original';
+}
+
+/**
+ * Returns the concrete theme id currently applied to the document.
+ * Unlike getSavedTheme, this resolves 'follow-os' to 'original' or 'light'.
+ */
+export function getEffectiveTheme(): string {
+  const saved = getSavedTheme();
+  return saved === FOLLOW_OS_THEME_ID ? resolveFollowOS() : saved;
+}
+
 export function applyTheme(themeId: string): void {
   try {
     localStorage.setItem(THEME_KEY, themeId);
@@ -101,14 +127,16 @@ export function applyTheme(themeId: string): void {
     // localStorage may be unavailable
   }
 
-  if (themeId === 'original') {
+  const effective = themeId === FOLLOW_OS_THEME_ID ? resolveFollowOS() : themeId;
+
+  if (effective === 'original') {
     delete document.documentElement.dataset.theme;
   } else {
-    document.documentElement.dataset.theme = themeId;
+    document.documentElement.dataset.theme = effective;
   }
 
-  // Update PWA theme-color meta tag
-  const theme = THEMES.find((t) => t.id === themeId);
+  // Update PWA theme-color meta tag — reflect the effective (rendered) theme.
+  const theme = THEMES.find((t) => t.id === effective);
   if (theme) {
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
@@ -117,6 +145,33 @@ export function applyTheme(themeId: string): void {
   }
 
   if (typeof window !== 'undefined') {
+    // Detail is the saved theme id (including 'follow-os'); listeners that need
+    // the rendered appearance should call getEffectiveTheme().
     window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: themeId }));
+  }
+}
+
+let followOSInitialized = false;
+
+/**
+ * Installs a one-time listener on prefers-color-scheme so that when the user is
+ * on "Follow OS", OS appearance changes re-apply the theme. Safe to call once
+ * from app bootstrap.
+ */
+export function initFollowOSListener(): void {
+  if (followOSInitialized) return;
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  followOSInitialized = true;
+  const mql = window.matchMedia('(prefers-color-scheme: light)');
+  const handler = () => {
+    if (getSavedTheme() === FOLLOW_OS_THEME_ID) {
+      applyTheme(FOLLOW_OS_THEME_ID);
+    }
+  };
+  if (typeof mql.addEventListener === 'function') {
+    mql.addEventListener('change', handler);
+  } else if (typeof (mql as MediaQueryList).addListener === 'function') {
+    // Safari < 14 fallback
+    (mql as MediaQueryList).addListener(handler);
   }
 }

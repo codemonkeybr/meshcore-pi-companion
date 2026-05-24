@@ -20,7 +20,6 @@ class WebhookModule(FanoutModule):
     def __init__(self, config_id: str, config: dict, *, name: str = "") -> None:
         super().__init__(config_id, config, name=name)
         self._client: httpx.AsyncClient | None = None
-        self._last_error: str | None = None
 
     async def start(self) -> None:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
@@ -62,9 +61,9 @@ class WebhookModule(FanoutModule):
         try:
             resp = await self._client.request(method, url, content=body_bytes, headers=headers)
             resp.raise_for_status()
-            self._last_error = None
+            self._set_last_error(None)
         except httpx.HTTPStatusError as exc:
-            self._last_error = f"HTTP {exc.response.status_code}"
+            self._set_last_error(f"HTTP {exc.response.status_code}")
             logger.warning(
                 "Webhook %s returned %s for %s",
                 self.config_id,
@@ -72,13 +71,13 @@ class WebhookModule(FanoutModule):
                 url,
             )
         except httpx.RequestError as exc:
-            self._last_error = str(exc)
+            self._set_last_error(str(exc))
             logger.warning("Webhook %s request error: %s", self.config_id, exc)
 
     @property
     def status(self) -> str:
         if not self.config.get("url"):
             return "disconnected"
-        if self._last_error:
+        if self.last_error:
             return "error"
         return "connected"

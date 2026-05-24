@@ -3,7 +3,7 @@
  * These bypass the UI to set up preconditions and verify backend state.
  */
 
-const BASE_URL = 'http://localhost:8001/api';
+const BASE_URL = `${process.env.E2E_BASE_URL ?? 'http://localhost:8001'}/api`;
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -23,6 +23,9 @@ export interface HealthStatus {
   radio_connected: boolean;
   radio_initializing: boolean;
   connection_info: string | null;
+  bots_disabled?: boolean;
+  bots_disabled_source?: 'env' | 'until_restart' | null;
+  basic_auth_enabled?: boolean;
 }
 
 export function getHealth(): Promise<HealthStatus> {
@@ -43,6 +46,8 @@ export interface RadioConfig {
   cr: number;
 }
 
+export type RadioAdvertMode = 'flood' | 'zero_hop';
+
 export function getRadioConfig(): Promise<RadioConfig> {
   return fetchJson('/radio/config');
 }
@@ -58,6 +63,13 @@ export function rebootRadio(): Promise<{ status: string; message: string }> {
   return fetchJson('/radio/reboot', { method: 'POST' });
 }
 
+export function sendAdvertisement(mode: RadioAdvertMode = 'flood'): Promise<{ status: string }> {
+  return fetchJson('/radio/advertise', {
+    method: 'POST',
+    body: JSON.stringify({ mode }),
+  });
+}
+
 // --- Channels ---
 
 export interface Channel {
@@ -65,6 +77,7 @@ export interface Channel {
   name: string;
   is_hashtag: boolean;
   on_radio: boolean;
+  favorite: boolean;
   flood_scope_override?: string | null;
 }
 
@@ -94,9 +107,9 @@ export interface Contact {
   name: string | null;
   type: number;
   flags: number;
-  last_path: string | null;
-  last_path_len: number;
-  out_path_hash_mode: number;
+  direct_path: string | null;
+  direct_path_len: number;
+  direct_path_hash_mode: number;
   route_override_path?: string | null;
   route_override_len?: number | null;
   route_override_hash_mode?: number | null;
@@ -130,6 +143,22 @@ export function createContact(
 
 export function deleteContact(publicKey: string): Promise<{ status: string }> {
   return fetchJson(`/contacts/${publicKey}`, { method: 'DELETE' });
+}
+
+export async function getContactByKey(publicKey: string): Promise<Contact | undefined> {
+  const normalized = publicKey.toLowerCase();
+  const contacts = await getContacts(500, 0);
+  return contacts.find((contact) => contact.public_key.toLowerCase() === normalized);
+}
+
+export function setContactRoutingOverride(
+  publicKey: string,
+  route: string
+): Promise<{ status: string; public_key: string }> {
+  return fetchJson(`/contacts/${publicKey}/routing-override`, {
+    method: 'POST',
+    body: JSON.stringify({ route }),
+  });
 }
 
 // --- Messages ---
@@ -192,15 +221,10 @@ export function markAllRead(): Promise<{ status: string; timestamp: number }> {
 
 // --- Settings ---
 
-export type Favorite = { type: string; id: string };
-
 export interface AppSettings {
   max_radio_contacts: number;
-  favorites: Favorite[];
   auto_decrypt_dm_on_advert: boolean;
-  sidebar_sort_order: string;
   last_message_times: Record<string, number>;
-  preferences_migrated: boolean;
   advert_interval: number;
 }
 
@@ -262,14 +286,19 @@ export function deleteFanoutConfig(id: string): Promise<{ deleted: boolean }> {
 // --- Helpers ---
 
 /**
- * Ensure #flightless channel exists, creating it if needed.
+ * Ensure a channel exists by name, creating it if needed.
  * Returns the channel object.
  */
-export async function ensureFlightlessChannel(): Promise<Channel> {
+export async function ensureChannel(name: string): Promise<Channel> {
   const channels = await getChannels();
-  const existing = channels.find((c) => c.name === '#flightless');
+  const existing = channels.find((c) => c.name === name);
   if (existing) return existing;
-  return createChannel('#flightless');
+  return createChannel(name);
+}
+
+/** Convenience alias — ensures #flightless exists. */
+export async function ensureFlightlessChannel(): Promise<Channel> {
+  return ensureChannel('#flightless');
 }
 
 /**

@@ -164,7 +164,7 @@ class BotModule(FanoutModule):
                     ),
                     timeout=BOT_EXECUTION_TIMEOUT,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Bot '%s' execution timed out", self.name)
                 return
             except Exception:

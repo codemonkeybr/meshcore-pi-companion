@@ -1,0 +1,10 @@
+name: "RemoteTerm CodeQL config"
+
+# Exclude rules that flag intentional design decisions:
+# - AES-ECB is required by the MeshCore radio protocol wire format
+# - Repeater/room passwords are not meaningfully sensitive secrets
+query-filters:
+  - exclude:
+      id: py/weak-cryptographic-algorithm
+  - exclude:
+      id: js/clear-text-storage-of-sensitive-data

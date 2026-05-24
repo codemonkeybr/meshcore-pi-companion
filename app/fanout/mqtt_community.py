@@ -63,6 +63,7 @@ def _config_to_settings(config: dict) -> SimpleNamespace:
         community_mqtt_email=config.get("email", ""),
         community_mqtt_owner=config.get("owner", ""),
         community_mqtt_token_audience=config.get("token_audience", ""),
+        community_mqtt_websocket_path=config.get("websocket_path", "/"),
     )
 
 
@@ -78,6 +79,7 @@ class MqttCommunityModule(FanoutModule):
     def __init__(self, config_id: str, config: dict, *, name: str = "") -> None:
         super().__init__(config_id, config, name=name)
         self._publisher = CommunityMqttPublisher()
+        self._publisher.set_integration_name(name or config_id)
 
     async def start(self) -> None:
         settings = _config_to_settings(self.config)
@@ -98,8 +100,14 @@ class MqttCommunityModule(FanoutModule):
     @property
     def status(self) -> str:
         if self._publisher._is_configured():
+            if self._publisher.last_error:
+                return "error"
             return "connected" if self._publisher.connected else "disconnected"
         return "disconnected"
+
+    @property
+    def last_error(self) -> str | None:
+        return self._publisher.last_error
 
 
 async def _publish_community_packet(
@@ -123,6 +131,8 @@ async def _publish_community_packet(
             device_name = radio_manager.backend.self_info.get("name", "")
 
         packet = _format_raw_packet(data, device_name, pubkey_hex)
+        if packet is None:
+            return
         iata = config.get("iata", "").upper().strip()
         if not _IATA_RE.fullmatch(iata):
             logger.debug("Community MQTT: skipping publish — no valid IATA code configured")

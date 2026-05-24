@@ -9,12 +9,15 @@
     <meta name="theme-color" content="#111419" />
     <meta name="description" content="Web interface for MeshCore mesh radio networks. Send and receive messages, manage contacts and channels, and configure your radio." />
     <title>RemoteTerm for MeshCore</title>
-    <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="shortcut icon" href="/favicon.ico" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/png" href="./favicon-96x96.png" sizes="96x96" />
+    <link rel="shortcut icon" href="./favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./site.webmanifest" crossorigin="use-credentials" />
     <script>
+      // Service worker registration moved to main.tsx (requires isSecureContext
+      // for Web Push). Do not duplicate here.
+
       // Start critical data fetches before React/Vite JS loads.
       // Must be in <head> BEFORE the module script so the browser queues these
       // fetches before it discovers and starts downloading the JS bundle.
@@ -42,17 +45,17 @@
         });
       };
       window.__prefetch = {
-        config: fetchJsonOrThrow('/api/radio/config'),
-        settings: fetchJsonOrThrow('/api/settings'),
-        channels: fetchJsonOrThrow('/api/channels'),
-        contacts: fetchJsonOrThrow('/api/contacts?limit=1000&offset=0'),
-        unreads: fetchJsonOrThrow('/api/read-state/unreads'),
-        undecryptedCount: fetchJsonOrThrow('/api/packets/undecrypted/count'),
+        config: fetchJsonOrThrow('./api/radio/config'),
+        settings: fetchJsonOrThrow('./api/settings'),
+        channels: fetchJsonOrThrow('./api/channels'),
+        contacts: fetchJsonOrThrow('./api/contacts?limit=1000&offset=0'),
+        unreads: fetchJsonOrThrow('./api/read-state/unreads'),
+        undecryptedCount: fetchJsonOrThrow('./api/packets/undecrypted/count'),
       };
     </script>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

@@ -4,9 +4,12 @@ Verifies that the primary RF packet entry point correctly extracts hex payload,
 SNR, and RSSI from MeshCore events and passes them to process_raw_packet.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from meshcore import EventType
+from meshcore.packets import PacketType
+from meshcore.reader import MessageReader
 
 
 class TestOnRxLogData:
@@ -90,3 +93,42 @@ class TestOnRxLogData:
 
         with pytest.raises(ValueError):
             await on_rx_log_data(MockEvent())
+
+    @pytest.mark.asyncio
+    async def test_real_meshcore_reader_forwards_3byte_log_data_to_handler(self):
+        """The meshcore reader emits usable RX_LOG_DATA for 3-byte-hop packets."""
+        from app.event_handlers import on_rx_log_data
+
+        payload_hex = "15833fa002860ccae0eed9ca78b9ab0775d477c1f6490a398bf4edc75240"
+        dispatcher = MagicMock()
+        dispatcher.dispatch = AsyncMock()
+        reader = MessageReader(dispatcher)
+
+        frame = bytes(
+            [
+                PacketType.LOG_DATA.value,
+                int(7.5 * 4),
+                (-85) & 0xFF,
+            ]
+        ) + bytes.fromhex(payload_hex)
+
+        await reader.handle_rx(bytearray(frame))
+
+        dispatcher.dispatch.assert_awaited_once()
+        event = dispatcher.dispatch.await_args.args[0]
+        assert event.type == EventType.RX_LOG_DATA
+        assert event.payload["payload"] == payload_hex.lower()
+        assert event.payload["path_hash_size"] == 3
+        assert event.payload["path_len"] == 3
+        assert event.payload["path"] == "3fa002860ccae0eed9"
+        assert event.payload["snr"] == 7.5
+        assert event.payload["rssi"] == -85
+
+        with patch("app.event_handlers.process_raw_packet", new_callable=AsyncMock) as mock_process:
+            await on_rx_log_data(event)
+
+            mock_process.assert_called_once_with(
+                raw_bytes=bytes.fromhex(payload_hex),
+                snr=7.5,
+                rssi=-85,
+            )

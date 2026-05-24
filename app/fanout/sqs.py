@@ -84,7 +84,6 @@ class SqsModule(FanoutModule):
     def __init__(self, config_id: str, config: dict, *, name: str = "") -> None:
         super().__init__(config_id, config, name=name)
         self._client = None
-        self._last_error: str | None = None
 
     async def start(self) -> None:
         kwargs: dict[str, str] = {}
@@ -147,18 +146,18 @@ class SqsModule(FanoutModule):
 
         try:
             await asyncio.to_thread(partial(self._client.send_message, **request_kwargs))
-            self._last_error = None
+            self._set_last_error(None)
         except (ClientError, BotoCoreError) as exc:
-            self._last_error = str(exc)
+            self._set_last_error(str(exc))
             logger.warning("SQS %s send error: %s", self.config_id, exc)
         except Exception as exc:
-            self._last_error = str(exc)
+            self._set_last_error(str(exc))
             logger.exception("Unexpected SQS send error for %s", self.config_id)
 
     @property
     def status(self) -> str:
         if not str(self.config.get("queue_url", "")).strip():
             return "disconnected"
-        if self._last_error:
+        if self.last_error:
             return "error"
         return "connected"

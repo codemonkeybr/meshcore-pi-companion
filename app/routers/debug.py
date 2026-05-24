@@ -1,30 +1,55 @@
 import hashlib
-import importlib.metadata
 import logging
-import subprocess
+import os
+import platform
+import struct
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from meshcore import EventType
 from pydantic import BaseModel, Field
 
 from app.config import get_recent_log_lines, settings
+from app.models import AppSettings
 from app.radio_sync import get_contacts_selected_for_radio_sync, get_radio_channel_limit
-from app.repository import MessageRepository
-from app.routers.health import HealthResponse, build_health_data
+from app.repository import AppSettingsRepository, MessageRepository, StatisticsRepository
+from app.routers.health import FanoutStatusResponse, build_health_data
 from app.services.radio_runtime import radio_runtime
+from app.version_info import get_app_build_info, git_output
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["debug"])
 
+LOG_COPY_BOUNDARY_MESSAGE = "STOP COPYING HERE IF YOU DO NOT WANT TO INCLUDE LOGS BELOW"
+LOG_COPY_BOUNDARY_LINE = "-" * 64
+LOG_COPY_BOUNDARY_PREFIX = [
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_MESSAGE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+    LOG_COPY_BOUNDARY_LINE,
+]
+
+
+class DebugSystemInfo(BaseModel):
+    os: str
+    arch: str
+    arch_bits: int
+    total_ram_mb: int
+
 
 class DebugApplicationInfo(BaseModel):
     version: str
+    version_source: str
     commit_hash: str | None = None
+    commit_source: str | None = None
     git_branch: str | None = None
     git_dirty: bool | None = None
     python_version: str
@@ -36,12 +61,9 @@ class DebugRuntimeInfo(BaseModel):
     setup_in_progress: bool
     setup_complete: bool
     channels_with_incoming_messages: int
-    max_channels: int
-    path_hash_mode: int
     path_hash_mode_supported: bool
     channel_slot_reuse_enabled: bool
     channel_send_cache_capacity: int
-    remediation_flags: dict[str, bool]
 
 
 class DebugContactAudit(BaseModel):
@@ -72,54 +94,84 @@ class DebugRadioProbe(BaseModel):
     channels: DebugChannelAudit | None = None
 
 
+class DebugDatabaseInfo(BaseModel):
+    total_dms: int
+    total_channel_messages: int
+    total_outgoing: int
+
+
+class DebugHealthSummary(BaseModel):
+    radio_state: str
+    database_size_mb: float
+    oldest_undecrypted_timestamp: int | None
+    fanouts_with_errors: dict[str, FanoutStatusResponse] = Field(default_factory=dict)
+    bots_disabled_source: Literal["env", "until_restart"] | None = None
+    basic_auth_enabled: bool = False
+
+
+class DebugEnvironment(BaseModel):
+    connection_type: str
+    serial_port: str
+    serial_baudrate: int
+    tcp_host: str
+    tcp_port: int
+    ble_address: str
+    log_level: str
+    database_path: str
+    disable_bots: bool
+    enable_message_poll_fallback: bool
+    force_channel_slot_reconfigure: bool
+    load_with_autoevict: bool
+
+
+class DebugAppSettings(BaseModel):
+    max_radio_contacts: int
+    auto_decrypt_dm_on_advert: bool
+    advert_interval: int
+    flood_scope: str
+    blocked_keys_count: int
+    blocked_names_count: int
+
+
 class DebugSnapshotResponse(BaseModel):
     captured_at: str
+    system: DebugSystemInfo
     application: DebugApplicationInfo
-    health: HealthResponse
+    environment: DebugEnvironment
+    health: DebugHealthSummary
+    settings: DebugAppSettings
     runtime: DebugRuntimeInfo
+    database: DebugDatabaseInfo
     radio_probe: DebugRadioProbe
     logs: list[str]
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _get_app_version() -> str:
+def _build_system_info() -> DebugSystemInfo:
     try:
-        return importlib.metadata.version("remoteterm-meshcore")
-    except Exception:
-        pyproject = _repo_root() / "pyproject.toml"
-        try:
-            for line in pyproject.read_text().splitlines():
-                if line.startswith("version = "):
-                    return line.split('"')[1]
-        except Exception:
-            pass
-    return "0.0.0"
+        # os.sysconf is available on Linux/macOS
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        total_ram_mb = (page_size * page_count) // (1024 * 1024)
+    except (AttributeError, ValueError, OSError):
+        total_ram_mb = 0
 
-
-def _git_output(*args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=_repo_root(),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except Exception:
-        return None
-    output = result.stdout.strip()
-    return output or None
+    return DebugSystemInfo(
+        os=f"{platform.system()} {platform.release()}",
+        arch=platform.machine(),
+        arch_bits=struct.calcsize("P") * 8,
+        total_ram_mb=total_ram_mb,
+    )
 
 
 def _build_application_info() -> DebugApplicationInfo:
-    dirty_output = _git_output("status", "--porcelain")
+    build_info = get_app_build_info()
+    dirty_output = git_output("status", "--porcelain")
     return DebugApplicationInfo(
-        version=_get_app_version(),
-        commit_hash=_git_output("rev-parse", "HEAD"),
-        git_branch=_git_output("rev-parse", "--abbrev-ref", "HEAD"),
+        version=build_info.version,
+        version_source=build_info.version_source,
+        commit_hash=build_info.commit_hash,
+        commit_source=build_info.commit_source,
+        git_branch=git_output("rev-parse", "--abbrev-ref", "HEAD"),
         git_dirty=(dirty_output is not None and dirty_output != ""),
         python_version=sys.version.split()[0],
     )
@@ -164,6 +216,85 @@ def _coerce_live_max_channels(device_info: dict[str, Any] | None) -> int | None:
         return int(device_info["max_channels"])
     except (TypeError, ValueError):
         return None
+
+
+def _build_environment() -> DebugEnvironment:
+    return DebugEnvironment(
+        connection_type=settings.connection_type,
+        serial_port=settings.serial_port,
+        serial_baudrate=settings.serial_baudrate,
+        tcp_host=settings.tcp_host,
+        tcp_port=settings.tcp_port,
+        ble_address=settings.ble_address,
+        log_level=settings.log_level,
+        database_path=settings.database_path,
+        disable_bots=settings.disable_bots,
+        enable_message_poll_fallback=settings.enable_message_poll_fallback,
+        force_channel_slot_reconfigure=settings.force_channel_slot_reconfigure,
+        load_with_autoevict=settings.load_with_autoevict,
+    )
+
+
+def _build_debug_app_settings(app_settings: AppSettings) -> DebugAppSettings:
+    return DebugAppSettings(
+        max_radio_contacts=app_settings.max_radio_contacts,
+        auto_decrypt_dm_on_advert=app_settings.auto_decrypt_dm_on_advert,
+        advert_interval=app_settings.advert_interval,
+        flood_scope=app_settings.flood_scope,
+        blocked_keys_count=len(app_settings.blocked_keys),
+        blocked_names_count=len(app_settings.blocked_names),
+    )
+
+
+def _derive_debug_radio_state(
+    *,
+    radio_connected: bool,
+    connection_desired: bool,
+    setup_in_progress: bool,
+    setup_complete: bool,
+    is_reconnecting: bool,
+) -> str:
+    if not connection_desired:
+        return "paused"
+    if radio_connected and (setup_in_progress or not setup_complete):
+        return "initializing"
+    if radio_connected:
+        return "connected"
+    if is_reconnecting:
+        return "connecting"
+    return "disconnected"
+
+
+def _build_debug_health_summary(
+    health_data: dict[str, Any], *, radio_state: str
+) -> DebugHealthSummary:
+    def _fanout_last_error(status: Any) -> str | None:
+        if isinstance(status, dict):
+            value = status.get("last_error")
+        else:
+            value = getattr(status, "last_error", None)
+        return value if isinstance(value, str) and value else None
+
+    fanouts_with_errors = {
+        config_id: status
+        for config_id, status in health_data["fanout_statuses"].items()
+        if _fanout_last_error(status)
+    }
+    return DebugHealthSummary(
+        radio_state=radio_state,
+        database_size_mb=health_data["database_size_mb"],
+        oldest_undecrypted_timestamp=health_data["oldest_undecrypted_timestamp"],
+        fanouts_with_errors=fanouts_with_errors,
+        bots_disabled_source=health_data["bots_disabled_source"],
+        basic_auth_enabled=health_data["basic_auth_enabled"],
+    )
+
+
+def _sanitize_radio_probe_self_info(self_info: dict[str, Any] | None) -> dict[str, Any]:
+    sanitized = dict(self_info or {})
+    sanitized.pop("adv_lat", None)
+    sanitized.pop("adv_lon", None)
+    return sanitized
 
 
 async def _build_contact_audit(
@@ -217,8 +348,7 @@ async def _probe_radio() -> DebugRadioProbe:
         async with radio_runtime.radio_operation(
             "debug_support_snapshot",
             suspend_auto_fetch=True,
-        ) as be:
-            mc = getattr(be, "_mc", be)
+        ) as mc:
             device_info = None
             stats_core = None
             stats_radio = None
@@ -251,7 +381,7 @@ async def _probe_radio() -> DebugRadioProbe:
             return DebugRadioProbe(
                 performed=True,
                 errors=errors,
-                self_info=dict(mc.self_info or {}),
+                self_info=_sanitize_radio_probe_self_info(mc.self_info),
                 device_info=device_info,
                 stats_core=stats_core,
                 stats_radio=stats_radio,
@@ -270,31 +400,49 @@ async def _probe_radio() -> DebugRadioProbe:
 @router.get("/debug", response_model=DebugSnapshotResponse)
 async def debug_support_snapshot() -> DebugSnapshotResponse:
     """Return a support/debug snapshot with recent logs and live radio state."""
-    health_data = await build_health_data(radio_runtime.is_connected, radio_runtime.connection_info)
+    connection_info = radio_runtime.connection_info
+    connection_desired = radio_runtime.connection_desired
+    setup_in_progress = radio_runtime.is_setup_in_progress
+    setup_complete = radio_runtime.is_setup_complete
+    radio_connected = radio_runtime.is_connected
+    is_reconnecting = getattr(radio_runtime, "is_reconnecting", False)
+
+    health_data = await build_health_data(radio_connected, connection_info)
+    app_settings = await AppSettingsRepository.get()
+    message_totals = await StatisticsRepository.get_database_message_totals()
     radio_probe = await _probe_radio()
     channels_with_incoming_messages = (
         await MessageRepository.count_channels_with_incoming_messages()
     )
+    radio_state = _derive_debug_radio_state(
+        radio_connected=radio_connected,
+        connection_desired=connection_desired,
+        setup_in_progress=setup_in_progress,
+        setup_complete=setup_complete,
+        is_reconnecting=is_reconnecting,
+    )
     return DebugSnapshotResponse(
-        captured_at=datetime.now(timezone.utc).isoformat(),
+        captured_at=datetime.now(UTC).isoformat(),
+        system=_build_system_info(),
         application=_build_application_info(),
-        health=HealthResponse(**health_data),
+        environment=_build_environment(),
+        health=_build_debug_health_summary(health_data, radio_state=radio_state),
+        settings=_build_debug_app_settings(app_settings),
         runtime=DebugRuntimeInfo(
-            connection_info=radio_runtime.connection_info,
-            connection_desired=radio_runtime.connection_desired,
-            setup_in_progress=radio_runtime.is_setup_in_progress,
-            setup_complete=radio_runtime.is_setup_complete,
+            connection_info=connection_info,
+            connection_desired=connection_desired,
+            setup_in_progress=setup_in_progress,
+            setup_complete=setup_complete,
             channels_with_incoming_messages=channels_with_incoming_messages,
-            max_channels=radio_runtime.max_channels,
-            path_hash_mode=radio_runtime.path_hash_mode,
             path_hash_mode_supported=radio_runtime.path_hash_mode_supported,
             channel_slot_reuse_enabled=radio_runtime.channel_slot_reuse_enabled(),
             channel_send_cache_capacity=radio_runtime.get_channel_send_cache_capacity(),
-            remediation_flags={
-                "enable_message_poll_fallback": settings.enable_message_poll_fallback,
-                "force_channel_slot_reconfigure": settings.force_channel_slot_reconfigure,
-            },
+        ),
+        database=DebugDatabaseInfo(
+            total_dms=message_totals["total_dms"],
+            total_channel_messages=message_totals["total_channel_messages"],
+            total_outgoing=message_totals["total_outgoing"],
         ),
         radio_probe=radio_probe,
-        logs=get_recent_log_lines(limit=1000),
+        logs=[*LOG_COPY_BOUNDARY_PREFIX, *get_recent_log_lines(limit=1000)],
     )

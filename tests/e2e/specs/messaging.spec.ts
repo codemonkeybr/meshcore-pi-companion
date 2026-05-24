@@ -23,8 +23,9 @@ test.describe('Channel messaging in #flightless', () => {
     // Send it
     await page.getByRole('button', { name: 'Send', exact: true }).click();
 
-    // Verify message appears in the message list
-    await expect(page.getByText(testMessage)).toBeVisible({ timeout: 15_000 });
+    // Verify message appears in the message list (use locator('span') to avoid
+    // matching the textarea which may briefly retain the sent text)
+    await expect(page.locator('span', { hasText: testMessage })).toBeVisible({ timeout: 15_000 });
   });
 
   test('outgoing message shows ack indicator', async ({ page }) => {
@@ -37,8 +38,8 @@ test.describe('Channel messaging in #flightless', () => {
     await input.fill(testMessage);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
 
-    // Wait for the message to appear
-    const messageEl = page.getByText(testMessage);
+    // Wait for the message to appear in the message list
+    const messageEl = page.locator('span', { hasText: testMessage });
     await expect(messageEl).toBeVisible({ timeout: 15_000 });
 
     // Outgoing messages show either "?" (pending) or "✓" (acked)
@@ -58,7 +59,7 @@ test.describe('Channel messaging in #flightless', () => {
     await input.fill(testMessage);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
 
-    const messageEl = page.getByText(testMessage).first();
+    const messageEl = page.locator('span', { hasText: testMessage }).first();
     await expect(messageEl).toBeVisible({ timeout: 15_000 });
 
     const messageContainer = messageEl.locator(
@@ -94,6 +95,6 @@ test.describe('Channel messaging in #flightless', () => {
     await expect(page.getByText('Message resent')).toBeVisible({ timeout: 10_000 });
 
     // Byte-perfect resend should not create a second visible row in this conversation.
-    await expect(page.getByText(testMessage)).toHaveCount(1);
+    await expect(page.locator('span', { hasText: testMessage })).toHaveCount(1);
   });
 });

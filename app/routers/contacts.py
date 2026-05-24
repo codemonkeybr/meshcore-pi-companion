@@ -1,25 +1,32 @@
+import asyncio
 import logging
 import random
+import time
+from contextlib import suppress
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from meshcore import EventType
+from pydantic import BaseModel, Field
 
-from app.dependencies import require_connected
 from app.models import (
     Contact,
     ContactActiveRoom,
-    ContactAdvertPath,
     ContactAdvertPathSummary,
     ContactAnalytics,
-    ContactDetail,
     ContactRoutingOverrideRequest,
+    ContactTelemetryResponse,
     ContactUpsert,
     CreateContactRequest,
+    LppSensor,
     NearestRepeater,
+    PathDiscoveryResponse,
+    PathDiscoveryRoute,
+    TelemetryHistoryEntry,
     TraceResponse,
 )
 from app.packet_processor import start_historical_dm_decryption
 from app.path_utils import parse_explicit_hop_route
+from app.radio_sync import _to_backend as _coerce_be
 from app.repository import (
     AmbiguousPublicKeyPrefixError,
     ContactAdvertPathRepository,
@@ -29,13 +36,17 @@ from app.repository import (
 )
 from app.services.contact_reconciliation import (
     promote_prefix_contacts_for_contact,
-    reconcile_contact_messages,
+    record_contact_name_and_reconcile,
 )
 from app.services.radio_runtime import radio_runtime as radio_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
+
+
+TRACE_HASH_BYTES = 4
+TRACE_FLAGS_4BYTE = 2
 
 
 def _ambiguous_contact_detail(err: AmbiguousPublicKeyPrefixError) -> str:
@@ -59,11 +70,15 @@ async def _resolve_contact_or_404(
 
 
 async def _ensure_on_radio(mc, contact: Contact) -> None:
-    """Add a contact to the radio for routing, raising 500 on failure."""
-    add_result = await mc.add_contact(contact.to_radio_dict())
+    """Add a contact to the radio for routing, raising 422 on failure."""
+    from app.backends.client_backend import ClientBackend
+    from app.radio_backend import RadioBackend
+
+    be = mc if isinstance(mc, RadioBackend) else ClientBackend(mc)
+    add_result = await be.add_contact(contact.to_radio_dict())
     if add_result is not None and add_result.type == EventType.ERROR:
         raise HTTPException(
-            status_code=500, detail=f"Failed to add contact to radio: {add_result.payload}"
+            status_code=422, detail=f"Failed to add contact to radio: {add_result.payload}"
         )
 
 
@@ -73,8 +88,9 @@ async def _best_effort_push_contact_to_radio(contact: Contact, operation_name: s
         return
 
     try:
-        async with radio_manager.radio_operation(operation_name) as mc:
-            result = await mc.add_contact(contact.to_radio_dict())
+        async with radio_manager.radio_operation(operation_name) as be:
+            be = _coerce_be(be)
+            result = await be.add_contact(contact.to_radio_dict())
         if result is not None and result.type == EventType.ERROR:
             logger.warning(
                 "Failed to push updated routing to radio for %s: %s",
@@ -106,6 +122,12 @@ async def _broadcast_contact_resolution(previous_public_keys: list[str], contact
                 "contact": contact.model_dump(),
             },
         )
+
+
+def _path_hash_mode_from_hop_width(hop_width: object) -> int:
+    if not isinstance(hop_width, int):
+        return 0
+    return max(0, min(hop_width - 1, 2))
 
 
 async def _build_keyed_contact_analytics(contact: Contact) -> ContactAnalytics:
@@ -265,12 +287,18 @@ async def create_contact(
     # Check if contact already exists
     existing = await ContactRepository.get_by_key(request.public_key)
     if existing:
-        # Update name if provided
+        # Update name if provided and record name history
         if request.name:
             await ContactRepository.upsert(existing.to_upsert(name=request.name))
             refreshed = await ContactRepository.get_by_key(request.public_key)
             if refreshed is not None:
                 existing = refreshed
+            await record_contact_name_and_reconcile(
+                public_key=request.public_key,
+                contact_name=request.name,
+                timestamp=int(time.time()),
+                log=logger,
+            )
 
         promoted_keys = await promote_prefix_contacts_for_contact(
             public_key=request.public_key,
@@ -296,7 +324,7 @@ async def create_contact(
     contact_upsert = ContactUpsert(
         public_key=lower_key,
         name=request.name,
-        out_path_hash_mode=-1,
+        type=request.type,
         on_radio=False,
     )
     await ContactRepository.upsert(contact_upsert)
@@ -306,9 +334,10 @@ async def create_contact(
         log=logger,
     )
 
-    await reconcile_contact_messages(
+    await record_contact_name_and_reconcile(
         public_key=lower_key,
         contact_name=request.name,
+        timestamp=int(time.time()),
         log=logger,
     )
 
@@ -324,196 +353,6 @@ async def create_contact(
     return stored
 
 
-@router.get("/{public_key}/detail", response_model=ContactDetail)
-async def get_contact_detail(public_key: str) -> ContactDetail:
-    """Get comprehensive contact profile data.
-
-    Returns contact info, name history, message counts, most active rooms,
-    advertisement paths, advert frequency, and nearest repeaters.
-    """
-    contact = await _resolve_contact_or_404(public_key)
-
-    name_history = await ContactNameHistoryRepository.get_history(contact.public_key)
-    dm_count = await MessageRepository.count_dm_messages(contact.public_key)
-    chan_count = await MessageRepository.count_channel_messages_by_sender(contact.public_key)
-    active_rooms_raw = await MessageRepository.get_most_active_rooms(contact.public_key)
-    advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key)
-
-    most_active_rooms = [
-        ContactActiveRoom(channel_key=key, channel_name=name, message_count=count)
-        for key, name, count in active_rooms_raw
-    ]
-
-    # Compute advert observation rate (observations/hour) from path data.
-    # Note: a single advertisement can arrive via multiple paths, so this counts
-    # RF observations, not unique advertisement broadcasts.
-    advert_frequency: float | None = None
-    if advert_paths:
-        total_observations = sum(p.heard_count for p in advert_paths)
-        earliest = min(p.first_seen for p in advert_paths)
-        latest = max(p.last_seen for p in advert_paths)
-        span_hours = (latest - earliest) / 3600.0
-        if span_hours > 0:
-            advert_frequency = round(total_observations / span_hours, 2)
-
-    # Compute nearest repeaters from first-hop prefixes in advert paths
-    first_hop_stats: dict[str, dict] = {}  # prefix -> {heard_count, path_len, last_seen}
-    for p in advert_paths:
-        prefix = p.next_hop
-        if prefix:
-            if prefix not in first_hop_stats:
-                first_hop_stats[prefix] = {
-                    "heard_count": 0,
-                    "path_len": p.path_len,
-                    "last_seen": p.last_seen,
-                }
-            first_hop_stats[prefix]["heard_count"] += p.heard_count
-            first_hop_stats[prefix]["last_seen"] = max(
-                first_hop_stats[prefix]["last_seen"], p.last_seen
-            )
-
-    # Resolve all first-hop prefixes to contacts in a single query
-    resolved_contacts = await ContactRepository.resolve_prefixes(list(first_hop_stats.keys()))
-
-    nearest_repeaters: list[NearestRepeater] = []
-    for prefix, stats in first_hop_stats.items():
-        resolved = resolved_contacts.get(prefix)
-        nearest_repeaters.append(
-            NearestRepeater(
-                public_key=resolved.public_key if resolved else prefix,
-                name=resolved.name if resolved else None,
-                path_len=stats["path_len"],
-                last_seen=stats["last_seen"],
-                heard_count=stats["heard_count"],
-            )
-        )
-
-    nearest_repeaters.sort(key=lambda r: r.heard_count, reverse=True)
-
-    return ContactDetail(
-        contact=contact,
-        name_history=name_history,
-        dm_message_count=dm_count,
-        channel_message_count=chan_count,
-        most_active_rooms=most_active_rooms,
-        advert_paths=advert_paths,
-        advert_frequency=advert_frequency,
-        nearest_repeaters=nearest_repeaters,
-    )
-
-
-@router.get("/{public_key}", response_model=Contact)
-async def get_contact(public_key: str) -> Contact:
-    """Get a specific contact by public key or prefix."""
-    return await _resolve_contact_or_404(public_key)
-
-
-@router.get("/{public_key}/advert-paths", response_model=list[ContactAdvertPath])
-async def get_contact_advert_paths(
-    public_key: str,
-    limit: int = Query(default=10, ge=1, le=50),
-) -> list[ContactAdvertPath]:
-    """List recent unique advert paths for a contact."""
-    contact = await _resolve_contact_or_404(public_key)
-    return await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key, limit)
-
-
-@router.post("/sync")
-async def sync_contacts_from_radio() -> dict:
-    """Sync contacts from the radio to the database."""
-    require_connected()
-
-    logger.info("Syncing contacts from radio")
-
-    async with radio_manager.radio_operation("sync_contacts_from_radio") as mc:
-        result = await mc.get_contacts()
-
-    if result.type == EventType.ERROR:
-        raise HTTPException(status_code=500, detail=f"Failed to get contacts: {result.payload}")
-
-    contacts = result.payload
-    count = 0
-
-    synced_keys: list[str] = []
-    for public_key, contact_data in contacts.items():
-        lower_key = public_key.lower()
-        await ContactRepository.upsert(
-            Contact.from_radio_dict(lower_key, contact_data, on_radio=True)
-        )
-        synced_keys.append(lower_key)
-        claimed = await MessageRepository.claim_prefix_messages(lower_key)
-        if claimed > 0:
-            logger.info("Claimed %d prefix DM message(s) for contact %s", claimed, public_key[:12])
-        adv_name = contact_data.get("adv_name")
-        if adv_name:
-            backfilled = await MessageRepository.backfill_channel_sender_key(lower_key, adv_name)
-            if backfilled > 0:
-                logger.info(
-                    "Backfilled sender_key on %d channel message(s) for %s",
-                    backfilled,
-                    adv_name,
-                )
-        count += 1
-
-    # Clear on_radio for contacts not found on the radio
-    await ContactRepository.clear_on_radio_except(synced_keys)
-
-    logger.info("Synced %d contacts from radio", count)
-    return {"synced": count}
-
-
-@router.post("/{public_key}/remove-from-radio")
-async def remove_contact_from_radio(public_key: str) -> dict:
-    """Remove a contact from the radio (keeps it in database)."""
-    require_connected()
-
-    contact = await _resolve_contact_or_404(public_key)
-
-    async with radio_manager.radio_operation("remove_contact_from_radio") as mc:
-        # Get the contact from radio
-        radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
-        if not radio_contact:
-            # Already not on radio
-            await ContactRepository.set_on_radio(contact.public_key, False)
-            return {"status": "ok", "message": "Contact was not on radio"}
-
-        logger.info("Removing contact %s from radio", contact.public_key[:12])
-
-        result = await mc.remove_contact(radio_contact)
-
-        if result.type == EventType.ERROR:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to remove contact: {result.payload}"
-            )
-
-    await ContactRepository.set_on_radio(contact.public_key, False)
-    return {"status": "ok"}
-
-
-@router.post("/{public_key}/add-to-radio")
-async def add_contact_to_radio(public_key: str) -> dict:
-    """Add a contact from the database to the radio."""
-    require_connected()
-
-    contact = await _resolve_contact_or_404(public_key, "Contact not found in database")
-
-    async with radio_manager.radio_operation("add_contact_to_radio") as mc:
-        # Check if already on radio
-        radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
-        if radio_contact:
-            return {"status": "ok", "message": "Contact already on radio"}
-
-        logger.info("Adding contact %s to radio", contact.public_key[:12])
-
-        result = await mc.add_contact(contact.to_radio_dict())
-
-        if result.type == EventType.ERROR:
-            raise HTTPException(status_code=500, detail=f"Failed to add contact: {result.payload}")
-
-    await ContactRepository.set_on_radio(contact.public_key, True)
-    return {"status": "ok"}
-
-
 @router.post("/{public_key}/mark-read")
 async def mark_contact_read(public_key: str) -> dict:
     """Mark a contact conversation as read (update last_read_at timestamp)."""
@@ -526,6 +365,45 @@ async def mark_contact_read(public_key: str) -> dict:
     return {"status": "ok", "public_key": contact.public_key}
 
 
+class BulkDeleteRequest(BaseModel):
+    public_keys: list[str] = Field(description="Public keys to delete")
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_contacts(request: BulkDeleteRequest) -> dict:
+    """Delete multiple contacts from the database (and radio if present)."""
+    from app.websocket import broadcast_event
+
+    # Resolve all contacts first
+    contacts_to_delete: list[Contact] = []
+    for key in request.public_keys:
+        contact = await ContactRepository.get_by_key(key.lower())
+        if contact:
+            contacts_to_delete.append(contact)
+
+    # Remove from radio in a single locked operation (blocks until radio is free)
+    if radio_manager.is_connected and contacts_to_delete:
+        try:
+            async with radio_manager.radio_operation("bulk_delete_contacts_from_radio") as be:
+                be = _coerce_be(be)
+                for contact in contacts_to_delete:
+                    radio_contact = be.get_contact_by_key_prefix(contact.public_key[:12])
+                    if radio_contact:
+                        await be.remove_contact(radio_contact)
+        except Exception as e:
+            logger.warning("Radio removal during bulk delete failed: %s", e)
+
+    # Delete from database and broadcast events
+    deleted = 0
+    for contact in contacts_to_delete:
+        await ContactRepository.delete(contact.public_key)
+        broadcast_event("contact_deleted", {"public_key": contact.public_key})
+        deleted += 1
+
+    logger.info("Bulk deleted %d/%d contacts", deleted, len(request.public_keys))
+    return {"deleted": deleted}
+
+
 @router.delete("/{public_key}")
 async def delete_contact(public_key: str) -> dict:
     """Delete a contact from the database (and radio if present)."""
@@ -533,13 +411,14 @@ async def delete_contact(public_key: str) -> dict:
 
     # Remove from radio if connected and contact is on radio
     if radio_manager.is_connected:
-        async with radio_manager.radio_operation("delete_contact_from_radio") as mc:
-            radio_contact = mc.get_contact_by_key_prefix(contact.public_key[:12])
+        async with radio_manager.radio_operation("delete_contact_from_radio") as be:
+            be = _coerce_be(be)
+            radio_contact = be.get_contact_by_key_prefix(contact.public_key[:12])
             if radio_contact:
                 logger.info(
                     "Removing contact %s from radio before deletion", contact.public_key[:12]
                 )
-                await mc.remove_contact(radio_contact)
+                await be.remove_contact(radio_contact)
 
     # Delete from database
     await ContactRepository.delete(contact.public_key)
@@ -556,41 +435,46 @@ async def delete_contact(public_key: str) -> dict:
 async def request_trace(public_key: str) -> TraceResponse:
     """Send a single-hop trace to a contact and wait for the result.
 
-    The trace path contains the contact's 1-byte pubkey hash as the sole hop
-    (no intermediate repeaters). The radio firmware requires at least one
-    node in the path.
+    The trace path contains the contact's 4-byte pubkey hash as the sole hop
+    (no intermediate repeaters). This uses TRACE's dedicated width flags rather
+    than the radio's normal path_hash_mode setting.
     """
-    require_connected()
+    radio_manager.require_connected()
 
     contact = await _resolve_contact_or_404(public_key)
 
     tag = random.randint(1, 0xFFFFFFFF)
-    # First 2 hex chars of pubkey = 1-byte hash used by the trace protocol
-    contact_hash = contact.public_key[:2]
+    # Use a 4-byte contact hash for low-collision direct trace targeting.
+    contact_hash = contact.public_key[: TRACE_HASH_BYTES * 2]
 
     # Trace does not need auto-fetch suspension: response arrives as TRACE_DATA
     # from the reader loop, not via get_msg().
-    async with radio_manager.radio_operation("request_trace", pause_polling=True) as mc:
+    async with radio_manager.radio_operation("request_trace", pause_polling=True) as be:
+        be = _coerce_be(be)
         # Ensure contact is on radio so the trace can reach them
-        await _ensure_on_radio(mc, contact)
+        await _ensure_on_radio(be, contact)
 
         logger.info(
             "Sending trace to %s (tag=%d, hash=%s)", contact.public_key[:12], tag, contact_hash
         )
-        result = await mc.send_trace(path=contact_hash, tag=tag)
+        result = await be.send_trace(
+            path=contact_hash,
+            tag=tag,
+            flags=TRACE_FLAGS_4BYTE,
+        )
 
         if result.type == EventType.ERROR:
-            raise HTTPException(status_code=500, detail=f"Failed to send trace: {result.payload}")
+            raise HTTPException(status_code=422, detail=f"Failed to send trace: {result.payload}")
 
         # Wait for the matching TRACE_DATA event
-        event = await mc.wait_for_event(
+        event = await be.wait_for_event(
             EventType.TRACE_DATA,
             attribute_filters={"tag": tag},
             timeout=15,
         )
 
     if event is None:
-        raise HTTPException(status_code=504, detail="No trace response heard")
+        raise HTTPException(status_code=408, detail="No trace response heard")
 
     trace = event.payload
     path = trace.get("path", [])
@@ -612,6 +496,91 @@ async def request_trace(public_key: str) -> TraceResponse:
     return TraceResponse(remote_snr=remote_snr, local_snr=local_snr, path_len=path_len)
 
 
+@router.post("/{public_key}/path-discovery", response_model=PathDiscoveryResponse)
+async def request_path_discovery(public_key: str) -> PathDiscoveryResponse:
+    """Discover the current forward and return paths to a known contact."""
+    radio_manager.require_connected()
+
+    contact = await _resolve_contact_or_404(public_key)
+    pubkey_prefix = contact.public_key[:12]
+
+    async with radio_manager.radio_operation("request_path_discovery", pause_polling=True) as be:
+        be = _coerce_be(be)
+        await _ensure_on_radio(be, contact)
+
+        response_task = asyncio.create_task(
+            be.wait_for_event(
+                EventType.PATH_RESPONSE,
+                attribute_filters={"pubkey_pre": pubkey_prefix},
+                timeout=15,
+            )
+        )
+        try:
+            result = await be.send_path_discovery(contact.public_key)
+            if result.type == EventType.ERROR:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Failed to send path discovery: {result.payload}",
+                )
+
+            event = await response_task
+        finally:
+            if not response_task.done():
+                response_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await response_task
+
+        if event is None:
+            raise HTTPException(status_code=408, detail="No path discovery response heard")
+
+        payload = event.payload
+        forward_path = str(payload.get("out_path") or "")
+        forward_len = int(payload.get("out_path_len") or 0)
+        forward_mode = _path_hash_mode_from_hop_width(payload.get("out_path_hash_len"))
+        return_path = str(payload.get("in_path") or "")
+        return_len = int(payload.get("in_path_len") or 0)
+        return_mode = _path_hash_mode_from_hop_width(payload.get("in_path_hash_len"))
+
+        await ContactRepository.update_direct_path(
+            contact.public_key,
+            forward_path,
+            forward_len,
+            forward_mode,
+        )
+        refreshed_contact = await _resolve_contact_or_404(contact.public_key)
+
+        try:
+            sync_result = await be.add_contact(refreshed_contact.to_radio_dict())
+            if sync_result is not None and sync_result.type == EventType.ERROR:
+                logger.warning(
+                    "Failed to sync discovered path back to radio for %s: %s",
+                    refreshed_contact.public_key[:12],
+                    sync_result.payload,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to sync discovered path back to radio for %s",
+                refreshed_contact.public_key[:12],
+                exc_info=True,
+            )
+
+    await _broadcast_contact_update(refreshed_contact)
+
+    return PathDiscoveryResponse(
+        contact=refreshed_contact,
+        forward_path=PathDiscoveryRoute(
+            path=forward_path,
+            path_len=forward_len,
+            path_hash_mode=forward_mode,
+        ),
+        return_path=PathDiscoveryRoute(
+            path=return_path,
+            path_len=return_len,
+            path_hash_mode=return_mode,
+        ),
+    )
+
+
 @router.post("/{public_key}/routing-override")
 async def set_contact_routing_override(
     public_key: str, request: ContactRoutingOverrideRequest
@@ -622,9 +591,8 @@ async def set_contact_routing_override(
     route_text = request.route.strip()
     if route_text == "":
         await ContactRepository.clear_routing_override(contact.public_key)
-        await ContactRepository.update_path(contact.public_key, "", -1, -1)
         logger.info(
-            "Cleared routing override and reset learned path to flood for %s",
+            "Cleared routing override for %s",
             contact.public_key[:12],
         )
     elif route_text == "-1":
@@ -658,3 +626,84 @@ async def set_contact_routing_override(
         await _broadcast_contact_update(updated_contact)
 
     return {"status": "ok", "public_key": contact.public_key}
+
+
+# ---------------------------------------------------------------------------
+# On-demand contact telemetry (CayenneLPP)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{public_key}/telemetry", response_model=ContactTelemetryResponse)
+async def request_contact_telemetry(public_key: str) -> ContactTelemetryResponse:
+    """Fetch CayenneLPP telemetry from any contact (single attempt, 10s timeout).
+
+    Persists the result in contact_telemetry_history and returns the latest
+    sensor readings along with recent telemetry history.
+    """
+    from app.repository.contact_telemetry import ContactTelemetryRepository
+
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+
+    async with radio_manager.radio_operation(
+        "contact_telemetry", pause_polling=True, suspend_auto_fetch=True
+    ) as be:
+        be = _coerce_be(be)
+        await _ensure_on_radio(be, contact)
+        telemetry = await be.req_telemetry_sync(contact.public_key, timeout=10, min_timeout=5)
+
+    if telemetry is None:
+        raise HTTPException(status_code=504, detail="No telemetry response from contact")
+
+    sensors: list[LppSensor] = []
+    for entry in telemetry:
+        channel = entry.get("channel", 0)
+        type_name = str(entry.get("type", "unknown"))
+        value = entry.get("value", 0)
+        sensors.append(LppSensor(channel=channel, type_name=type_name, value=value))
+
+    fetched_at = int(time.time())
+
+    # Persist snapshot
+    data = {"lpp_sensors": [s.model_dump() for s in sensors]}
+    await ContactTelemetryRepository.record(
+        public_key=contact.public_key,
+        timestamp=fetched_at,
+        data=data,
+    )
+
+    # Dispatch to fanout modules (e.g. HA MQTT)
+    from app.fanout.manager import fanout_manager
+
+    asyncio.create_task(
+        fanout_manager.broadcast_telemetry(
+            {
+                "public_key": contact.public_key,
+                "name": contact.name or contact.public_key[:12],
+                "timestamp": fetched_at,
+                **data,
+            }
+        )
+    )
+
+    # Fetch recent history (30 days)
+    since = fetched_at - 30 * 86400
+    rows = await ContactTelemetryRepository.get_history(contact.public_key, since)
+    history = [TelemetryHistoryEntry(**row) for row in rows]
+
+    return ContactTelemetryResponse(
+        sensors=sensors,
+        fetched_at=fetched_at,
+        telemetry_history=history,
+    )
+
+
+@router.get("/{public_key}/telemetry-history", response_model=list[TelemetryHistoryEntry])
+async def get_contact_telemetry_history(public_key: str) -> list[TelemetryHistoryEntry]:
+    """Get stored telemetry history for a contact (read-only, no radio access)."""
+    from app.repository.contact_telemetry import ContactTelemetryRepository
+
+    contact = await _resolve_contact_or_404(public_key)
+    since = int(time.time()) - 30 * 86400
+    rows = await ContactTelemetryRepository.get_history(contact.public_key, since)
+    return [TelemetryHistoryEntry(**row) for row in rows]

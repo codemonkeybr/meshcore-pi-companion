@@ -5,31 +5,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.backends.client_backend import ClientBackend
 from app.radio import RadioDisconnectedError, RadioOperationBusyError, radio_manager
 from app.radio_sync import is_polling_paused
-from app.services.radio_runtime import RadioRuntime
-
-
-def _runtime(manager):
-    return RadioRuntime(lambda: manager)
 
 
 @pytest.fixture(autouse=True)
 def reset_radio_operation_state():
     """Reset shared radio operation lock state before/after each test."""
-    prev_backend = radio_manager._backend
+    prev_meshcore = radio_manager._meshcore
     radio_manager._operation_lock = None
-    # Default to a non-None backend so radio_operation() doesn't raise
+    # Default to a non-None MagicMock so radio_operation() doesn't raise
     # RadioDisconnectedError for tests that only exercise locking.
-    radio_manager._backend = ClientBackend(MagicMock())
+    radio_manager._meshcore = MagicMock()
 
     import app.radio_sync as radio_sync
 
     radio_sync._polling_pause_count = 0
     yield
     radio_manager._operation_lock = None
-    radio_manager._backend = prev_backend
+    radio_manager._meshcore = prev_meshcore
     radio_sync._polling_pause_count = 0
 
 
@@ -95,7 +89,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock()
-        radio_manager._backend = ClientBackend(mc) if mc else None
+        radio_manager._meshcore = mc
 
         async with radio_manager.radio_operation(
             "auto_fetch_toggle",
@@ -111,7 +105,7 @@ class TestRadioOperationLock:
         mc = MagicMock()
         mc.stop_auto_message_fetching = AsyncMock()
         mc.start_auto_message_fetching = AsyncMock(side_effect=asyncio.CancelledError())
-        radio_manager._backend = ClientBackend(mc) if mc else None
+        radio_manager._meshcore = mc
 
         with pytest.raises(asyncio.CancelledError):
             async with radio_manager.radio_operation(
@@ -138,95 +132,91 @@ class TestRadioOperationYield:
 
     @pytest.mark.asyncio
     async def test_radio_operation_yields_current_meshcore(self):
-        """The yielded value is the backend (wrapping current meshcore) at lock-acquisition time."""
+        """The yielded value is the current _meshcore at lock-acquisition time."""
         mc = MagicMock()
-        be = ClientBackend(mc)
-        radio_manager._backend = be
+        radio_manager._meshcore = mc
 
         async with radio_manager.radio_operation("test_yield") as yielded:
-            assert yielded is be
-            assert yielded._mc is mc
+            assert yielded is mc
 
     @pytest.mark.asyncio
     async def test_radio_operation_raises_when_disconnected_after_lock(self):
         """RadioDisconnectedError is raised when _meshcore is None after acquiring the lock."""
-        radio_manager._backend = None
+        radio_manager._meshcore = None
 
         with pytest.raises(RadioDisconnectedError):
             async with radio_manager.radio_operation("test_disconnected"):
                 pass  # pragma: no cover
 
         # Lock must be released even after the error
-        radio_manager._backend = ClientBackend(MagicMock())
+        radio_manager._meshcore = MagicMock()
         async with radio_manager.radio_operation("after_error", blocking=False):
             pass
 
     @pytest.mark.asyncio
     async def test_radio_operation_yields_fresh_reference_after_swap(self):
-        """If _backend is swapped between pre-check and lock acquisition,
-        the yielded value is the new backend (wrapping new meshcore), not the old one."""
+        """If _meshcore is swapped between pre-check and lock acquisition,
+        the yielded value is the new (current) instance, not the old one."""
         old_mc = MagicMock(name="old")
         new_mc = MagicMock(name="new")
-        old_be = ClientBackend(old_mc)
-        new_be = ClientBackend(new_mc)
 
-        radio_manager._backend = old_be
-        # Simulate a reconnect swapping _backend before the caller enters the block
-        radio_manager._backend = new_be
+        # Start with old_mc
+        radio_manager._meshcore = old_mc
+
+        # Simulate a reconnect swapping _meshcore before the caller enters the block
+        radio_manager._meshcore = new_mc
 
         async with radio_manager.radio_operation("test_swap") as yielded:
-            assert yielded is new_be
-            assert yielded._mc is new_mc
-            assert yielded is not old_be
-            assert yielded._mc is not old_mc
+            assert yielded is new_mc
+            assert yielded is not old_mc
 
 
 class TestRequireConnected:
     """Test the require_connected() FastAPI dependency."""
 
-    def test_raises_503_when_setup_in_progress(self):
-        """HTTPException 503 is raised when radio is connected but setup is still in progress."""
+    def test_raises_423_when_setup_in_progress(self):
+        """HTTPException 423 is raised when radio is connected but setup is still in progress."""
         from fastapi import HTTPException
 
-        from app.dependencies import require_connected
+        from app.services.radio_runtime import radio_runtime
 
         manager = MagicMock()
         manager.is_connected = True
         manager.meshcore = MagicMock()
         manager.is_setup_in_progress = True
-        with patch("app.dependencies.radio_manager", _runtime(manager)):
+        with patch.object(radio_runtime, "_manager_getter", return_value=manager):
             with pytest.raises(HTTPException) as exc_info:
-                require_connected()
+                radio_runtime.require_connected()
 
-            assert exc_info.value.status_code == 503
+            assert exc_info.value.status_code == 423
             assert "initializing" in exc_info.value.detail.lower()
 
-    def test_raises_503_when_not_connected(self):
-        """HTTPException 503 is raised when radio is not connected."""
+    def test_raises_423_when_not_connected(self):
+        """HTTPException 423 is raised when radio is not connected."""
         from fastapi import HTTPException
 
-        from app.dependencies import require_connected
+        from app.services.radio_runtime import radio_runtime
 
         manager = MagicMock()
         manager.is_setup_in_progress = False
         manager.is_connected = False
         manager.meshcore = None
-        with patch("app.dependencies.radio_manager", _runtime(manager)):
+        with patch.object(radio_runtime, "_manager_getter", return_value=manager):
             with pytest.raises(HTTPException) as exc_info:
-                require_connected()
+                radio_runtime.require_connected()
 
-            assert exc_info.value.status_code == 503
+            assert exc_info.value.status_code == 423
 
-    def test_returns_backend_when_connected_and_setup_complete(self):
-        """Returns backend instance when radio is connected and setup is complete (SPI has no meshcore)."""
-        from app.dependencies import require_connected
+    def test_returns_meshcore_when_connected_and_setup_complete(self):
+        """Returns meshcore instance when radio is connected and setup is complete."""
+        from app.services.radio_runtime import radio_runtime
 
-        mock_backend = MagicMock()
+        mock_mc = MagicMock()
         manager = MagicMock()
         manager.is_setup_in_progress = False
         manager.is_connected = True
-        manager.backend = mock_backend
-        with patch("app.dependencies.radio_manager", _runtime(manager)):
-            result = require_connected()
+        manager.meshcore = mock_mc
+        with patch.object(radio_runtime, "_manager_getter", return_value=manager):
+            result = radio_runtime.require_connected()
 
-        assert result is mock_backend
+        assert result is mock_mc

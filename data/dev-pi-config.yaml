@@ -1,0 +1,27 @@
+# Dev/Test Pi Configuration — DO NOT USE IN PRODUCTION
+# Hardware: Waveshare LoRa HAT on Raspberry Pi
+# Preset: USA/Canada (Recommended)
+# Node: T35t-D3v-Pi
+
+node:
+  name: "T35t-D3v-Pi"
+  latitude: 0.0
+  longitude: 0.0
+
+radio:
+  frequency: 910525000
+  tx_power: 22
+  bandwidth: 62500
+  spreading_factor: 7
+  coding_rate: 5
+  preamble_length: 17
+  sync_word: 13380
+
+hardware:
+  profile: "waveshare"
+
+logging:
+  level: DEBUG
+
+# Stable dev identity — preserves the same node key across deploys.
+identity_key: NkwAYW0kL5lvLqPadJKZoqvAywRDb1ia0nG9Mev/heY=

@@ -9,11 +9,13 @@
  * across devices - see useUnreadCounts hook.
  */
 
-const LAST_MESSAGE_KEY = 'remoteterm-lastMessageTime';
 const SORT_ORDER_KEY = 'remoteterm-sortOrder';
+const SIDEBAR_SECTION_SORT_ORDERS_KEY = 'remoteterm-sidebar-section-sort-orders';
 
 export type ConversationTimes = Record<string, number>;
 export type SortOrder = 'recent' | 'alpha';
+export type SidebarSortableSection = 'favorites' | 'channels' | 'contacts' | 'rooms' | 'repeaters';
+export type SidebarSectionSortOrders = Record<SidebarSortableSection, SortOrder>;
 
 // In-memory cache of last message times (loaded from server on init)
 let lastMessageTimesCache: ConversationTimes = {};
@@ -70,36 +72,54 @@ export function getStateKey(type: 'channel' | 'contact', id: string): string {
 }
 
 /**
- * Load last message times from localStorage (for migration only)
+ * Load the legacy single sidebar sort order from localStorage, if present.
  */
-export function loadLocalStorageLastMessageTimes(): ConversationTimes {
-  try {
-    const stored = localStorage.getItem(LAST_MESSAGE_KEY);
-    return stored ? JSON.parse(stored) : {};
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Load sort order from localStorage (for migration only)
- */
-export function loadLocalStorageSortOrder(): SortOrder {
+export function loadLegacyLocalStorageSortOrder(): SortOrder | null {
   try {
     const stored = localStorage.getItem(SORT_ORDER_KEY);
+    if (!stored) return null;
     return stored === 'alpha' ? 'alpha' : 'recent';
   } catch {
-    return 'recent';
+    return null;
   }
 }
 
+export function buildSidebarSectionSortOrders(
+  defaultOrder: SortOrder = 'recent'
+): SidebarSectionSortOrders {
+  return {
+    favorites: defaultOrder,
+    channels: defaultOrder,
+    contacts: defaultOrder,
+    rooms: defaultOrder,
+    repeaters: defaultOrder,
+  };
+}
+
 /**
- * Clear conversation state from localStorage (after migration)
+ * Load per-section sidebar sort orders from localStorage.
  */
-export function clearLocalStorageConversationState(): void {
+export function loadLocalStorageSidebarSectionSortOrders(): SidebarSectionSortOrders | null {
   try {
-    localStorage.removeItem(LAST_MESSAGE_KEY);
-    localStorage.removeItem(SORT_ORDER_KEY);
+    const stored = localStorage.getItem(SIDEBAR_SECTION_SORT_ORDERS_KEY);
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored) as Partial<SidebarSectionSortOrders>;
+    return {
+      favorites: parsed.favorites === 'alpha' ? 'alpha' : 'recent',
+      channels: parsed.channels === 'alpha' ? 'alpha' : 'recent',
+      contacts: parsed.contacts === 'alpha' ? 'alpha' : 'recent',
+      rooms: parsed.rooms === 'alpha' ? 'alpha' : 'recent',
+      repeaters: parsed.repeaters === 'alpha' ? 'alpha' : 'recent',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveLocalStorageSidebarSectionSortOrders(orders: SidebarSectionSortOrders): void {
+  try {
+    localStorage.setItem(SIDEBAR_SECTION_SORT_ORDERS_KEY, JSON.stringify(orders));
   } catch {
     // localStorage might be disabled
   }

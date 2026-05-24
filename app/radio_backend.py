@@ -131,6 +131,7 @@ class RadioBackend(ABC):
         msg: str,
         *,
         timestamp: int | None = None,
+        attempt: int | None = None,
     ) -> Any:
         """Send a direct message.
 
@@ -284,7 +285,15 @@ class RadioBackend(ABC):
         """Request repeater ACL (synchronous wait)."""
 
     @abstractmethod
-    async def send_trace(self, *, path: str, tag: int) -> Any:
+    async def reset_path(self, public_key: str) -> Any:
+        """Reset the cached route to a contact, forcing re-discovery."""
+
+    @abstractmethod
+    async def send_path_discovery(self, public_key: str) -> Any:
+        """Send a path-discovery request to a contact."""
+
+    @abstractmethod
+    async def send_trace(self, *, path: str, tag: int, flags: int | None = None) -> Any:
         """Send a trace packet."""
 
     @abstractmethod

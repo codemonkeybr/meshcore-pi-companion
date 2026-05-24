@@ -26,7 +26,7 @@ test.describe('Create hashtag channel flow', () => {
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
     // Open new message modal
-    await page.getByTitle('New Message').click();
+    await page.getByRole('button', { name: /add channel or contact/i }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
 
@@ -49,7 +49,7 @@ test.describe('Create hashtag channel flow', () => {
     await page.goto('/');
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    await page.getByTitle('New Message').click();
+    await page.getByRole('button', { name: /add channel or contact/i }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
 

@@ -2,6 +2,8 @@
 __pycache__/
 *.py[oc]
 build/
+!scripts/build/
+!scripts/build/**
 wheels/
 *.egg-info
 
@@ -12,7 +14,11 @@ frontend/test-results/
 
 # Frontend build output (built from source by end users)
 frontend/dist/
+frontend/prebuilt/
 frontend/.eslintcache
+
+# Release artifacts
+remoteterm-prebuilt-frontend-v*.zip
 
 # reference libraries
 references/
@@ -22,3 +28,12 @@ references/
 PLAN_SPI_BACKEND.md
 docs/api/TESTING_PLAN.md
 docs/MESHCORE_FIRMWARE_REFERENCE.md
+.codex
+
+# local Docker compose files
+docker-compose.yml
+docker-compose.yaml
+.docker-certs/
+
+# HA test environment (created by scripts/setup/start_ha_test_env.sh)
+ha_test_config/

@@ -7,7 +7,7 @@ import { createChannel, getChannels, getMessages } from '../helpers/api';
  * Timeout is 3 minutes to allow for intermittent traffic.
  */
 
-const ROOMS = [
+const CHANNELS = [
   '#flightless', '#bot', '#snoco', '#skagit', '#edmonds', '#bachelorette',
   '#emergency', '#furry', '#public', '#puppy', '#foobar', '#capitolhill',
   '#hamradio', '#icewatch', '#saucefamily', '#scvsar', '#startrek', '#metalmusic',
@@ -39,14 +39,14 @@ test.describe('Incoming mesh messages', () => {
   test.setTimeout(180_000);
 
   test.beforeAll(async () => {
-    // Ensure all rooms exist — create any that are missing
+    // Ensure all channels exist — create any that are missing
     const existing = await getChannels();
     const existingNames = new Set(existing.map((c) => c.name));
 
-    for (const room of ROOMS) {
-      if (!existingNames.has(room)) {
+    for (const channel of CHANNELS) {
+      if (!existingNames.has(channel)) {
         try {
-          await createChannel(room);
+          await createChannel(channel);
         } catch {
           // May already exist from a concurrent creation, ignore
         }
@@ -54,7 +54,7 @@ test.describe('Incoming mesh messages', () => {
     }
   });
 
-  test('receive an incoming message in any room', { tag: '@mesh-traffic' }, async ({ page }) => {
+  test('receive an incoming message in any channel', { tag: '@mesh-traffic' }, async ({ page }) => {
     // Nudge echo bot on #flightless — may generate an incoming packet quickly
     await nudgeEchoBot();
 

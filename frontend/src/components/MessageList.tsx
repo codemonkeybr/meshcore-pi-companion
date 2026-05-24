@@ -8,18 +8,27 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { Contact, Message, MessagePath, RadioConfig } from '../types';
-import { CONTACT_TYPE_REPEATER } from '../types';
-import { formatTime, parseSenderFromText } from '../utils/messageParser';
+import type { Channel, Contact, Message, MessagePath, RadioConfig, RawPacket } from '../types';
+import { CONTACT_TYPE_ROOM } from '../types';
+import { api } from '../api';
+import {
+  findLinkedChannelReferences,
+  formatTime,
+  parseSenderFromText,
+} from '../utils/messageParser';
 import { formatHopCounts, type SenderInfo } from '../utils/pathUtils';
+import { getDirectContactRoute } from '../utils/pathUtils';
 import { ContactAvatar } from './ContactAvatar';
 import { PathModal } from './PathModal';
+import { RawPacketInspectorDialog } from './RawPacketDetailModal';
+import { toast } from './ui/sonner';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { cn } from '@/lib/utils';
 
 interface MessageListProps {
   messages: Message[];
   contacts: Contact[];
+  channels?: Channel[];
   loading: boolean;
   loadingOlder?: boolean;
   hasOlderMessages?: boolean;
@@ -28,6 +37,7 @@ interface MessageListProps {
   onSenderClick?: (sender: string) => void;
   onLoadOlder?: () => void;
   onResendChannelMessage?: (messageId: number, newTimestamp?: boolean) => void;
+  onChannelReferenceClick?: (channelName: string) => void;
   radioName?: string;
   config?: RadioConfig | null;
   onOpenContactInfo?: (publicKey: string, fromChannel?: boolean) => void;
@@ -37,14 +47,71 @@ interface MessageListProps {
   loadingNewer?: boolean;
   onLoadNewer?: () => void;
   onJumpToBottom?: () => void;
+  preSorted?: boolean;
 }
 
 // URL regex for linkifying plain text
 const URL_PATTERN =
   /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&//=]*)/g;
 
-// Helper to convert URLs in a plain text string into clickable links
-function linkifyText(text: string, keyPrefix: string): ReactNode[] {
+function renderChannelReferences(
+  text: string,
+  keyPrefix: string,
+  onChannelReferenceClick?: (channelName: string) => void
+): ReactNode[] {
+  const references = findLinkedChannelReferences(text);
+  if (references.length === 0) {
+    return [text];
+  }
+
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+
+  references.forEach((reference, index) => {
+    if (reference.start > lastIndex) {
+      parts.push(text.slice(lastIndex, reference.start));
+    }
+
+    const className =
+      'rounded px-0.5 font-medium text-primary underline underline-offset-2 transition-colors';
+    if (onChannelReferenceClick) {
+      parts.push(
+        <button
+          key={`${keyPrefix}-channel-${index}`}
+          type="button"
+          className={cn(
+            className,
+            'inline border-0 bg-transparent p-0 align-baseline hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+          )}
+          onClick={() => onChannelReferenceClick(reference.label)}
+        >
+          {reference.label}
+        </button>
+      );
+    } else {
+      parts.push(
+        <span key={`${keyPrefix}-channel-${index}`} className={className}>
+          {reference.label}
+        </span>
+      );
+    }
+
+    lastIndex = reference.end;
+  });
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts;
+}
+
+// Helper to convert URLs and channel references in a plain text string into rich content
+function linkifyText(
+  text: string,
+  keyPrefix: string,
+  onChannelReferenceClick?: (channelName: string) => void
+): ReactNode[] {
   const parts: ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -53,7 +120,13 @@ function linkifyText(text: string, keyPrefix: string): ReactNode[] {
   URL_PATTERN.lastIndex = 0;
   while ((match = URL_PATTERN.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
+      parts.push(
+        ...renderChannelReferences(
+          text.slice(lastIndex, match.index),
+          `${keyPrefix}-text-${keyIndex}`,
+          onChannelReferenceClick
+        )
+      );
     }
     parts.push(
       <a
@@ -69,15 +142,27 @@ function linkifyText(text: string, keyPrefix: string): ReactNode[] {
     lastIndex = match.index + match[0].length;
   }
 
-  if (lastIndex === 0) return [text];
+  if (lastIndex === 0) {
+    return renderChannelReferences(text, keyPrefix, onChannelReferenceClick);
+  }
   if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
+    parts.push(
+      ...renderChannelReferences(
+        text.slice(lastIndex),
+        `${keyPrefix}-tail`,
+        onChannelReferenceClick
+      )
+    );
   }
   return parts;
 }
 
 // Helper to render text with highlighted @[Name] mentions and clickable URLs
-function renderTextWithMentions(text: string, radioName?: string): ReactNode {
+function renderTextWithMentions(
+  text: string,
+  radioName?: string,
+  onChannelReferenceClick?: (channelName: string) => void
+): ReactNode {
   const mentionPattern = /@\[([^\]]+)\]/g;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
@@ -87,7 +172,13 @@ function renderTextWithMentions(text: string, radioName?: string): ReactNode {
   while ((match = mentionPattern.exec(text)) !== null) {
     // Add text before the match (with linkification)
     if (match.index > lastIndex) {
-      parts.push(...linkifyText(text.slice(lastIndex, match.index), `pre-${keyIndex}`));
+      parts.push(
+        ...linkifyText(
+          text.slice(lastIndex, match.index),
+          `pre-${keyIndex}`,
+          onChannelReferenceClick
+        )
+      );
     }
 
     const mentionedName = match[1];
@@ -110,7 +201,7 @@ function renderTextWithMentions(text: string, radioName?: string): ReactNode {
 
   // Add remaining text after last match (with linkification)
   if (lastIndex < text.length) {
-    parts.push(...linkifyText(text.slice(lastIndex), `post-${keyIndex}`));
+    parts.push(...linkifyText(text.slice(lastIndex), `post-${keyIndex}`, onChannelReferenceClick));
   }
 
   return parts.length > 0 ? parts : text;
@@ -129,8 +220,8 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
 
   const className =
     variant === 'header'
-      ? 'font-normal text-muted-foreground ml-1 text-[11px] cursor-pointer hover:text-primary hover:underline'
-      : 'text-[10px] text-muted-foreground ml-1 cursor-pointer hover:text-primary hover:underline';
+      ? 'font-normal text-muted-foreground ml-1 text-[0.6875rem] cursor-pointer hover:text-primary hover:underline'
+      : 'text-[0.625rem] text-muted-foreground ml-1 cursor-pointer hover:text-primary hover:underline';
 
   return (
     <span
@@ -152,6 +243,8 @@ function HopCountBadge({ paths, onClick, variant }: HopCountBadgeProps) {
 
 const RESEND_WINDOW_SECONDS = 30;
 const CORRUPT_SENDER_LABEL = '<No name -- corrupt packet?>';
+const ANALYZE_PACKET_NOTICE =
+  'This analyzer shows one stored full packet copy only. When multiple receives have identical payloads, the backend deduplicates them to a single stored packet and appends any additional receive paths onto the message path history instead of storing multiple full packet copies.';
 
 function hasUnexpectedControlChars(text: string): boolean {
   for (const char of text) {
@@ -172,6 +265,7 @@ function hasUnexpectedControlChars(text: string): boolean {
 export function MessageList({
   messages,
   contacts,
+  channels = [],
   loading,
   loadingOlder = false,
   hasOlderMessages = false,
@@ -180,6 +274,7 @@ export function MessageList({
   onSenderClick,
   onLoadOlder,
   onResendChannelMessage,
+  onChannelReferenceClick,
   radioName,
   config,
   onOpenContactInfo,
@@ -189,6 +284,7 @@ export function MessageList({
   loadingNewer = false,
   onLoadNewer,
   onJumpToBottom,
+  preSorted = false,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef<number>(0);
@@ -198,10 +294,21 @@ export function MessageList({
     paths: MessagePath[];
     senderInfo: SenderInfo;
     messageId?: number;
+    packetId?: number | null;
     isOutgoingChan?: boolean;
   } | null>(null);
   const [resendableIds, setResendableIds] = useState<Set<number>>(new Set());
   const resendTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  const packetCacheRef = useRef<Map<number, RawPacket>>(new Map());
+  const packetSignalOverrideRef = useRef<{ rssi: number | null; snr: number | null } | undefined>(
+    undefined
+  );
+  const [packetInspectorSource, setPacketInspectorSource] = useState<
+    | { kind: 'packet'; packet: RawPacket }
+    | { kind: 'loading'; message: string }
+    | { kind: 'unavailable'; message: string }
+    | null
+  >(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
   const [showJumpToUnread, setShowJumpToUnread] = useState(false);
   const [jumpToUnreadDismissed, setJumpToUnreadDismissed] = useState(false);
@@ -219,6 +326,50 @@ export function MessageList({
 
   // Track conversation key to detect when entire message set changes
   const prevConvKeyRef = useRef<string | null>(null);
+
+  const handleAnalyzePacket = useCallback(async (message: Message) => {
+    // Extract signal from the first path if available
+    const firstPath = message.paths?.[0];
+    packetSignalOverrideRef.current =
+      firstPath && (firstPath.rssi != null || firstPath.snr != null)
+        ? { rssi: firstPath.rssi ?? null, snr: firstPath.snr ?? null }
+        : undefined;
+
+    if (message.packet_id == null) {
+      setPacketInspectorSource({
+        kind: 'unavailable',
+        message:
+          'No archival raw packet is available for this message, so packet analysis cannot be shown.',
+      });
+      return;
+    }
+
+    const cached = packetCacheRef.current.get(message.packet_id);
+    if (cached) {
+      setPacketInspectorSource({ kind: 'packet', packet: cached });
+      return;
+    }
+
+    setPacketInspectorSource({ kind: 'loading', message: 'Loading packet analysis...' });
+
+    try {
+      const packet = await api.getPacket(message.packet_id);
+      packetCacheRef.current.set(message.packet_id, packet);
+      setPacketInspectorSource({ kind: 'packet', packet });
+    } catch (error) {
+      const description = error instanceof Error ? error.message : 'Unknown error';
+      const isMissing = error instanceof Error && /not found/i.test(error.message);
+      if (!isMissing) {
+        toast.error('Failed to load raw packet', { description });
+      }
+      setPacketInspectorSource({
+        kind: 'unavailable',
+        message: isMissing
+          ? 'The archival raw packet for this message is no longer available. It may have been purged from Settings > Database, so only the stored message and merged route history remain.'
+          : `Could not load the archival raw packet for this message: ${description}`,
+      });
+    }
+  }, []);
 
   // Handle scroll position AFTER render
   useLayoutEffect(() => {
@@ -320,7 +471,22 @@ export function MessageList({
       }
     }
 
-    setResendableIds(newResendable);
+    setResendableIds((prev) => {
+      if (prev.size === newResendable.size) {
+        let changed = false;
+        for (const id of newResendable) {
+          if (!prev.has(id)) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) {
+          return prev;
+        }
+      }
+
+      return newResendable;
+    });
 
     return () => {
       for (const timer of timers.values()) clearTimeout(timer);
@@ -329,11 +495,14 @@ export function MessageList({
   }, [messages, onResendChannelMessage]);
 
   // Sort messages by received_at ascending (oldest first)
-  // Note: Deduplication is handled by useConversationMessages.addMessageIfNew()
+  // Note: Deduplication is handled by useConversationMessages.observeMessage()
   // and the database UNIQUE constraint on (type, conversation_key, text, sender_timestamp)
   const sortedMessages = useMemo(
-    () => [...messages].sort((a, b) => a.received_at - b.received_at || a.id - b.id),
-    [messages]
+    () =>
+      preSorted
+        ? messages
+        : [...messages].sort((a, b) => a.received_at - b.received_at || a.id - b.id),
+    [messages, preSorted]
   );
   const unreadMarkerIndex = useMemo(() => {
     if (unreadMarkerLastReadAt === undefined) {
@@ -499,13 +668,41 @@ export function MessageList({
     contact: Contact | null,
     parsedSender: string | null
   ): SenderInfo => {
+    if (
+      msg.type === 'PRIV' &&
+      contact?.type === CONTACT_TYPE_ROOM &&
+      (msg.sender_key || msg.sender_name)
+    ) {
+      const authorContact =
+        (msg.sender_key
+          ? contacts.find((candidate) => candidate.public_key === msg.sender_key)
+          : null) || (msg.sender_name ? getContactByName(msg.sender_name) : null);
+      if (authorContact) {
+        const directRoute = getDirectContactRoute(authorContact);
+        return {
+          name: authorContact.name || msg.sender_name || authorContact.public_key.slice(0, 12),
+          publicKeyOrPrefix: authorContact.public_key,
+          lat: authorContact.lat,
+          lon: authorContact.lon,
+          pathHashMode: directRoute?.path_hash_mode ?? null,
+        };
+      }
+      return {
+        name: msg.sender_name || msg.sender_key || 'Unknown',
+        publicKeyOrPrefix: msg.sender_key || '',
+        lat: null,
+        lon: null,
+        pathHashMode: null,
+      };
+    }
     if (msg.type === 'PRIV' && contact) {
+      const directRoute = getDirectContactRoute(contact);
       return {
         name: contact.name || contact.public_key.slice(0, 12),
         publicKeyOrPrefix: contact.public_key,
         lat: contact.lat,
         lon: contact.lon,
-        pathHashMode: contact.out_path_hash_mode,
+        pathHashMode: directRoute?.path_hash_mode ?? null,
       };
     }
     if (msg.type === 'CHAN') {
@@ -515,12 +712,13 @@ export function MessageList({
           ? contacts.find((candidate) => candidate.public_key === msg.sender_key)
           : null) || (senderName ? getContactByName(senderName) : null);
       if (senderContact) {
+        const directRoute = getDirectContactRoute(senderContact);
         return {
           name: senderContact.name || senderName || senderContact.public_key.slice(0, 12),
           publicKeyOrPrefix: senderContact.public_key,
           lat: senderContact.lat,
           lon: senderContact.lon,
-          pathHashMode: senderContact.out_path_hash_mode,
+          pathHashMode: directRoute?.path_hash_mode ?? null,
         };
       }
       if (senderName || msg.sender_key) {
@@ -538,12 +736,13 @@ export function MessageList({
     if (parsedSender) {
       const senderContact = getContactByName(parsedSender);
       if (senderContact) {
+        const directRoute = getDirectContactRoute(senderContact);
         return {
           name: parsedSender,
           publicKeyOrPrefix: senderContact.public_key,
           lat: senderContact.lat,
           lon: senderContact.lon,
-          pathHashMode: senderContact.out_path_hash_mode,
+          pathHashMode: directRoute?.path_hash_mode ?? null,
         };
       }
     }
@@ -580,6 +779,8 @@ export function MessageList({
     isCorruptChannelMessage: boolean
   ): string => {
     if (msg.outgoing) return '__outgoing__';
+    if (msg.type === 'PRIV' && msg.sender_key) return `key:${msg.sender_key}`;
+    if (msg.type === 'PRIV' && senderName) return `name:${senderName}`;
     if (msg.type === 'PRIV' && msg.conversation_key) return msg.conversation_key;
     if (msg.sender_key) return `key:${msg.sender_key}`;
     if (senderName) return `name:${senderName}`;
@@ -607,19 +808,26 @@ export function MessageList({
         {sortedMessages.map((msg, index) => {
           // For DMs, look up contact; for channel messages, use parsed sender
           const contact = msg.type === 'PRIV' ? getContact(msg.conversation_key) : null;
-          const isRepeater = contact?.type === CONTACT_TYPE_REPEATER;
+          const isRoomServer = contact?.type === CONTACT_TYPE_ROOM;
 
-          // Skip sender parsing for repeater messages (CLI responses often have colons)
-          const { sender, content } = isRepeater
-            ? { sender: null, content: msg.text }
-            : parseSenderFromText(msg.text);
+          // Only parse "sender: text" prefix for channel messages — DMs never carry
+          // an in-text sender prefix, so parsing them would incorrectly strip
+          // user text that happens to contain a colon (e.g. "TEST1: TEST2").
+          const { sender, content } =
+            msg.type === 'PRIV'
+              ? { sender: null, content: msg.text }
+              : parseSenderFromText(msg.text);
+          const directSenderName =
+            msg.type === 'PRIV' && isRoomServer ? msg.sender_name || null : null;
           const channelSenderName = msg.type === 'CHAN' ? msg.sender_name || sender : null;
           const channelSenderContact =
             msg.type === 'CHAN' && channelSenderName ? getContactByName(channelSenderName) : null;
           const isCorruptChannelMessage = isCorruptUnnamedChannelMessage(msg, sender);
           const displaySender = msg.outgoing
             ? 'You'
-            : contact?.name ||
+            : directSenderName ||
+              (isRoomServer && msg.sender_key ? msg.sender_key.slice(0, 8) : null) ||
+              contact?.name ||
               channelSenderName ||
               (isCorruptChannelMessage
                 ? CORRUPT_SENDER_LABEL
@@ -632,15 +840,23 @@ export function MessageList({
             displaySender !== CORRUPT_SENDER_LABEL;
 
           // Determine if we should show avatar (first message in a chunk from same sender)
-          const currentSenderKey = getSenderKey(msg, channelSenderName, isCorruptChannelMessage);
+          const currentSenderKey = getSenderKey(
+            msg,
+            directSenderName || channelSenderName,
+            isCorruptChannelMessage
+          );
           const prevMsg = sortedMessages[index - 1];
-          const prevParsedSender = prevMsg ? parseSenderFromText(prevMsg.text).sender : null;
+          const prevParsedSender =
+            prevMsg && prevMsg.type === 'CHAN' ? parseSenderFromText(prevMsg.text).sender : null;
           const prevSenderKey = prevMsg
             ? getSenderKey(
                 prevMsg,
-                prevMsg.type === 'CHAN'
-                  ? prevMsg.sender_name || prevParsedSender
-                  : prevParsedSender,
+                prevMsg.type === 'PRIV' &&
+                  getContact(prevMsg.conversation_key)?.type === CONTACT_TYPE_ROOM
+                  ? prevMsg.sender_name
+                  : prevMsg.type === 'CHAN'
+                    ? prevMsg.sender_name || prevParsedSender
+                    : prevParsedSender,
                 isCorruptUnnamedChannelMessage(prevMsg, prevParsedSender)
               )
             : null;
@@ -654,9 +870,14 @@ export function MessageList({
           let avatarVariant: 'default' | 'corrupt' = 'default';
           if (!msg.outgoing) {
             if (msg.type === 'PRIV' && msg.conversation_key) {
-              // DM: use conversation_key (sender's public key)
-              avatarName = contact?.name || null;
-              avatarKey = msg.conversation_key;
+              if (isRoomServer) {
+                avatarName = directSenderName;
+                avatarKey =
+                  msg.sender_key || (avatarName ? `name:${avatarName}` : msg.conversation_key);
+              } else {
+                avatarName = contact?.name || null;
+                avatarKey = msg.conversation_key;
+              }
             } else if (isCorruptChannelMessage) {
               avatarName = CORRUPT_SENDER_LABEL;
               avatarKey = `corrupt:${msg.id}`;
@@ -721,7 +942,12 @@ export function MessageList({
                           type="button"
                           className="avatar-action-button rounded-full border-none bg-transparent p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                           aria-label={avatarActionLabel}
-                          onClick={() => onOpenContactInfo(avatarKey, msg.type === 'CHAN')}
+                          onClick={() =>
+                            onOpenContactInfo(
+                              avatarKey,
+                              msg.type === 'CHAN' || (msg.type === 'PRIV' && isRoomServer)
+                            )
+                          }
                         >
                           <ContactAvatar
                             name={avatarName}
@@ -751,7 +977,7 @@ export function MessageList({
                   )}
                 >
                   {showAvatar && (
-                    <div className="text-[13px] font-semibold text-foreground mb-0.5">
+                    <div className="text-[0.8125rem] font-semibold text-foreground mb-0.5">
                       {canClickSender ? (
                         <span
                           className="cursor-pointer hover:text-primary transition-colors"
@@ -766,8 +992,8 @@ export function MessageList({
                       ) : (
                         displaySender
                       )}
-                      <span className="font-normal text-muted-foreground ml-2 text-[11px]">
-                        {formatTime(msg.sender_timestamp || msg.received_at)}
+                      <span className="font-normal text-muted-foreground ml-2 text-[0.6875rem]">
+                        {formatTime(msg.received_at)}
                       </span>
                       {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
                         <HopCountBadge
@@ -776,7 +1002,9 @@ export function MessageList({
                           onClick={() =>
                             setSelectedPath({
                               paths: msg.paths!,
-                              senderInfo: getSenderInfo(msg, contact, sender),
+                              senderInfo: getSenderInfo(msg, contact, directSenderName || sender),
+                              messageId: msg.id,
+                              packetId: msg.packet_id,
                             })
                           }
                         />
@@ -786,14 +1014,14 @@ export function MessageList({
                   <div className="break-words whitespace-pre-wrap">
                     {content.split('\n').map((line, i, arr) => (
                       <span key={i}>
-                        {renderTextWithMentions(line, radioName)}
+                        {renderTextWithMentions(line, radioName, onChannelReferenceClick)}
                         {i < arr.length - 1 && <br />}
                       </span>
                     ))}
                     {!showAvatar && (
                       <>
-                        <span className="text-[10px] text-muted-foreground ml-2">
-                          {formatTime(msg.sender_timestamp || msg.received_at)}
+                        <span className="text-[0.625rem] text-muted-foreground ml-2">
+                          {formatTime(msg.received_at)}
                         </span>
                         {!msg.outgoing && msg.paths && msg.paths.length > 0 && (
                           <HopCountBadge
@@ -802,7 +1030,9 @@ export function MessageList({
                             onClick={() =>
                               setSelectedPath({
                                 paths: msg.paths!,
-                                senderInfo: getSenderInfo(msg, contact, sender),
+                                senderInfo: getSenderInfo(msg, contact, directSenderName || sender),
+                                messageId: msg.id,
+                                packetId: msg.packet_id,
                               })
                             }
                           />
@@ -823,6 +1053,7 @@ export function MessageList({
                                 paths: msg.paths!,
                                 senderInfo: selfSenderInfo,
                                 messageId: msg.id,
+                                packetId: msg.packet_id,
                                 isOutgoingChan: msg.type === 'CHAN' && !!onResendChannelMessage,
                               });
                             }}
@@ -844,6 +1075,7 @@ export function MessageList({
                               paths: [],
                               senderInfo: selfSenderInfo,
                               messageId: msg.id,
+                              packetId: msg.packet_id,
                               isOutgoingChan: true,
                             });
                           }}
@@ -941,9 +1173,37 @@ export function MessageList({
           contacts={contacts}
           config={config ?? null}
           messageId={selectedPath.messageId}
+          packetId={selectedPath.packetId}
           isOutgoingChan={selectedPath.isOutgoingChan}
           isResendable={isSelectedMessageResendable}
           onResend={onResendChannelMessage}
+          onAnalyzePacket={
+            selectedPath.packetId != null
+              ? () => {
+                  const message = messages.find((entry) => entry.id === selectedPath.messageId);
+                  if (message) {
+                    void handleAnalyzePacket(message);
+                  }
+                }
+              : undefined
+          }
+        />
+      )}
+      {packetInspectorSource && (
+        <RawPacketInspectorDialog
+          open={packetInspectorSource !== null}
+          onOpenChange={(isOpen) => {
+            if (!isOpen) {
+              setPacketInspectorSource(null);
+              packetSignalOverrideRef.current = undefined;
+            }
+          }}
+          channels={channels}
+          source={packetInspectorSource}
+          title="Analyze Packet"
+          description="On-demand raw packet analysis for a message-backed archival packet."
+          notice={ANALYZE_PACKET_NOTICE}
+          signalOverride={packetSignalOverrideRef.current}
         />
       )}
     </div>

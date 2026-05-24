@@ -5,16 +5,25 @@ import {
   MonitorCog,
   RadioTower,
   Share2,
+  SlidersHorizontal,
   type LucideIcon,
 } from 'lucide-react';
 
-export type SettingsSection = 'radio' | 'local' | 'database' | 'fanout' | 'statistics' | 'about';
+export type SettingsSection =
+  | 'radio'
+  | 'local'
+  | 'radio-app'
+  | 'database'
+  | 'fanout'
+  | 'statistics'
+  | 'about';
 
 export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   'radio',
   'local',
-  'database',
   'fanout',
+  'radio-app',
+  'database',
   'statistics',
   'about',
 ];
@@ -22,7 +31,8 @@ export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
 export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   radio: 'Radio',
   local: 'Local Configuration',
-  database: 'Database & Messaging',
+  'radio-app': 'Radio-App Management',
+  database: 'Database',
   fanout: 'MQTT & Automation',
   statistics: 'Statistics',
   about: 'About',
@@ -31,6 +41,7 @@ export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
 export const SETTINGS_SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   radio: RadioTower,
   local: MonitorCog,
+  'radio-app': SlidersHorizontal,
   database: Database,
   fanout: Share2,
   statistics: BarChart3,

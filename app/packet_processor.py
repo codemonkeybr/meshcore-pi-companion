@@ -26,6 +26,7 @@ from app.decoder import (
     parse_packet,
     try_decrypt_dm,
     try_decrypt_packet_with_channel_key,
+    try_decrypt_path,
 )
 from app.keystore import get_private_key, get_public_key, has_private_key
 from app.models import (
@@ -38,12 +39,14 @@ from app.repository import (
     ChannelRepository,
     ContactAdvertPathRepository,
     ContactRepository,
+    MessageRepository,
     RawPacketRepository,
 )
 from app.services.contact_reconciliation import (
     promote_prefix_contacts_for_contact,
     record_contact_name_and_reconcile,
 )
+from app.services.dm_ack_apply import apply_dm_ack_code
 from app.services.messages import (
     create_dm_message_from_decrypted as _create_dm_message_from_decrypted,
 )
@@ -66,6 +69,8 @@ async def create_message_from_decrypted(
     received_at: int | None = None,
     path: str | None = None,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
     channel_name: str | None = None,
     realtime: bool = True,
 ) -> int | None:
@@ -79,6 +84,8 @@ async def create_message_from_decrypted(
         received_at=received_at,
         path=path,
         path_len=path_len,
+        rssi=rssi,
+        snr=snr,
         channel_name=channel_name,
         realtime=realtime,
         broadcast_fn=broadcast_event,
@@ -93,6 +100,8 @@ async def create_dm_message_from_decrypted(
     received_at: int | None = None,
     path: str | None = None,
     path_len: int | None = None,
+    rssi: int | None = None,
+    snr: float | None = None,
     outgoing: bool = False,
     realtime: bool = True,
 ) -> int | None:
@@ -105,6 +114,8 @@ async def create_dm_message_from_decrypted(
         received_at=received_at,
         path=path,
         path_len=path_len,
+        rssi=rssi,
+        snr=snr,
         outgoing=outgoing,
         realtime=realtime,
         broadcast_fn=broadcast_event,
@@ -120,22 +131,22 @@ async def run_historical_dm_decryption(
     """Background task to decrypt historical DM packets with contact's key."""
     from app.websocket import broadcast_success
 
-    packets = await RawPacketRepository.get_undecrypted_text_messages()
-    total = len(packets)
+    total = 0
     decrypted_count = 0
 
-    if total == 0:
-        logger.info("No undecrypted TEXT_MESSAGE packets to process")
-        return
-
-    logger.info("Starting historical DM decryption of %d TEXT_MESSAGE packets", total)
+    logger.info("Starting historical DM decryption scan for undecrypted TEXT_MESSAGE packets")
 
     # Derive our public key (32-byte SPI seed vs 64-byte MeshCore key)
     our_public_key_bytes = derive_public_key(
         private_key_bytes, from_seed=(len(private_key_bytes) == 32)
     )
 
-    for packet_id, packet_data, packet_timestamp in packets:
+    async for (
+        packet_id,
+        packet_data,
+        packet_timestamp,
+    ) in RawPacketRepository.stream_undecrypted_text_messages():
+        total += 1
         # Note: passing our_public_key=None disables the outbound hash check in
         # try_decrypt_dm (only the inbound check src_hash == their_first_byte runs).
         # For the 255/256 case where our first byte differs from the contact's,
@@ -186,6 +197,10 @@ async def run_historical_dm_decryption(
 
             if msg_id is not None:
                 decrypted_count += 1
+
+    if total == 0:
+        logger.info("No undecrypted TEXT_MESSAGE packets to process")
+        return
 
     logger.info(
         "Historical DM decryption complete: %d/%d packets decrypted",
@@ -264,9 +279,10 @@ async def process_raw_packet(
     This is the main entry point for all incoming RF packets.
 
     Note: Packets are deduplicated by payload hash in the database. If we receive
-    a duplicate packet (same payload, different path), we still broadcast it to
-    the frontend (for the real-time packet feed) but skip decryption processing
-    since the original packet was already processed.
+    a duplicate payload (same payload, different path), we still broadcast it to
+    the frontend for realtime packet-feed fidelity. Some payload types are also
+    intentionally reprocessed on duplicate arrival so message-level dedup/path
+    merge logic and advert/path-history tracking still see each observation.
     """
     ts = timestamp or int(time.time())
     observation_id = next(_raw_observation_counter)
@@ -314,21 +330,27 @@ async def process_raw_packet(
     # deduplication in create_message_from_decrypted handles adding paths to existing messages.
     # This is more reliable than trying to look up the message via raw packet linking.
     if payload_type == PayloadType.GROUP_TEXT:
-        decrypt_result = await _process_group_text(raw_bytes, packet_id, ts, packet_info)
+        decrypt_result = await _process_group_text(
+            raw_bytes, packet_id, ts, packet_info, rssi=rssi, snr=snr
+        )
         if decrypt_result:
             result.update(decrypt_result)
 
     elif payload_type == PayloadType.ADVERT:
         # Process all advert arrivals (even payload-hash duplicates) so the
-        # path-freshness logic in _process_advertisement can pick the shortest
-        # path heard within the freshness window.
+        # advert-history table retains recent path observations.
         await _process_advertisement(raw_bytes, ts, packet_info)
 
     elif payload_type == PayloadType.TEXT_MESSAGE:
         # Try to decrypt direct messages using stored private key and known contacts
-        decrypt_result = await _process_direct_message(raw_bytes, packet_id, ts, packet_info)
+        decrypt_result = await _process_direct_message(
+            raw_bytes, packet_id, ts, packet_info, rssi=rssi, snr=snr
+        )
         if decrypt_result:
             result.update(decrypt_result)
+
+    elif payload_type == PayloadType.PATH:
+        await _process_path_packet(raw_bytes, ts, packet_info)
 
     # Always broadcast raw packet for the packet feed UI (even duplicates)
     # This enables the frontend cracker to see all incoming packets in real-time
@@ -346,6 +368,8 @@ async def process_raw_packet(
             sender=result["sender"],
             channel_key=result.get("channel_key"),
             contact_key=result.get("contact_key"),
+            sender_timestamp=result.get("sender_timestamp"),
+            message=result.get("message"),
         )
         if result["decrypted"]
         else None,
@@ -360,6 +384,8 @@ async def _process_group_text(
     packet_id: int,
     timestamp: int,
     packet_info: PacketInfo | None,
+    rssi: int | None = None,
+    snr: float | None = None,
 ) -> dict | None:
     """
     Process a GroupText (channel message) packet.
@@ -396,6 +422,8 @@ async def _process_group_text(
             received_at=timestamp,
             path=packet_info.path.hex() if packet_info else None,
             path_len=packet_info.path_length if packet_info else None,
+            rssi=rssi,
+            snr=snr,
         )
 
         return {
@@ -404,6 +432,8 @@ async def _process_group_text(
             "sender": decrypted.sender,
             "message_id": msg_id,  # None if duplicate, msg_id if new
             "channel_key": channel.key,
+            "sender_timestamp": decrypted.timestamp,
+            "message": decrypted.message,
         }
 
     # Couldn't decrypt with any known key
@@ -427,63 +457,62 @@ async def _process_advertisement(
         logger.debug("Failed to parse advertisement packet")
         return
 
-    advert = parse_advertisement(packet_info.payload)
+    advert = parse_advertisement(packet_info.payload, raw_packet=raw_bytes)
     if not advert:
         logger.debug("Failed to parse advertisement payload")
         return
 
-    # Extract path info from packet
     new_path_len = packet_info.path_length
     new_path_hex = packet_info.path.hex() if packet_info.path else ""
 
     # Try to find existing contact
     existing = await ContactRepository.get_by_key(advert.public_key.lower())
 
-    # Determine which path to use: keep shorter path if heard recently (within 60s)
-    # This handles advertisement echoes through different routes
-    PATH_FRESHNESS_SECONDS = 60
-    use_existing_path = False
-
-    if existing and existing.last_seen:
-        path_age = timestamp - existing.last_seen
-        existing_path_len = existing.last_path_len if existing.last_path_len >= 0 else float("inf")
-
-        # Keep existing path if it's fresh and shorter (or equal)
-        if path_age <= PATH_FRESHNESS_SECONDS and existing_path_len <= new_path_len:
-            use_existing_path = True
-            logger.debug(
-                "Keeping existing shorter path for %s (existing=%d, new=%d, age=%ds)",
-                advert.public_key[:12],
-                existing_path_len,
-                new_path_len,
-                path_age,
-            )
-
-    if use_existing_path:
-        assert existing is not None  # Guaranteed by the conditions that set use_existing_path
-        path_len = existing.last_path_len if existing.last_path_len is not None else -1
-        path_hex = existing.last_path or ""
-        out_path_hash_mode = existing.out_path_hash_mode
-    else:
-        path_len = new_path_len
-        path_hex = new_path_hex
-        out_path_hash_mode = packet_info.path_hash_size - 1
-
     logger.debug(
-        "Parsed advertisement from %s: %s (role=%d, lat=%s, lon=%s, path_len=%d)",
+        "Parsed advertisement from %s: %s (role=%d, lat=%s, lon=%s, advert_path_len=%d)",
         advert.public_key[:12],
         advert.name,
         advert.device_role,
         advert.lat,
         advert.lon,
-        path_len,
+        new_path_len,
     )
 
-    # Use device_role from advertisement for contact type (1=Chat, 2=Repeater, 3=Room, 4=Sensor)
-    # Use advert.timestamp for last_advert (sender's timestamp), receive timestamp for last_seen
+    # Use device_role from advertisement for contact type (1=Chat, 2=Repeater, 3=Room, 4=Sensor).
+    # Persist advert freshness fields using the server receive wall clock so
+    # route selection is not affected by sender clock skew.
     contact_type = (
         advert.device_role if advert.device_role > 0 else (existing.type if existing else 0)
     )
+
+    # Check discovery_blocked_types: skip new contacts whose type is blocked.
+    # Existing contacts are always updated (location, name, last_seen, etc.).
+    if existing is None and contact_type > 0:
+        from app.repository import AppSettingsRepository
+
+        settings = await AppSettingsRepository.get()
+        if contact_type in settings.discovery_blocked_types:
+            logger.debug(
+                "Skipping new contact %s: type %d is in discovery_blocked_types",
+                advert.public_key[:12],
+                contact_type,
+            )
+            return
+
+    contact_upsert = ContactUpsert(
+        public_key=advert.public_key.lower(),
+        name=advert.name,
+        type=contact_type,
+        lat=advert.lat,
+        lon=advert.lon,
+        last_advert=timestamp,
+        last_seen=timestamp,
+        first_seen=timestamp,  # COALESCE in upsert preserves existing value
+    )
+
+    # Upsert the contact BEFORE recording advert paths so the parent row
+    # exists when foreign key enforcement is enabled.
+    await ContactRepository.upsert(contact_upsert)
 
     # Keep recent unique advert paths for all contacts.
     await ContactAdvertPathRepository.record_observation(
@@ -493,22 +522,6 @@ async def _process_advertisement(
         max_paths=10,
         hop_count=new_path_len,
     )
-
-    contact_upsert = ContactUpsert(
-        public_key=advert.public_key.lower(),
-        name=advert.name,
-        type=contact_type,
-        lat=advert.lat,
-        lon=advert.lon,
-        last_advert=advert.timestamp if advert.timestamp > 0 else timestamp,
-        last_seen=timestamp,
-        last_path=path_hex,
-        last_path_len=path_len,
-        out_path_hash_mode=out_path_hash_mode,
-        first_seen=timestamp,  # COALESCE in upsert preserves existing value
-    )
-
-    await ContactRepository.upsert(contact_upsert)
     promoted_keys = await promote_prefix_contacts_for_contact(
         public_key=advert.public_key,
         log=logger,
@@ -554,6 +567,8 @@ async def _process_direct_message(
     packet_id: int,
     timestamp: int,
     packet_info: PacketInfo | None,
+    rssi: int | None = None,
+    snr: float | None = None,
 ) -> dict | None:
     """
     Process a TEXT_MESSAGE (direct message) packet.
@@ -637,10 +652,30 @@ async def _process_direct_message(
         )
 
         if result is not None:
-            # Successfully decrypted!
+            # In the ambiguous direction case (both first bytes match), we
+            # defaulted to incoming.  Check if a matching outgoing message
+            # already exists — if so, this is actually our own outgoing echo
+            # and should be treated as such instead of creating a duplicate
+            # incoming row.
+            effective_outgoing = is_outgoing
+            if not is_outgoing and dest_hash == src_hash:
+                existing_outgoing = await MessageRepository.get_by_content(
+                    msg_type="PRIV",
+                    conversation_key=contact.public_key.lower(),
+                    text=result.message,
+                    sender_timestamp=result.timestamp,
+                    outgoing=True,
+                )
+                if existing_outgoing is not None:
+                    effective_outgoing = True
+                    logger.debug(
+                        "Ambiguous DM resolved as outgoing echo (matched existing sent msg %d)",
+                        existing_outgoing.id,
+                    )
+
             logger.debug(
                 "Decrypted DM %s contact %s: %s",
-                "to" if is_outgoing else "from",
+                "to" if effective_outgoing else "from",
                 contact.name or contact.public_key[:12],
                 result.message[:50] if result.message else "",
             )
@@ -654,7 +689,9 @@ async def _process_direct_message(
                 received_at=timestamp,
                 path=packet_info.path.hex() if packet_info else None,
                 path_len=packet_info.path_length if packet_info else None,
-                outgoing=is_outgoing,
+                rssi=rssi,
+                snr=snr,
+                outgoing=effective_outgoing,
             )
 
             return {
@@ -663,8 +700,97 @@ async def _process_direct_message(
                 "sender": contact.name or contact.public_key[:12],
                 "message_id": msg_id,
                 "contact_key": contact.public_key,
+                "sender_timestamp": result.timestamp,
+                "message": result.message,
             }
 
     # Couldn't decrypt with any known contact
     logger.debug("Could not decrypt DM with any of %d candidate contacts", len(candidate_contacts))
     return None
+
+
+async def _process_path_packet(
+    raw_bytes: bytes,
+    timestamp: int,
+    packet_info: PacketInfo | None,
+) -> None:
+    """Process a PATH packet and update the learned direct route."""
+    if not has_private_key():
+        return
+
+    private_key = get_private_key()
+    our_public_key = get_public_key()
+    if private_key is None or our_public_key is None:
+        return
+
+    if packet_info is None:
+        packet_info = parse_packet(raw_bytes)
+    if packet_info is None or packet_info.payload is None or len(packet_info.payload) < 4:
+        return
+
+    dest_hash = format(packet_info.payload[0], "02x").lower()
+    src_hash = format(packet_info.payload[1], "02x").lower()
+    our_first_byte = format(our_public_key[0], "02x").lower()
+    if dest_hash != our_first_byte:
+        return
+
+    candidate_contacts = await ContactRepository.get_by_pubkey_first_byte(src_hash)
+    if not candidate_contacts:
+        logger.debug("No contacts found matching hash %s for PATH decryption", src_hash)
+        return
+
+    for contact in candidate_contacts:
+        if len(contact.public_key) != 64:
+            continue
+        try:
+            contact_public_key = bytes.fromhex(contact.public_key)
+        except ValueError:
+            continue
+
+        result = try_decrypt_path(
+            raw_packet=raw_bytes,
+            our_private_key=private_key,
+            their_public_key=contact_public_key,
+            our_public_key=our_public_key,
+        )
+        if result is None:
+            continue
+
+        await ContactRepository.update_direct_path(
+            contact.public_key,
+            result.returned_path.hex(),
+            result.returned_path_len,
+            result.returned_path_hash_mode,
+            updated_at=timestamp,
+        )
+
+        if result.extra_type == PayloadType.ACK and len(result.extra) >= 4:
+            ack_code = result.extra[:4].hex()
+            matched = await apply_dm_ack_code(ack_code, broadcast_fn=broadcast_event)
+            if matched:
+                logger.info(
+                    "Applied bundled PATH ACK for %s via contact %s",
+                    ack_code,
+                    contact.public_key[:12],
+                )
+            else:
+                logger.debug(
+                    "Buffered bundled PATH ACK %s via contact %s",
+                    ack_code,
+                    contact.public_key[:12],
+                )
+        elif result.extra_type == PayloadType.RESPONSE and len(result.extra) > 0:
+            logger.debug(
+                "Observed bundled PATH RESPONSE from %s (%d bytes)",
+                contact.public_key[:12],
+                len(result.extra),
+            )
+
+        refreshed_contact = await ContactRepository.get_by_key(contact.public_key)
+        if refreshed_contact is not None:
+            broadcast_event("contact", refreshed_contact.model_dump())
+        return
+
+    logger.debug(
+        "Could not decrypt PATH packet with any of %d candidate contacts", len(candidate_contacts)
+    )

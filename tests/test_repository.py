@@ -1,11 +1,12 @@
 """Tests for repository layer."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from app.models import Contact, ContactUpsert
 from app.repository import (
+    AppSettingsRepository,
     ContactAdvertPathRepository,
     ContactNameHistoryRepository,
     ContactRepository,
@@ -170,6 +171,47 @@ class TestMessageRepositoryGetByContent:
         assert result.id == msg_id
         assert result.sender_timestamp is None
         assert result.outgoing is True
+
+    @pytest.mark.asyncio
+    async def test_get_by_content_can_filter_incoming_vs_outgoing(self, test_db):
+        """Outgoing filter keeps incoming duplicate reconciliation on the right row."""
+        conversation_key = "abc123abc123abc123abc123abc12300"
+        incoming_id = await _create_message(
+            test_db,
+            msg_type="PRIV",
+            conversation_key=conversation_key,
+            text="Same text",
+            sender_timestamp=1700000000,
+            outgoing=False,
+        )
+        outgoing_id = await _create_message(
+            test_db,
+            msg_type="PRIV",
+            conversation_key=conversation_key,
+            text="Same text",
+            sender_timestamp=1700000000,
+            outgoing=True,
+        )
+
+        incoming = await MessageRepository.get_by_content(
+            msg_type="PRIV",
+            conversation_key=conversation_key,
+            text="Same text",
+            sender_timestamp=1700000000,
+            outgoing=False,
+        )
+        outgoing = await MessageRepository.get_by_content(
+            msg_type="PRIV",
+            conversation_key=conversation_key,
+            text="Same text",
+            sender_timestamp=1700000000,
+            outgoing=True,
+        )
+
+        assert incoming is not None
+        assert outgoing is not None
+        assert incoming.id == incoming_id
+        assert outgoing.id == outgoing_id
 
     @pytest.mark.asyncio
     async def test_get_by_content_distinguishes_by_timestamp(self, test_db):
@@ -572,98 +614,102 @@ class TestAppSettingsRepository:
     """Test AppSettingsRepository parsing and migration edge cases."""
 
     @pytest.mark.asyncio
-    async def test_get_handles_corrupted_json_and_invalid_sort_order(self):
-        """Corrupted JSON fields are recovered with safe defaults."""
-        mock_conn = AsyncMock()
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchone = AsyncMock(
-            return_value={
-                "max_radio_contacts": 250,
-                "favorites": "{not-json",
-                "auto_decrypt_dm_on_advert": 1,
-                "sidebar_sort_order": "invalid",
-                "last_message_times": "{also-not-json",
-                "preferences_migrated": 0,
-                "advert_interval": None,
-                "last_advert_time": None,
-                "flood_scope": "",
-                "blocked_keys": "[]",
-                "blocked_names": "[]",
-            }
+    async def test_get_handles_corrupted_json_and_invalid_sort_order(self, test_db):
+        """Corrupted JSON fields are recovered with safe defaults.
+
+        Uses the real DB so it exercises the lock-aware path. We stuff
+        malformed JSON directly into the row, then verify ``get()`` recovers
+        with defaults rather than propagating a parse error.
+        """
+        await test_db.conn.execute(
+            """
+            UPDATE app_settings
+            SET max_radio_contacts = 250,
+                auto_decrypt_dm_on_advert = 1,
+                last_message_times = '{also-not-json',
+                advert_interval = NULL,
+                last_advert_time = NULL,
+                flood_scope = '',
+                blocked_keys = '[]',
+                blocked_names = '[]',
+                discovery_blocked_types = '[]'
+            WHERE id = 1
+            """
         )
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
-        mock_db = MagicMock()
-        mock_db.conn = mock_conn
+        await test_db.conn.commit()
 
-        with patch("app.repository.settings.db", mock_db):
-            from app.repository import AppSettingsRepository
-
-            settings = await AppSettingsRepository.get()
+        settings = await AppSettingsRepository.get()
 
         assert settings.max_radio_contacts == 250
-        assert settings.favorites == []
         assert settings.last_message_times == {}
-        assert settings.sidebar_sort_order == "recent"
         assert settings.advert_interval == 0
         assert settings.last_advert_time == 0
 
     @pytest.mark.asyncio
-    async def test_add_favorite_is_idempotent(self):
-        """Adding an existing favorite does not write duplicate entries."""
-        from app.models import AppSettings, Favorite
+    async def test_get_in_conn_tolerates_missing_columns(self):
+        """Defend against partial migrations where columns added by later
+        migrations are absent from the row.
 
-        existing = AppSettings(favorites=[Favorite(type="contact", id="aa" * 32)])
+        Real DBs can't produce this state (schema init + migrations always
+        run to the latest version on startup), but hand-rolled snapshots,
+        external DB tools, or interrupted migrations might. The
+        ``KeyError``-catching branches in ``_get_in_conn`` exist specifically
+        to guarantee graceful degradation.
 
-        with (
-            patch(
-                "app.repository.AppSettingsRepository.get",
-                new_callable=AsyncMock,
-                return_value=existing,
-            ),
-            patch(
-                "app.repository.AppSettingsRepository.update",
-                new_callable=AsyncMock,
-            ) as mock_update,
-        ):
-            from app.repository import AppSettingsRepository
+        We test these directly by mocking the connection boundary with a
+        dict-backed row that mimics a pre-migration snapshot missing:
+        - ``tracked_telemetry_repeaters`` (migration 53)
+        - ``auto_resend_channel`` (migration 54)
+        - ``telemetry_interval_hours`` (migration 57)
+        """
+        from unittest.mock import MagicMock
 
-            result = await AppSettingsRepository.add_favorite("contact", "aa" * 32)
+        from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
-        assert result == existing
-        mock_update.assert_not_awaited()
+        # sqlite3.Row raises KeyError for missing columns when accessed by
+        # name, which is what we want to simulate. We mimic that here with a
+        # dict-backed object whose __getitem__ raises KeyError for absent
+        # keys (dict.__getitem__ already does this).
+        class PartialRow(dict):
+            def keys(self):  # pragma: no cover - aiosqlite.Row compat
+                return super().keys()
 
-    @pytest.mark.asyncio
-    async def test_migrate_preferences_uses_recent_for_invalid_sort_order(self):
-        """Migration normalizes invalid sort order to 'recent'."""
-        from app.models import AppSettings
+        partial_row = PartialRow(
+            {
+                "max_radio_contacts": 123,
+                "auto_decrypt_dm_on_advert": 1,
+                "last_message_times": "{}",
+                "advert_interval": 0,
+                "last_advert_time": 0,
+                "flood_scope": "",
+                "blocked_keys": "[]",
+                "blocked_names": "[]",
+                "discovery_blocked_types": "[]",
+                # intentionally missing: tracked_telemetry_repeaters,
+                # auto_resend_channel, telemetry_interval_hours
+            }
+        )
 
-        current = AppSettings(preferences_migrated=False)
-        migrated = AppSettings(preferences_migrated=True, sidebar_sort_order="recent")
+        class FakeCursor:
+            async def fetchone(self):
+                return partial_row
 
-        with (
-            patch(
-                "app.repository.AppSettingsRepository.get",
-                new_callable=AsyncMock,
-                return_value=current,
-            ),
-            patch(
-                "app.repository.AppSettingsRepository.update",
-                new_callable=AsyncMock,
-                return_value=migrated,
-            ) as mock_update,
-        ):
-            from app.repository import AppSettingsRepository
+            async def __aenter__(self):
+                return self
 
-            result, did_migrate = await AppSettingsRepository.migrate_preferences_from_frontend(
-                favorites=[{"type": "contact", "id": "bb" * 32}],
-                sort_order="weird-order",
-                last_message_times={"contact-bbbbbbbbbbbb": 123},
-            )
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
 
-        assert did_migrate is True
-        assert result.preferences_migrated is True
-        assert mock_update.call_args.kwargs["sidebar_sort_order"] == "recent"
-        assert mock_update.call_args.kwargs["preferences_migrated"] is True
+        mock_conn = MagicMock()
+        mock_conn.execute = MagicMock(return_value=FakeCursor())
+
+        settings = await AppSettingsRepository._get_in_conn(mock_conn)
+
+        assert settings.max_radio_contacts == 123
+        # Missing-column defaults kick in:
+        assert settings.tracked_telemetry_repeaters == []
+        assert settings.auto_resend_channel is False
+        assert settings.telemetry_interval_hours == DEFAULT_TELEMETRY_INTERVAL_HOURS
 
 
 class TestMessageRepositoryGetById:
@@ -709,7 +755,7 @@ class TestContactRepositoryUpsertContracts:
                 name="Bob",
                 type=2,
                 on_radio=True,
-                out_path_hash_mode=-1,
+                direct_path_hash_mode=-1,
             )
         )
 
@@ -718,3 +764,126 @@ class TestContactRepositoryUpsertContracts:
         assert contact.name == "Bob"
         assert contact.type == 2
         assert contact.on_radio is True
+
+
+class TestContactRepositoryLastSeenSemantics:
+    """Guard the 'last_seen = last RF reception' contract.
+
+    Radio-driven contact-DB syncs must not clobber an earlier real RF timestamp,
+    and callers that don't supply last_seen must leave the existing value alone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upsert_without_last_seen_preserves_existing(self, test_db):
+        real_rf_observation = 1_700_000_000
+        await ContactRepository.upsert(
+            ContactUpsert(
+                public_key="aa" * 32,
+                name="Alice",
+                type=1,
+                last_seen=real_rf_observation,
+                on_radio=False,
+            )
+        )
+
+        # A subsequent radio-sync style upsert (no last_seen supplied) must not
+        # overwrite the real RF timestamp with now().
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, name="Alice", type=1, on_radio=False)
+        )
+
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == real_rf_observation
+
+    @pytest.mark.asyncio
+    async def test_upsert_monotonically_bumps_last_seen(self, test_db):
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_700_000_000, on_radio=False)
+        )
+
+        # Newer RF observation advances last_seen.
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_700_000_500, on_radio=False)
+        )
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+
+        # An older timestamp (out-of-order arrival) must not move it backwards.
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_699_999_000, on_radio=False)
+        )
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+
+    @pytest.mark.asyncio
+    async def test_upsert_inserts_null_last_seen_when_not_supplied(self, test_db):
+        # A radio-sync-only contact (never heard on RF) should have last_seen=NULL.
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, name="Alice", type=1, on_radio=False)
+        )
+
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen is None
+
+    @pytest.mark.asyncio
+    async def test_touch_last_seen_bumps_monotonically(self, test_db):
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_700_000_000, on_radio=False)
+        )
+
+        await ContactRepository.touch_last_seen("aa" * 32, 1_700_000_500)
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+
+        # Older timestamps never move last_seen backwards.
+        await ContactRepository.touch_last_seen("aa" * 32, 1_699_999_000)
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+
+    @pytest.mark.asyncio
+    async def test_update_last_contacted_does_not_touch_last_seen(self, test_db):
+        # last_contacted = we sent TO them. It must not forge RF reception.
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_700_000_000, on_radio=False)
+        )
+
+        await ContactRepository.update_last_contacted("aa" * 32, 1_700_500_000)
+
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_contacted == 1_700_500_000
+        assert contact.last_seen == 1_700_000_000
+
+    @pytest.mark.asyncio
+    async def test_update_direct_path_bumps_last_seen_monotonically(self, test_db):
+        # update_direct_path is driven by RF PATH reception on both callers
+        # (packet processor + firmware PATH_UPDATE, which only fires from
+        # onContactPathRecv during RF reception). It should advance last_seen
+        # forward-only.
+        await ContactRepository.upsert(
+            ContactUpsert(public_key="aa" * 32, last_seen=1_700_000_000, on_radio=False)
+        )
+
+        await ContactRepository.update_direct_path(
+            "aa" * 32, path="ab", path_len=1, path_hash_mode=0, updated_at=1_700_000_500
+        )
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+        assert contact.direct_path == "ab"
+
+        # Out-of-order PATH arrival with an older timestamp must not rewind.
+        await ContactRepository.update_direct_path(
+            "aa" * 32, path="cd", path_len=1, path_hash_mode=0, updated_at=1_699_999_000
+        )
+        contact = await ContactRepository.get_by_key("aa" * 32)
+        assert contact is not None
+        assert contact.last_seen == 1_700_000_500
+        # The path itself still updates — only last_seen is monotonic-guarded.
+        assert contact.direct_path == "cd"

@@ -1,10 +1,12 @@
 import { test, expect } from '@playwright/test';
 import { createChannel, deleteChannel, getChannels } from '../helpers/api';
 
+const PUBLIC_CHANNEL_KEY = '8B3387E9C5CDEA6AC9E5EDBAA115CD72';
+
 test.describe('Conversation deletion flow', () => {
   test.beforeAll(async () => {
     const channels = await getChannels();
-    if (!channels.some((c) => c.name === 'Public')) {
+    if (!channels.some((c) => c.key === PUBLIC_CHANNEL_KEY)) {
       await createChannel('Public');
     }
   });

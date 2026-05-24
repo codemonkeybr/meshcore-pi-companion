@@ -8,6 +8,7 @@ import type { ResolvedPath, SenderInfo } from '../utils/pathUtils';
 interface PathRouteMapProps {
   resolved: ResolvedPath;
   senderInfo: SenderInfo;
+  height?: number;
 }
 
 // Colors for hop markers (indexed by hop number - 1)
@@ -82,7 +83,7 @@ function RouteMapBounds({ points }: { points: [number, number][] }) {
   return null;
 }
 
-export function PathRouteMap({ resolved, senderInfo }: PathRouteMapProps) {
+export function PathRouteMap({ resolved, senderInfo, height = 220 }: PathRouteMapProps) {
   const points = collectPoints(resolved);
   const hasAnyGps = points.length > 0;
 
@@ -117,7 +118,7 @@ export function PathRouteMap({ resolved, senderInfo }: PathRouteMapProps) {
         className="rounded border border-border overflow-hidden"
         role="img"
         aria-label="Map showing message route between nodes"
-        style={{ height: 220 }}
+        style={{ height }}
       >
         <MapContainer
           center={center}
@@ -138,6 +139,8 @@ export function PathRouteMap({ resolved, senderInfo }: PathRouteMapProps) {
               icon={makeIcon('S', SENDER_COLOR)}
             >
               <Tooltip direction="top" offset={[0, -14]}>
+                <span className="font-mono">{resolved.sender.prefix}</span>
+                {' · '}
                 {senderInfo.name || 'Sender'}
               </Tooltip>
             </Marker>
@@ -154,6 +157,8 @@ export function PathRouteMap({ resolved, senderInfo }: PathRouteMapProps) {
                   icon={makeIcon(String(hopIdx + 1), getHopColor(hopIdx))}
                 >
                   <Tooltip direction="top" offset={[0, -14]}>
+                    <span className="font-mono">{hop.prefix}</span>
+                    {' · '}
                     {m.name || m.public_key.slice(0, 12)}
                   </Tooltip>
                 </Marker>
@@ -167,6 +172,8 @@ export function PathRouteMap({ resolved, senderInfo }: PathRouteMapProps) {
               icon={makeIcon('R', RECEIVER_COLOR)}
             >
               <Tooltip direction="top" offset={[0, -14]}>
+                <span className="font-mono">{resolved.receiver.prefix}</span>
+                {' · '}
                 {resolved.receiver.name || 'Receiver'}
               </Tooltip>
             </Marker>

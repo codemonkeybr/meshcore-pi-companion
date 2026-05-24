@@ -35,11 +35,13 @@ frontend/src/
 ├── types.ts                # Shared TS contracts
 ├── useWebSocket.ts         # WS lifecycle + event dispatch
 ├── wsEvents.ts             # Typed WS event parsing / discriminated union
-├── messageCache.ts         # Conversation-scoped cache
 ├── prefetch.ts             # Consumes prefetched API promises started in index.html
 ├── index.css               # Global styles/utilities
 ├── styles.css              # Additional global app styles
 ├── themes.css              # Color theme definitions
+├── contexts/
+│   ├── DistanceUnitContext.tsx # Browser-local distance-unit context/provider
+│   └── PushSubscriptionContext.tsx # Push subscription state context/provider
 ├── lib/
 │   └── utils.ts            # cn() — clsx + tailwind-merge helper
 ├── hooks/
@@ -51,13 +53,18 @@ frontend/src/
 │   ├── useRealtimeAppState.ts      # WebSocket event application and reconnect recovery
 │   ├── useAppShell.ts              # App-shell view state (settings/sidebar/modals/cracker)
 │   ├── useRepeaterDashboard.ts      # Repeater dashboard state (login, panes, console, retries)
-│   ├── useRadioControl.ts          # Radio health/config state, reconnection
+│   ├── useRadioControl.ts          # Radio health/config state, reconnection, mesh discovery sweeps
 │   ├── useAppSettings.ts           # Settings, favorites, preferences migration
 │   ├── useConversationRouter.ts    # URL hash → active conversation routing
-│   └── useContactsAndChannels.ts   # Contact/channel loading, creation, deletion
+│   ├── useContactsAndChannels.ts   # Contact/channel loading, creation, deletion
+│   ├── useBrowserNotifications.ts  # Per-conversation browser notification preferences + dispatch
+│   ├── usePushSubscription.ts      # Web Push subscription lifecycle, per-conversation filters
+│   ├── useFaviconBadge.ts          # Browser tab unread badge state
+│   ├── useRawPacketStatsSession.ts # Session-scoped packet-feed stats history
+│   └── useRememberedServerPassword.ts # Browser-local repeater/room password persistence
 ├── components/
-│   ├── AppShell.tsx            # App-shell layout: status, sidebar, search/settings panes, cracker, modals
-│   ├── ConversationPane.tsx    # Active conversation surface selection (map/raw/repeater/chat/empty)
+│   ├── AppShell.tsx            # App-shell layout: status, sidebar, search/settings panes, cracker, modals, security warning
+│   ├── ConversationPane.tsx    # Active conversation surface selection (map/raw/trace/repeater/room/chat/empty)
 │   ├── visualizer/
 │   │   ├── useVisualizerData3D.ts   # Packet→graph data pipeline, repeat aggregation, simulation state
 │   │   ├── useVisualizer3DScene.ts  # Three.js scene lifecycle, buffers, hover/pin interaction
@@ -68,21 +75,30 @@ frontend/src/
 ├── utils/
 │   ├── urlHash.ts              # Hash parsing and encoding
 │   ├── conversationState.ts    # State keys, in-memory + localStorage helpers
-│   ├── favorites.ts            # LocalStorage migration for favorites
 │   ├── messageParser.ts        # Message text → rendered segments
 │   ├── pathUtils.ts            # Distance/validation helpers for paths + map
 │   ├── pubkey.ts               # getContactDisplayName (12-char prefix fallback)
 │   ├── contactAvatar.ts        # Avatar color derivation from public key
 │   ├── rawPacketIdentity.ts    # observation_id vs id dedup helpers
+│   ├── rawPacketStats.ts       # Session packet stats windows, rankings, and coverage helpers
 │   ├── regionScope.ts          # Regional flood-scope label/normalization helpers
 │   ├── visualizerUtils.ts      # 3D visualizer node types, colors, particles
 │   ├── visualizerSettings.ts   # LocalStorage persistence for visualizer options
 │   ├── a11y.ts                 # Keyboard accessibility helper
+│   ├── distanceUnits.ts        # Browser-local distance unit persistence/helpers
 │   ├── lastViewedConversation.ts   # localStorage for last-viewed conversation
 │   ├── contactMerge.ts            # Merge WS contact updates into list
 │   ├── localLabel.ts              # Local label (text + color) in localStorage
 │   ├── radioPresets.ts            # LoRa radio preset configurations
-│   └── theme.ts                   # Theme switching helpers
+│   ├── publicChannel.ts           # Public-channel resolution helpers for routing/hash defaults
+│   ├── fontScale.ts               # Browser-local relative font scale persistence/application
+│   ├── theme.ts                   # Theme switching helpers
+│   ├── autoFocusInput.ts          # Auto-focus input helper
+│   ├── batteryDisplay.ts          # Battery level display helpers
+│   ├── messageIdentity.ts         # Message identity/dedup helpers
+│   ├── rawPacketInspector.ts      # Raw packet inspection helpers
+│   ├── serverLoginState.ts        # Server login state helpers
+│   └── statusDotPulse.ts          # Status dot pulse animation helpers
 ├── components/
 │   ├── StatusBar.tsx
 │   ├── Sidebar.tsx
@@ -92,8 +108,12 @@ frontend/src/
 │   ├── NewMessageModal.tsx
 │   ├── SearchView.tsx          # Full-text message search pane
 │   ├── SettingsModal.tsx       # Layout shell — delegates to settings/ sections
+│   ├── SecurityWarningModal.tsx # Startup warning for trusted-network / bot execution posture
 │   ├── RawPacketList.tsx
+│   ├── RawPacketFeedView.tsx   # Live raw packet feed + session stats drawer
+│   ├── RawPacketDetailModal.tsx # On-demand packet inspector dialog
 │   ├── MapView.tsx
+│   ├── TracePane.tsx           # Multi-hop route trace builder/results view
 │   ├── VisualizerView.tsx
 │   ├── PacketVisualizer3D.tsx
 │   ├── PathModal.tsx
@@ -103,20 +123,30 @@ frontend/src/
 │   ├── ContactAvatar.tsx
 │   ├── ContactInfoPane.tsx     # Contact detail sheet (stats, name history, paths)
 │   ├── ContactStatusInfo.tsx   # Contact status info component
+│   ├── ContactPathDiscoveryModal.tsx # Forward/return path discovery dialog
+│   ├── ContactRoutingOverrideModal.tsx # Manual direct-route override editor
 │   ├── RepeaterDashboard.tsx   # Layout shell — delegates to repeater/ panes
 │   ├── RepeaterLogin.tsx       # Repeater login form (password + guest)
+│   ├── RoomServerPanel.tsx     # Room-server auth gate + status banner ahead of room chat
+│   ├── ServerLoginStatusBanner.tsx # Shared repeater/room login state banner
 │   ├── ChannelInfoPane.tsx     # Channel detail sheet (stats, top senders)
+│   ├── ChannelFloodScopeOverrideModal.tsx # Per-channel flood-scope override editor
+│   ├── ChannelPathHashModeOverrideModal.tsx # Per-channel path hash mode override editor
+│   ├── BulkAddChannelResultModal.tsx # Results dialog for bulk channel creation
+│   ├── CommandPalette.tsx      # Command palette overlay
 │   ├── DirectTraceIcon.tsx     # Shared direct-trace glyph used in header/dashboard
 │   ├── NeighborsMiniMap.tsx    # Leaflet mini-map for repeater neighbor locations
 │   ├── settings/
 │   │   ├── settingsConstants.ts          # Settings section type, ordering, labels
-│   │   ├── SettingsRadioSection.tsx      # Name, keys, advert interval, max contacts, radio preset, freq/bw/sf/cr, txPower, lat/lon, reboot
-│   │   ├── SettingsLocalSection.tsx      # Browser-local settings: theme, local label, reopen last conversation
+│   │   ├── SettingsRadioSection.tsx      # Name, keys, advert interval, max contacts, radio preset, freq/bw/sf/cr, txPower, lat/lon, reboot, mesh discovery
+│   │   ├── SettingsLocalSection.tsx      # Browser-local settings: theme, relative font scale, local label, reopen last conversation
 │   │   ├── SettingsFanoutSection.tsx     # Fanout integrations: MQTT, bots, config CRUD
-│   │   ├── SettingsDatabaseSection.tsx   # DB size, cleanup, auto-decrypt, local label
+│   │   ├── SettingsRadioAppSection.tsx    # Radio-App Management: tracked telemetry, contact management, blocked lists
+│   │   ├── SettingsDatabaseSection.tsx   # Database: DB size, storage cleanup, auto-decrypt
 │   │   ├── SettingsStatisticsSection.tsx # Read-only mesh network stats
 │   │   ├── SettingsAboutSection.tsx     # Version, author, license, links
-│   │   └── ThemeSelector.tsx           # Color theme picker
+│   │   ├── ThemeSelector.tsx           # Color theme picker
+│   │   └── BulkDeleteContactsModal.tsx # Bulk contact deletion dialog
 │   ├── repeater/
 │   │   ├── repeaterPaneShared.tsx        # Shared: RepeaterPane, KvRow, format helpers
 │   │   ├── RepeaterTelemetryPane.tsx    # Battery, airtime, packet counts
@@ -126,18 +156,19 @@ frontend/src/
 │   │   ├── RepeaterRadioSettingsPane.tsx # Radio config + advert intervals
 │   │   ├── RepeaterLppTelemetryPane.tsx # CayenneLPP sensor data
 │   │   ├── RepeaterOwnerInfoPane.tsx    # Owner info + guest password
+│   │   ├── RepeaterTelemetryHistoryPane.tsx # Historical telemetry chart/table
 │   │   ├── RepeaterActionsPane.tsx      # Send Advert, Sync Clock, Reboot
 │   │   └── RepeaterConsolePane.tsx      # CLI console with history
 │   └── ui/                     # shadcn/ui primitives
 ├── types/
-│   ├── d3-force-3d.d.ts       # Type declarations for d3-force-3d
-│   └── globals.d.ts           # Global type declarations (__APP_VERSION__, __COMMIT_HASH__)
-└── test/
+│   └── d3-force-3d.d.ts       # Type declarations for d3-force-3d
+└── test/                      # Representative frontend test suites (not an exhaustive listing)
     ├── setup.ts
     ├── fixtures/websocket_events.json
     ├── api.test.ts
     ├── appFavorites.test.tsx
     ├── appStartupHash.test.tsx
+    ├── conversationPane.test.tsx
     ├── contactAvatar.test.ts
     ├── contactInfoPane.test.tsx
     ├── integration.test.ts
@@ -148,18 +179,22 @@ frontend/src/
     ├── rawPacketList.test.tsx
     ├── pathUtils.test.ts
     ├── prefetch.test.ts
-    ├── radioPresets.test.ts
+    ├── rawPacketDetailModal.test.tsx
+    ├── rawPacketFeedView.test.tsx
     ├── rawPacketIdentity.test.ts
     ├── repeaterDashboard.test.tsx
     ├── repeaterFormatters.test.ts
     ├── repeaterLogin.test.tsx
     ├── repeaterMessageParsing.test.ts
+    ├── roomServerPanel.test.tsx
+    ├── securityWarningModal.test.tsx
     ├── localLabel.test.ts
     ├── messageInput.test.tsx
     ├── newMessageModal.test.tsx
     ├── settingsModal.test.tsx
     ├── sidebar.test.tsx
     ├── statusBar.test.tsx
+    ├── tracePane.test.tsx
     ├── unreadCounts.test.ts
     ├── urlHash.test.ts
     ├── appSearchJump.test.tsx
@@ -171,12 +206,17 @@ frontend/src/
     ├── useConversationMessages.race.test.ts
     ├── useConversationNavigation.test.ts
     ├── useAppShell.test.ts
+    ├── useBrowserNotifications.test.ts
+    ├── useFaviconBadge.test.ts
     ├── useRepeaterDashboard.test.ts
+    ├── useRememberedServerPassword.test.ts
     ├── useContactsAndChannels.test.ts
     ├── useRealtimeAppState.test.ts
     ├── useUnreadCounts.test.ts
     ├── useWebSocket.dispatch.test.ts
     ├── useWebSocket.lifecycle.test.ts
+    ├── rawPacketStats.test.ts
+    ├── fontScale.test.ts
     └── wsEvents.test.ts
 
 ```
@@ -192,6 +232,7 @@ frontend/src/
 - search/settings surface switching
 - global cracker mount/focus behavior
 - new-message modal and info panes
+- trusted-network `SecurityWarningModal`
 
 High-level state is delegated to hooks:
 - `useAppShell`: app-shell view state (settings section, sidebar, cracker, new-message modal)
@@ -200,9 +241,9 @@ High-level state is delegated to hooks:
 - `useContactsAndChannels`: contact/channel lists, creation, deletion
 - `useConversationRouter`: URL hash → active conversation routing
 - `useConversationNavigation`: search target, conversation selection reset, and info-pane state
-- `useConversationActions`: send/resend/trace/block handlers and channel override updates
-- `useConversationMessages`: conversation switch loading, cache restore, jump-target loading, pagination, dedup/update helpers, and pending ACK buffering
-- `useUnreadCounts`: unread counters, mention tracking, recent-sort timestamps
+- `useConversationActions`: send/resend/trace/path-discovery/block handlers and channel override updates
+- `useConversationMessages`: conversation switch loading, embedded conversation-scoped cache, jump-target loading, pagination, dedup/update helpers, reconnect reconciliation, and pending ACK buffering
+- `useUnreadCounts`: unread counters, mention tracking, recent-sort timestamps, and server `last_read_ats` boundaries
 - `useRealtimeAppState`: typed WS event application, reconnect recovery, cache/unread coordination
 - `useRepeaterDashboard`: repeater dashboard state (login, pane data/retries, console, actions)
 
@@ -213,7 +254,9 @@ High-level state is delegated to hooks:
 - map view
 - visualizer
 - raw packet feed
+- trace view
 - repeater dashboard
+- room-server auth/status gate before room chat
 - normal chat chrome (`ChatHeader` + `MessageList` + `MessageInput`)
 
 ### Initial load + realtime
@@ -233,6 +276,8 @@ High-level state is delegated to hooks:
 - Backend also emits WS `message` for outgoing sends so other clients stay in sync.
 - ACK/repeat updates arrive as `message_acked` events.
 - Outgoing channel messages show a 30-second resend control; resend calls `POST /api/messages/channel/{message_id}/resend`.
+- Conversation-scoped message caching now lives inside `useConversationMessages.ts` rather than a standalone `messageCache.ts` module. If you touch message timeline restore/dedup/reconnect behavior, start there.
+- `contact_resolved` is a real-time identity migration event, not just a contact-list update. Changes in that area need to consider active conversation state, cached messages, unread state keys, and reconnect reconciliation together.
 
 ### Visualizer behavior
 
@@ -245,11 +290,15 @@ High-level state is delegated to hooks:
   - `id`: backend storage row identity (payload-level dedup)
   - `observation_id`: realtime per-arrival identity (session fidelity)
 - Packet feed/visualizer render keys and dedup logic should use `observation_id` (fallback to `id` only for older payloads).
+- The dedicated raw packet feed view now includes a frontend-only stats drawer. It tracks a separate lightweight per-observation session history for charts/rankings, so its windows are not limited by the visible packet list cap. Coverage messaging should stay honest when detailed in-memory stats history has been trimmed or the selected window predates the current browser session.
 
 ### Radio settings behavior
 
 - `SettingsRadioSection.tsx` surfaces `path_hash_mode` only when `config.path_hash_mode_supported` is true.
+- `SettingsRadioSection.tsx` also exposes `multi_acks_enabled` as a checkbox for the radio's extra direct-ACK transmission behavior.
 - Advert-location control is intentionally only `off` vs `include node location`. Companion-radio firmware does not reliably distinguish saved coordinates from live GPS in this path.
+- The advert action is mode-aware: the radio settings section exposes both flood and zero-hop manual advert buttons, both routed through the same `onAdvertise(mode)` seam.
+- Mesh discovery in the radio section is limited to node classes that currently answer discovery control-data requests in firmware: repeaters and sensors.
 - Frontend `path_len` fields are hop counts, not raw byte lengths; multibyte path rendering must use the accompanying metadata before splitting hop identifiers.
 
 ## WebSocket (`useWebSocket.ts`)
@@ -268,12 +317,16 @@ Supported routes:
 - `#map/focus/{pubkey_or_prefix}`
 - `#visualizer`
 - `#search`
+- `#trace`
+- `#settings/{section}`
 - `#channel/{channelKey}`
 - `#channel/{channelKey}/{label}`
 - `#contact/{publicKey}`
 - `#contact/{publicKey}/{label}`
 
-Legacy name-based hashes are still accepted for compatibility.
+Where `{section}` is one of `radio`, `local`, `radio-app`, `database`, `fanout`, `statistics`, or `about`.
+
+Legacy name-based channel/contact hashes are still accepted for compatibility.
 
 ## Conversation State Keys (`utils/conversationState.ts`)
 
@@ -299,23 +352,19 @@ It falls back to a 12-char prefix when `name` is missing.
 
 Distance/validation helpers used by path + map UI.
 
-### `utils/favorites.ts`
-
-LocalStorage migration helpers for favorites; canonical favorites are server-side.
-
 ## Types and Contracts (`types.ts`)
 
 `AppSettings` currently includes:
 - `max_radio_contacts`
-- `favorites`
 - `auto_decrypt_dm_on_advert`
-- `sidebar_sort_order`
 - `last_message_times`
-- `preferences_migrated`
 - `advert_interval`
 - `last_advert_time`
 - `flood_scope`
-- `blocked_keys`, `blocked_names`
+- `blocked_keys`, `blocked_names`, `discovery_blocked_types`
+- `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`
+- `auto_resend_channel`
+- `telemetry_interval_hours`
 
 Note: MQTT, bot, and community MQTT settings were migrated to the `fanout_configs` table (managed via `/api/fanout`). They are no longer part of `AppSettings`.
 
@@ -325,6 +374,8 @@ Note: MQTT, bot, and community MQTT settings were migrated to the `fanout_config
 
 `RawPacket.decrypted_info` includes `channel_key` and `contact_key` for MQTT topic routing.
 
+`UnreadCounts` includes `counts`, `mentions`, `last_message_times`, and `last_read_ats`. The unread-boundary/jump-to-unread behavior uses the server-provided `last_read_ats` map keyed by `getStateKey(...)`.
+
 ## Contact Info Pane
 
 Clicking a contact's avatar in `ChatHeader` or `MessageList` opens a `ContactInfoPane` sheet (right drawer) showing comprehensive contact details fetched from `GET /api/contacts/analytics` using either `?public_key=...` or `?name=...`:
@@ -332,13 +383,15 @@ Clicking a contact's avatar in `ChatHeader` or `MessageList` opens a `ContactInf
 - Header: avatar, name, public key, type badge, on-radio badge
 - Info grid: last seen, first heard, last contacted, distance, hops
 - GPS location (clickable → map)
+- On-demand LPP telemetry: "Request" button fetches `POST /contacts/{key}/telemetry`, displays sensor readings via `LppSensorRow`, optional GPS mini-map (Leaflet), and history chart (Recharts). Opt-in tracking toggle uses `POST /settings/tracked-telemetry-contacts/toggle`.
 - Favorite toggle
 - Name history ("Also Known As") — shown only when the contact has used multiple names
 - Message stats: DM count, channel message count
 - Most active rooms (clickable → navigate to channel)
+- Route details from the canonical backend surface (`effective_route`, `effective_route_source`, `direct_route`, `route_override`)
 - Advert observation rate
 - Nearest repeaters (resolved from first-hop path prefixes)
-- Recent advert paths
+- Recent advert paths (informational only; not part of DM route selection)
 
 State: `useConversationNavigation` controls open/close via `infoPaneContactKey`. Live contact data from WebSocket updates is preferred over the initial detail snapshot.
 
@@ -368,6 +421,12 @@ For repeater contacts (`type=2`), `ConversationPane.tsx` renders `RepeaterDashbo
 
 All state is managed by `useRepeaterDashboard` hook. State resets on conversation change.
 
+## Room Server Panel
+
+For room contacts (`type=3`), `ConversationPane.tsx` keeps the normal chat surface but inserts `RoomServerPanel` above it. That panel handles room-server login/status messaging and gates room chat behind the room-authenticated state when required.
+
+`ServerLoginStatusBanner` is shared between repeater and room login surfaces for inline status/error display.
+
 ## Message Search Pane
 
 The `SearchView` component (`components/SearchView.tsx`) provides full-text search across all DMs and channel messages. Key behaviors:
@@ -379,10 +438,35 @@ The `SearchView` component (`components/SearchView.tsx`) provides full-text sear
 - **Bidirectional pagination**: After jumping mid-history, `hasNewerMessages` enables forward pagination via `fetchNewerMessages`. The scroll-to-bottom button calls `jumpToBottom` (re-fetches latest page) instead of just scrolling.
 - **WS message suppression**: When `hasNewerMessages` is true, incoming WS messages for the active conversation are not added to the message list (the user is viewing historical context, not the latest page).
 
+## Web Push Notifications
+
+Web Push allows notifications even when the browser tab is closed. Requires HTTPS (self-signed OK).
+
+- **Service worker**: `frontend/public/sw.js` handles `push` events (show notification) and `notificationclick` (focus/open tab, navigate via `url_hash`). Registered in `main.tsx` on secure contexts only.
+- **`usePushSubscription` hook**: manages the full subscription lifecycle — subscribe (register SW → `PushManager.subscribe()` → POST to backend), unsubscribe, global push-conversation toggles, device listing, and deletion.
+- **ChatHeader integration**: `BellRing` icon (amber when active) appears next to the existing desktop notification `Bell` on secure contexts. First click subscribes the browser and enables push for that conversation; subsequent clicks toggle the conversation on/off.
+- **Settings > Local**: `PushDeviceManagement` component shows subscription status, lists all registered devices with test/delete buttons. Uses `usePushSubscription` hook directly.
+- Auto-generates device labels from User-Agent (e.g., "Chrome on macOS").
+- `PushSubscriptionInfo` type in `types.ts`; API methods in `api.ts`.
+
 ## Styling
 
 UI styling is mostly utility-class driven (Tailwind-style classes in JSX) plus shared globals in `index.css` and `styles.css`.
 Do not rely on old class-only layout assumptions.
+
+### Canonical style reference
+
+`SettingsLocalSection.tsx` contains a **ThemePreview** component with a collapsible "Canonical style reference" section. This is the authoritative catalog of text sizes, button variants, badge patterns, and interactive elements used throughout the app. **When adding or modifying UI, match the patterns shown there rather than inventing new ones.**
+
+Key conventions documented in the reference:
+
+- **Text sizes** use `rem`-based Tailwind values so they scale with the user's font-size slider. Do not use hard-locked `px` values (e.g., `text-[10px]`). The canonical sizes are `text-[0.625rem]` (10px), `text-[0.6875rem]` (11px), `text-[0.8125rem]` (13px), plus standard Tailwind `text-xs`/`text-sm`/`text-base`/`text-lg`/`text-xl`.
+- **Group titles** (sub-section headings within settings tabs) use `<h3 className="text-base font-semibold tracking-tight">`. These separate major groups like "Connection", "Identity", "MQTT Broker". When a group contains named sub-items (e.g. "Contact Management" → "Blocked Contacts", "Bulk Delete"), use `<h4 className="text-sm font-semibold">` for the children and nest them inside the parent group's `div` instead of separating with `<Separator />`.
+- **Helper / description text** uses `text-[0.8125rem] text-muted-foreground` (13px). This is for explanatory paragraphs under inputs or sections — not for metadata, timestamps, or alert text which stay at `text-xs`.
+- **Metadata labels** use `text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium` for compact category tags like "Push-enabled conversations" or "Registered Devices".
+- **Buttons** use the shadcn `<Button>` component. Semantic color overrides (danger, warning, success) use `variant="outline"` with `className="border-{color}/50 text-{color} hover:bg-{color}/10"`.
+- **Badges/tags** use `text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded` with `bg-muted` (neutral) or `bg-primary/10` (active).
+- **Clickable text** (copy-to-clipboard, navigational links) uses `role="button" tabIndex={0}` with `cursor-pointer hover:text-primary transition-colors`.
 
 ## Security Posture (intentional)
 
@@ -395,7 +479,7 @@ Do not rely on old class-only layout assumptions.
 Run all quality checks (backend + frontend) from the repo root:
 
 ```bash
-./scripts/all_quality.sh
+./scripts/quality/all_quality.sh
 ```
 
 Or run frontend checks individually:
@@ -406,6 +490,10 @@ npm run test:run
 npm run build
 ```
 
+`npm run packaged-build` is release-only. It writes the fallback `frontend/prebuilt`
+directory used by the downloadable prebuilt release zip; normal development and
+validation should stick to `npm run build`.
+
 When touching cross-layer contracts, also run backend tests from repo root:
 
 ```bash
@@ -413,6 +501,10 @@ PYTHONPATH=. uv run pytest tests/ -v
 ```
 
 ## Errata & Known Non-Issues
+
+### Contacts use mention styling for unread DMs
+
+This is intentional. In the sidebar, unread direct messages for actual contact conversations are treated as mention-equivalent for badge styling. That means both the Contacts section header and contact unread badges themselves use the highlighted mention-style colors for unread DMs, including when those contacts appear in Favorites. Repeaters do not inherit this rule, and channel badges still use mention styling only for real `@[name]` mentions.
 
 ### RawPacketList always scrolls to bottom
 

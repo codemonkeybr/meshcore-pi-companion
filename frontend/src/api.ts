@@ -1,22 +1,30 @@
 import type {
   AppSettings,
   AppSettingsUpdate,
+  BulkCreateHashtagChannelsResult,
   Channel,
   ChannelDetail,
   CommandResponse,
   Contact,
   ContactAnalytics,
   ContactAdvertPathSummary,
+  ContactTelemetryResponse,
   FanoutConfig,
-  Favorite,
   HealthStatus,
   MaintenanceResult,
   Message,
   MessagesAroundResponse,
-  MigratePreferencesRequest,
-  MigratePreferencesResponse,
+  RawPacket,
+  RadioAdvertMode,
   RadioConfig,
   RadioConfigUpdate,
+  RadioDiscoveryResponse,
+  RadioTraceHopRequest,
+  RadioTraceResponse,
+  RadioDiscoveryTarget,
+  PathDiscoveryResponse,
+  PushSubscriptionInfo,
+  ResendChannelMessageResponse,
   RepeaterAclResponse,
   RepeaterAdvertIntervalsResponse,
   RepeaterLoginResponse,
@@ -26,12 +34,16 @@ import type {
   RepeaterOwnerInfoResponse,
   RepeaterRadioSettingsResponse,
   RepeaterStatusResponse,
+  TelemetryHistoryEntry,
+  TelemetrySchedule,
+  TrackedTelemetryContactsResponse,
+  TrackedTelemetryResponse,
   StatisticsResponse,
   TraceResponse,
   UnreadCounts,
 } from './types';
 
-const API_BASE = '/api';
+const API_BASE = './api';
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const hasBody = options?.body !== undefined;
@@ -86,14 +98,26 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(config),
     }),
+  getPrivateKey: () => fetchJson<{ private_key: string }>('/radio/private-key'),
   setPrivateKey: (privateKey: string) =>
     fetchJson<{ status: string }>('/radio/private-key', {
       method: 'PUT',
       body: JSON.stringify({ private_key: privateKey }),
     }),
-  sendAdvertisement: () =>
+  sendAdvertisement: (mode: RadioAdvertMode = 'flood') =>
     fetchJson<{ status: string }>('/radio/advertise', {
       method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+  discoverMesh: (target: RadioDiscoveryTarget) =>
+    fetchJson<RadioDiscoveryResponse>('/radio/discover', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
+  requestRadioTrace: (hopHashBytes: 1 | 2 | 4, hops: RadioTraceHopRequest[]) =>
+    fetchJson<RadioTraceResponse>('/radio/trace', {
+      method: 'POST',
+      body: JSON.stringify({ hop_hash_bytes: hopHashBytes, hops }),
     }),
   rebootRadio: () =>
     fetchJson<{ status: string; message: string }>('/radio/reboot', {
@@ -118,20 +142,28 @@ export const api = {
     fetchJson<ContactAdvertPathSummary[]>(
       `/contacts/repeaters/advert-paths?limit_per_repeater=${limitPerRepeater}`
     ),
-  getContactAnalytics: (params: { publicKey?: string; name?: string }) => {
+  getContactAnalytics: (params: { publicKey?: string; name?: string }, signal?: AbortSignal) => {
     const searchParams = new URLSearchParams();
     if (params.publicKey) searchParams.set('public_key', params.publicKey);
     if (params.name) searchParams.set('name', params.name);
-    return fetchJson<ContactAnalytics>(`/contacts/analytics?${searchParams.toString()}`);
+    return fetchJson<ContactAnalytics>(`/contacts/analytics?${searchParams.toString()}`, {
+      signal,
+    });
   },
   deleteContact: (publicKey: string) =>
     fetchJson<{ status: string }>(`/contacts/${publicKey}`, {
       method: 'DELETE',
     }),
-  createContact: (publicKey: string, name?: string, tryHistorical?: boolean) =>
+  bulkDeleteContacts: (publicKeys: string[]) =>
+    fetchJson<{ deleted: number }>('/contacts/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_keys: publicKeys }),
+    }),
+  createContact: (publicKey: string, name?: string, tryHistorical?: boolean, type?: number) =>
     fetchJson<Contact>('/contacts', {
       method: 'POST',
-      body: JSON.stringify({ public_key: publicKey, name, try_historical: tryHistorical }),
+      body: JSON.stringify({ public_key: publicKey, name, type, try_historical: tryHistorical }),
     }),
   markContactRead: (publicKey: string) =>
     fetchJson<{ status: string; public_key: string }>(`/contacts/${publicKey}/mark-read`, {
@@ -144,6 +176,10 @@ export const api = {
     }),
   requestTrace: (publicKey: string) =>
     fetchJson<TraceResponse>(`/contacts/${publicKey}/trace`, {
+      method: 'POST',
+    }),
+  requestPathDiscovery: (publicKey: string) =>
+    fetchJson<PathDiscoveryResponse>(`/contacts/${publicKey}/path-discovery`, {
       method: 'POST',
     }),
   setContactRoutingOverride: (publicKey: string, route: string) =>
@@ -159,6 +195,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, key }),
     }),
+  bulkCreateHashtagChannels: (channelNames: string[], tryHistorical?: boolean) =>
+    fetchJson<BulkCreateHashtagChannelsResult>('/channels/bulk-hashtag', {
+      method: 'POST',
+      body: JSON.stringify({ channel_names: channelNames, try_historical: tryHistorical }),
+    }),
   deleteChannel: (key: string) =>
     fetchJson<{ status: string }>(`/channels/${key}`, { method: 'DELETE' }),
   getChannelDetail: (key: string) => fetchJson<ChannelDetail>(`/channels/${key}/detail`),
@@ -172,6 +213,12 @@ export const api = {
       body: JSON.stringify({ flood_scope_override: floodScopeOverride }),
     }),
   syncChannels: () => fetchJson<{ synced: number }>('/channels/sync', { method: 'POST' }),
+
+  setChannelPathHashModeOverride: (key: string, pathHashModeOverride: number | null) =>
+    fetchJson<Channel>(`/channels/${key}/path-hash-mode-override`, {
+      method: 'POST',
+      body: JSON.stringify({ path_hash_mode_override: pathHashModeOverride }),
+    }),
 
   // Messages
   getMessages: (
@@ -227,12 +274,13 @@ export const api = {
       body: JSON.stringify({ channel_key: channelKey, text }),
     }),
   resendChannelMessage: (messageId: number, newTimestamp?: boolean) =>
-    fetchJson<{ status: string; message_id: number }>(
+    fetchJson<ResendChannelMessageResponse>(
       `/messages/channel/${messageId}/resend${newTimestamp ? '?new_timestamp=true' : ''}`,
       { method: 'POST' }
     ),
 
   // Packets
+  getPacket: (packetId: number) => fetchJson<RawPacket>(`/packets/${packetId}`),
   getUndecryptedPacketCount: () => fetchJson<{ count: number }>('/packets/undecrypted/count'),
   decryptHistoricalPackets: (params: {
     key_type: 'channel' | 'contact';
@@ -283,18 +331,36 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  // Tracked telemetry
+  toggleTrackedTelemetry: (publicKey: string) =>
+    fetchJson<TrackedTelemetryResponse>('/settings/tracked-telemetry/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ public_key: publicKey }),
+    }),
+
+  getTelemetrySchedule: () => fetchJson<TelemetrySchedule>('/settings/tracked-telemetry/schedule'),
+
+  // Tracked contact telemetry
+  toggleTrackedTelemetryContact: (publicKey: string) =>
+    fetchJson<TrackedTelemetryContactsResponse>('/settings/tracked-telemetry-contacts/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ public_key: publicKey }),
+    }),
+
+  getContactTelemetrySchedule: () =>
+    fetchJson<TelemetrySchedule>('/settings/tracked-telemetry-contacts/schedule'),
+
   // Favorites
-  toggleFavorite: (type: Favorite['type'], id: string) =>
-    fetchJson<AppSettings>('/settings/favorites/toggle', {
+  toggleFavorite: (type: 'channel' | 'contact', id: string) =>
+    fetchJson<{ type: string; id: string; favorite: boolean }>('/settings/favorites/toggle', {
       method: 'POST',
       body: JSON.stringify({ type, id }),
     }),
 
-  // Preferences migration (one-time, from localStorage to database)
-  migratePreferences: (request: MigratePreferencesRequest) =>
-    fetchJson<MigratePreferencesResponse>('/settings/migrate', {
+  toggleChannelMute: (key: string) =>
+    fetchJson<{ key: string; muted: boolean }>('/settings/muted-channels/toggle', {
       method: 'POST',
-      body: JSON.stringify(request),
+      body: JSON.stringify({ key }),
     }),
 
   // Fanout
@@ -326,6 +392,14 @@ export const api = {
   deleteFanoutConfig: (id: string) =>
     fetchJson<{ deleted: boolean }>(`/fanout/${id}`, {
       method: 'DELETE',
+    }),
+  disableBotsUntilRestart: () =>
+    fetchJson<{
+      status: string;
+      bots_disabled: boolean;
+      bots_disabled_source: 'env' | 'until_restart';
+    }>('/fanout/bots/disable-until-restart', {
+      method: 'POST',
     }),
 
   // Statistics
@@ -368,5 +442,55 @@ export const api = {
   repeaterLppTelemetry: (publicKey: string) =>
     fetchJson<RepeaterLppTelemetryResponse>(`/contacts/${publicKey}/repeater/lpp-telemetry`, {
       method: 'POST',
+    }),
+  repeaterTelemetryHistory: (publicKey: string) =>
+    fetchJson<TelemetryHistoryEntry[]>(`/contacts/${publicKey}/repeater/telemetry-history`),
+  // Contact telemetry (universal, any contact type)
+  requestContactTelemetry: (publicKey: string) =>
+    fetchJson<ContactTelemetryResponse>(`/contacts/${publicKey}/telemetry`, {
+      method: 'POST',
+    }),
+  contactTelemetryHistory: (publicKey: string) =>
+    fetchJson<TelemetryHistoryEntry[]>(`/contacts/${publicKey}/telemetry-history`),
+  roomLogin: (publicKey: string, password: string) =>
+    fetchJson<RepeaterLoginResponse>(`/contacts/${publicKey}/room/login`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  roomStatus: (publicKey: string) =>
+    fetchJson<RepeaterStatusResponse>(`/contacts/${publicKey}/room/status`, {
+      method: 'POST',
+    }),
+  roomAcl: (publicKey: string) =>
+    fetchJson<RepeaterAclResponse>(`/contacts/${publicKey}/room/acl`, {
+      method: 'POST',
+    }),
+  roomLppTelemetry: (publicKey: string) =>
+    fetchJson<RepeaterLppTelemetryResponse>(`/contacts/${publicKey}/room/lpp-telemetry`, {
+      method: 'POST',
+    }),
+
+  // Push Notifications
+  getVapidPublicKey: () => fetchJson<{ public_key: string }>('/push/vapid-public-key'),
+  pushSubscribe: (subscription: {
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+    label?: string;
+  }) =>
+    fetchJson<PushSubscriptionInfo>('/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify(subscription),
+    }),
+  getPushSubscriptions: () => fetchJson<PushSubscriptionInfo[]>('/push/subscriptions'),
+  deletePushSubscription: (id: string) =>
+    fetchJson<{ deleted: boolean }>(`/push/subscriptions/${id}`, { method: 'DELETE' }),
+  testPushSubscription: (id: string) =>
+    fetchJson<{ status: string }>(`/push/subscriptions/${id}/test`, { method: 'POST' }),
+  getPushConversations: () => fetchJson<string[]>('/push/conversations'),
+  togglePushConversation: (key: string) =>
+    fetchJson<string[]>('/push/conversations/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ key }),
     }),
 };

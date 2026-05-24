@@ -8,7 +8,11 @@
 #
 # Usage:
 #   chmod +x scripts/install_remoteterm_pi.sh
-#   ./scripts/install_remoteterm_pi.sh
+#   ./scripts/install_remoteterm_pi.sh [--verbose|-v] [--no-spi]
+#
+# Options:
+#   --verbose, -v  Show full pip output (useful for diagnosing build failures)
+#   --no-spi       Skip SPI extras (for testing on non-Pi hardware)
 #
 # SPI wizard (writes data/config.yaml by default):
 #   uv run python -m app.setup_cli
@@ -20,6 +24,16 @@ set -e
 
 cd "$(dirname "$0")/.."
 ROOT_DIR="$(pwd)"
+
+VERBOSE=0
+INSTALL_EXTRAS=".[spi]"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --verbose|-v) VERBOSE=1; shift ;;
+    --no-spi) INSTALL_EXTRAS="."; shift ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
 
 echo "== RemoteTerm install/setup =="
 echo "Project root: $ROOT_DIR"
@@ -41,11 +55,18 @@ else
   echo "Virtualenv $VENV_DIR already exists, reusing."
 fi
 
-echo "Activating virtualenv and installing Python dependencies (including [spi])..."
+echo "Activating virtualenv and installing Python dependencies..."
+echo "  Extras: $INSTALL_EXTRAS"
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
-pip install --no-cache-dir --upgrade pip
-pip install --no-cache-dir ".[spi]"
+
+PIP_FLAGS=(--no-cache-dir)
+if [ "$VERBOSE" -eq 1 ]; then
+  PIP_FLAGS+=(-v)
+fi
+
+pip install "${PIP_FLAGS[@]}" --upgrade pip
+pip install "${PIP_FLAGS[@]}" "$INSTALL_EXTRAS"
 
 echo
 echo "== Frontend (optional) =="
@@ -62,6 +83,25 @@ elif [ -f frontend/frontend-dist.zip ]; then
 else
   echo "No frontend/dist and no frontend/frontend-dist.zip."
   echo "Place frontend-dist.zip in the frontend/ folder and re-run, or build/copy frontend/dist manually."
+fi
+
+echo
+echo "== Post-install verification =="
+FAILED=0
+for mod in uvicorn fastapi pydantic aiosqlite; do
+  if "$VENV_DIR/bin/python" -c "import $mod" 2>/dev/null; then
+    echo "  ✓ $mod"
+  else
+    echo "  ✗ $mod MISSING"
+    FAILED=1
+  fi
+done
+
+if [ "$FAILED" -eq 1 ]; then
+  echo
+  echo "ERROR: Some core dependencies are missing. The install likely failed."
+  echo "Re-run with --verbose to see detailed pip output."
+  exit 1
 fi
 
 echo

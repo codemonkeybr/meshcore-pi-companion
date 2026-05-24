@@ -6,14 +6,13 @@ import {
   type SetStateAction,
 } from 'react';
 import { api } from '../api';
-import * as messageCache from '../messageCache';
 import type { UseWebSocketOptions } from '../useWebSocket';
 import { toast } from '../components/ui/sonner';
 import { getStateKey } from '../utils/conversationState';
 import { mergeContactIntoList } from '../utils/contactMerge';
 import { getContactDisplayName } from '../utils/pubkey';
 import { appendRawPacketUnique } from '../utils/rawPacketIdentity';
-import { getMessageContentKey } from './useConversationMessages';
+import { emitStatusDotPulse } from '../utils/statusDotPulse';
 import type {
   Channel,
   Contact,
@@ -29,24 +28,37 @@ interface UseRealtimeAppStateArgs {
   setHealth: Dispatch<SetStateAction<HealthStatus | null>>;
   fetchConfig: () => void | Promise<void>;
   setRawPackets: Dispatch<SetStateAction<RawPacket[]>>;
-  triggerReconcile: () => void;
+  reconcileOnReconnect: () => void;
   refreshUnreads: () => Promise<void>;
   setChannels: Dispatch<SetStateAction<Channel[]>>;
   fetchAllContacts: () => Promise<Contact[]>;
   setContacts: Dispatch<SetStateAction<Contact[]>>;
   blockedKeysRef: MutableRefObject<string[]>;
   blockedNamesRef: MutableRefObject<string[]>;
+  channelsRef: MutableRefObject<Channel[]>;
   activeConversationRef: MutableRefObject<Conversation | null>;
-  hasNewerMessagesRef: MutableRefObject<boolean>;
-  addMessageIfNew: (msg: Message) => boolean;
-  trackNewMessage: (msg: Message) => void;
-  incrementUnread: (stateKey: string, hasMention?: boolean) => void;
+  observeMessage: (msg: Message) => { added: boolean; activeConversation: boolean };
+  recordMessageEvent: (args: {
+    msg: Message;
+    activeConversation: boolean;
+    isNewMessage: boolean;
+    hasMention?: boolean;
+  }) => void;
   renameConversationState: (oldStateKey: string, newStateKey: string) => void;
+  removeConversationState: (stateKey: string) => void;
   checkMention: (text: string) => boolean;
   pendingDeleteFallbackRef: MutableRefObject<boolean>;
   setActiveConversation: (conv: Conversation | null) => void;
-  updateMessageAck: (messageId: number, ackCount: number, paths?: MessagePath[]) => void;
+  renameConversationMessages: (oldId: string, newId: string) => void;
+  removeConversationMessages: (conversationId: string) => void;
+  receiveMessageAck: (
+    messageId: number,
+    ackCount: number,
+    paths?: MessagePath[],
+    packetId?: number | null
+  ) => void;
   notifyIncomingMessage?: (msg: Message) => void;
+  recordRawPacketObservation?: (packet: RawPacket) => void;
   maxRawPackets?: number;
 }
 
@@ -71,43 +83,32 @@ function isMessageBlocked(msg: Message, blockedKeys: string[], blockedNames: str
   return blockedNames.length > 0 && !!msg.sender_name && blockedNames.includes(msg.sender_name);
 }
 
-function isActiveConversationMessage(
-  activeConversation: Conversation | null,
-  msg: Message
-): boolean {
-  if (!activeConversation) return false;
-  if (msg.type === 'CHAN' && activeConversation.type === 'channel') {
-    return msg.conversation_key === activeConversation.id;
-  }
-  if (msg.type === 'PRIV' && activeConversation.type === 'contact') {
-    return msg.conversation_key === activeConversation.id;
-  }
-  return false;
-}
-
 export function useRealtimeAppState({
   prevHealthRef,
   setHealth,
   fetchConfig,
   setRawPackets,
-  triggerReconcile,
+  reconcileOnReconnect,
   refreshUnreads,
   setChannels,
   fetchAllContacts,
   setContacts,
   blockedKeysRef,
   blockedNamesRef,
+  channelsRef,
   activeConversationRef,
-  hasNewerMessagesRef,
-  addMessageIfNew,
-  trackNewMessage,
-  incrementUnread,
+  observeMessage,
+  recordMessageEvent,
   renameConversationState,
+  removeConversationState,
   checkMention,
   pendingDeleteFallbackRef,
   setActiveConversation,
-  updateMessageAck,
+  renameConversationMessages,
+  removeConversationMessages,
+  receiveMessageAck,
   notifyIncomingMessage,
+  recordRawPacketObservation,
   maxRawPackets = 500,
 }: UseRealtimeAppStateArgs): UseWebSocketOptions {
   const mergeChannelIntoList = useCallback(
@@ -180,7 +181,7 @@ export function useRealtimeAppState({
       },
       onReconnect: () => {
         setRawPackets([]);
-        triggerReconcile();
+        reconcileOnReconnect();
         refreshUnreads();
         api.getChannels().then(setChannels).catch(console.error);
         fetchAllContacts()
@@ -192,36 +193,24 @@ export function useRealtimeAppState({
           return;
         }
 
-        const isForActiveConversation = isActiveConversationMessage(
-          activeConversationRef.current,
-          msg
-        );
-        let isNewMessage = false;
+        const isMutedChannel =
+          msg.type === 'CHAN' &&
+          !!msg.conversation_key &&
+          channelsRef.current.some((c) => c.key === msg.conversation_key && c.muted);
 
-        if (isForActiveConversation && !hasNewerMessagesRef.current) {
-          isNewMessage = addMessageIfNew(msg);
+        const { added: isNewMessage, activeConversation: isForActiveConversation } =
+          observeMessage(msg);
+
+        if (!isMutedChannel) {
+          recordMessageEvent({
+            msg,
+            activeConversation: isForActiveConversation,
+            isNewMessage,
+            hasMention: checkMention(msg.text),
+          });
         }
 
-        trackNewMessage(msg);
-
-        const contentKey = getMessageContentKey(msg);
-        if (!isForActiveConversation) {
-          isNewMessage = messageCache.addMessage(msg.conversation_key, msg, contentKey);
-
-          if (!msg.outgoing && isNewMessage) {
-            let stateKey: string | null = null;
-            if (msg.type === 'CHAN' && msg.conversation_key) {
-              stateKey = getStateKey('channel', msg.conversation_key);
-            } else if (msg.type === 'PRIV' && msg.conversation_key) {
-              stateKey = getStateKey('contact', msg.conversation_key);
-            }
-            if (stateKey) {
-              incrementUnread(stateKey, checkMention(msg.text));
-            }
-          }
-        }
-
-        if (!msg.outgoing && isNewMessage) {
+        if (!msg.outgoing && isNewMessage && !isMutedChannel) {
           notifyIncomingMessage?.(msg);
         }
       },
@@ -235,7 +224,7 @@ export function useRealtimeAppState({
             contact
           )
         );
-        messageCache.rename(previousPublicKey, contact.public_key);
+        renameConversationMessages(previousPublicKey, contact.public_key);
         renameConversationState(
           getStateKey('contact', previousPublicKey),
           getStateKey('contact', contact.public_key)
@@ -255,7 +244,8 @@ export function useRealtimeAppState({
       },
       onContactDeleted: (publicKey: string) => {
         setContacts((prev) => prev.filter((c) => c.public_key !== publicKey));
-        messageCache.remove(publicKey);
+        removeConversationMessages(publicKey);
+        removeConversationState(getStateKey('contact', publicKey));
         const active = activeConversationRef.current;
         if (active?.type === 'contact' && active.id === publicKey) {
           pendingDeleteFallbackRef.current = true;
@@ -264,7 +254,8 @@ export function useRealtimeAppState({
       },
       onChannelDeleted: (key: string) => {
         setChannels((prev) => prev.filter((c) => c.key !== key));
-        messageCache.remove(key);
+        removeConversationMessages(key);
+        removeConversationState(getStateKey('channel', key));
         const active = activeConversationRef.current;
         if (active?.type === 'channel' && active.id === key) {
           pendingDeleteFallbackRef.current = true;
@@ -272,37 +263,45 @@ export function useRealtimeAppState({
         }
       },
       onRawPacket: (packet: RawPacket) => {
+        recordRawPacketObservation?.(packet);
+        emitStatusDotPulse(packet.payload_type);
         setRawPackets((prev) => appendRawPacketUnique(prev, packet, maxRawPackets));
       },
-      onMessageAcked: (messageId: number, ackCount: number, paths?: MessagePath[]) => {
-        updateMessageAck(messageId, ackCount, paths);
-        messageCache.updateAck(messageId, ackCount, paths);
+      onMessageAcked: (
+        messageId: number,
+        ackCount: number,
+        paths?: MessagePath[],
+        packetId?: number | null
+      ) => {
+        receiveMessageAck(messageId, ackCount, paths, packetId);
       },
     }),
     [
       activeConversationRef,
-      addMessageIfNew,
       blockedKeysRef,
       blockedNamesRef,
       checkMention,
       fetchAllContacts,
       fetchConfig,
-      hasNewerMessagesRef,
-      incrementUnread,
+      removeConversationState,
       renameConversationState,
+      renameConversationMessages,
       maxRawPackets,
       mergeChannelIntoList,
       pendingDeleteFallbackRef,
       prevHealthRef,
+      recordMessageEvent,
+      recordRawPacketObservation,
+      receiveMessageAck,
+      observeMessage,
       refreshUnreads,
+      reconcileOnReconnect,
+      removeConversationMessages,
       setActiveConversation,
       setChannels,
       setContacts,
       setHealth,
       setRawPackets,
-      trackNewMessage,
-      triggerReconcile,
-      updateMessageAck,
       notifyIncomingMessage,
     ]
   );

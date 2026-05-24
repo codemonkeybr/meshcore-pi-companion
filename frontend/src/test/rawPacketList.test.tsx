@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import { RawPacketList } from '../components/RawPacketList';
 import type { RawPacket } from '../types';
@@ -23,5 +23,17 @@ describe('RawPacketList', () => {
     render(<RawPacketList packets={[createPacket()]} />);
 
     expect(screen.getByText('TF')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('makes packet cards clickable only when an inspector handler is provided', () => {
+    const packet = createPacket({ id: 9, observation_id: 22 });
+    const onPacketClick = vi.fn();
+
+    render(<RawPacketList packets={[packet]} onPacketClick={onPacketClick} />);
+
+    fireEvent.click(screen.getByRole('button'));
+
+    expect(onPacketClick).toHaveBeenCalledWith(packet);
   });
 });

@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     serial_port: str = ""  # Empty string triggers auto-detection
     serial_baudrate: int = 115200
     tcp_host: str = ""
-    tcp_port: int = 4000
+    tcp_port: int = 5000
     ble_address: str = ""
     ble_pin: str = ""
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     disable_bots: bool = False
     enable_message_poll_fallback: bool = False
     force_channel_slot_reconfigure: bool = False
+    clowntown_do_clock_wraparound: bool = Field(
+        default=False,
+        validation_alias="__CLOWNTOWN_DO_CLOCK_WRAPAROUND",
+    )
+    enable_local_private_key_export: bool = False
+    load_with_autoevict: bool = False
+    skip_post_connect_sync: bool = False
     basic_auth_username: str = ""
     basic_auth_password: str = ""
     # SPI backend: path to config.yaml (auto-detected at data/config.yaml)

@@ -1,4 +1,5 @@
-import type { Contact, RadioConfig, MessagePath } from '../types';
+import type { Contact, ContactRoute, RadioConfig, MessagePath } from '../types';
+import type { DistanceUnit } from './distanceUnits';
 import { CONTACT_TYPE_REPEATER } from '../types';
 
 const MAX_PATH_BYTES = 64;
@@ -37,6 +38,7 @@ export interface EffectiveContactRoute {
   pathLen: number;
   pathHashMode: number;
   forced: boolean;
+  source: 'override' | 'direct' | 'flood';
 }
 
 function normalizePathHashMode(mode: number | null | undefined): number | null {
@@ -114,29 +116,86 @@ export function parsePathHops(path: string | null | undefined, hopCount?: number
 }
 
 export function hasRoutingOverride(contact: Contact): boolean {
-  return contact.route_override_len !== null && contact.route_override_len !== undefined;
+  return (
+    (contact.route_override !== null && contact.route_override !== undefined) ||
+    (contact.route_override_len !== null && contact.route_override_len !== undefined)
+  );
+}
+
+export function getDirectContactRoute(contact: Contact): ContactRoute | null {
+  if (contact.direct_route) {
+    return contact.direct_route;
+  }
+
+  if (contact.direct_path_len < 0) {
+    return null;
+  }
+
+  return {
+    path: contact.direct_path ?? '',
+    path_len: contact.direct_path_len,
+    path_hash_mode:
+      normalizePathHashMode(contact.direct_path_hash_mode) ??
+      inferPathHashMode(contact.direct_path, contact.direct_path_len) ??
+      0,
+  };
+}
+
+function getRouteOverride(contact: Contact): ContactRoute | null {
+  if (contact.route_override) {
+    return contact.route_override;
+  }
+
+  if (!hasRoutingOverride(contact)) {
+    return null;
+  }
+
+  const pathLen = contact.route_override_len ?? -1;
+  let pathHashMode = normalizePathHashMode(contact.route_override_hash_mode);
+  if (pathLen === -1) {
+    pathHashMode = -1;
+  } else if (pathHashMode == null) {
+    pathHashMode = inferPathHashMode(contact.route_override_path, pathLen) ?? 0;
+  }
+
+  return {
+    path: contact.route_override_path ?? '',
+    path_len: pathLen,
+    path_hash_mode: pathHashMode,
+  };
 }
 
 export function getEffectiveContactRoute(contact: Contact): EffectiveContactRoute {
-  const forced = hasRoutingOverride(contact);
-  const pathLen = forced ? (contact.route_override_len ?? -1) : contact.last_path_len;
-  const path = forced ? (contact.route_override_path ?? '') : (contact.last_path ?? '');
+  const route = contact.effective_route;
+  if (route) {
+    return {
+      path: route.path || null,
+      pathLen: route.path_len,
+      pathHashMode: route.path_hash_mode,
+      forced: contact.effective_route_source === 'override',
+      source: contact.effective_route_source ?? 'flood',
+    };
+  }
 
-  let pathHashMode = forced
-    ? (contact.route_override_hash_mode ?? null)
-    : (contact.out_path_hash_mode ?? null);
+  const directRoute = getDirectContactRoute(contact);
+  const overrideRoute = getRouteOverride(contact);
+  const resolvedRoute = overrideRoute ?? directRoute;
+  const source = overrideRoute ? 'override' : directRoute ? 'direct' : 'flood';
+  const pathLen = resolvedRoute?.path_len ?? -1;
+  let pathHashMode = resolvedRoute?.path_hash_mode ?? null;
 
   if (pathLen === -1) {
     pathHashMode = -1;
   } else if (pathHashMode == null || pathHashMode < 0 || pathHashMode > 2) {
-    pathHashMode = inferPathHashMode(path, pathLen) ?? 0;
+    pathHashMode = inferPathHashMode(resolvedRoute?.path, pathLen) ?? 0;
   }
 
   return {
-    path: path || null,
+    path: resolvedRoute?.path || null,
     pathLen,
     pathHashMode,
-    forced,
+    forced: source === 'override',
+    source,
   };
 }
 
@@ -150,17 +209,49 @@ export function formatRouteLabel(pathLen: number, capitalize: boolean = false): 
   return capitalize ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 }
 
-export function formatRoutingOverrideInput(contact: Contact): string {
+/**
+ * Format the learned direct route for display in route-editing dialogs,
+ * e.g. "2 hops (AE -> F1)", "Direct", or "Flood".
+ */
+export function formatLearnedRouteSummary(contact: Contact): string {
+  const directRoute = getDirectContactRoute(contact);
+  if (!directRoute) {
+    return formatRouteLabel(-1, true);
+  }
+  const hops = parsePathHops(directRoute.path, directRoute.path_len);
+  const label = formatRouteLabel(directRoute.path_len, true);
+  return hops.length > 0 ? `${label} (${hops.join(' -> ')})` : label;
+}
+
+/**
+ * Format the forced (override) route for display in route-editing dialogs,
+ * matching the learned-route format. Returns null when no override is set.
+ */
+export function formatForcedRouteSummary(contact: Contact): string | null {
   if (!hasRoutingOverride(contact)) {
+    return null;
+  }
+  const effectiveRoute = getEffectiveContactRoute(contact);
+  if (effectiveRoute.pathLen === -1) {
+    return formatRouteLabel(-1, true);
+  }
+  const hops = parsePathHops(effectiveRoute.path, effectiveRoute.pathLen);
+  const label = formatRouteLabel(effectiveRoute.pathLen, true);
+  return hops.length > 0 ? `${label} (${hops.join(' -> ')})` : label;
+}
+
+export function formatRoutingOverrideInput(contact: Contact): string {
+  const routeOverride = getRouteOverride(contact);
+  if (!routeOverride) {
     return '';
   }
-  if (contact.route_override_len === -1) {
+  if (routeOverride.path_len === -1) {
     return '-1';
   }
-  if (contact.route_override_len === 0) {
+  if (routeOverride.path_len === 0) {
     return '0';
   }
-  return parsePathHops(contact.route_override_path, contact.route_override_len)
+  return parsePathHops(routeOverride.path, routeOverride.path_len)
     .map((hop) => hop.toLowerCase())
     .join(',');
 }
@@ -273,6 +364,9 @@ export function isValidLocation(lat: number | null, lon: number | null): boolean
   if (lat === null || lon === null) {
     return false;
   }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return false;
+  }
   // (0, 0) is in the Atlantic Ocean - treat as unset
   if (lat === 0 && lon === 0) {
     return false;
@@ -281,13 +375,35 @@ export function isValidLocation(lat: number | null, lon: number | null): boolean
 }
 
 /**
- * Format distance in human-readable form (m or km)
+ * Format distance in human-readable form using the selected display unit.
  */
-export function formatDistance(km: number): string {
-  if (km < 1) {
-    return `${Math.round(km * 1000)}m`;
+export function formatDistance(km: number, unit: DistanceUnit = 'imperial'): string {
+  const formatInteger = (value: number) => value.toLocaleString();
+  const formatOneDecimal = (value: number) =>
+    value.toLocaleString(undefined, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    });
+
+  if (unit === 'metric') {
+    if (km < 1) {
+      return `${formatInteger(Math.round(km * 1000))}m`;
+    }
+    return `${formatOneDecimal(km)}km`;
   }
-  return `${km.toFixed(1)}km`;
+
+  if (unit === 'smoots') {
+    const smoots = (km * 1000) / 1.7018;
+    const rounded = smoots < 10 ? Number(smoots.toFixed(1)) : Math.round(smoots);
+    const display = smoots < 10 ? formatOneDecimal(rounded) : formatInteger(rounded);
+    return `${display} ${rounded === 1 ? 'smoot' : 'smoots'}`;
+  }
+
+  const miles = km * 0.621371;
+  if (miles < 0.1) {
+    return `${formatInteger(Math.round(km * 3280.839895))}ft`;
+  }
+  return `${formatOneDecimal(miles)}mi`;
 }
 
 /**

@@ -56,6 +56,14 @@
     --badge-mention: var(--destructive);
     --badge-mention-foreground: var(--destructive-foreground);
 
+    /* Sidebar navigation accents */
+    --sidebar-icon-color: hsl(var(--foreground));
+    --sidebar-icon-hover-color: hsl(var(--foreground));
+    --sidebar-icon-active-color: hsl(var(--foreground));
+    --sidebar-label-color: hsl(var(--muted-foreground));
+    --sidebar-label-hover-color: hsl(var(--foreground));
+    --sidebar-label-active-color: hsl(var(--foreground));
+
     /* Error toast */
     --toast-error: 0 30% 14%;
     --toast-error-foreground: 0 56% 77%;
@@ -85,7 +93,7 @@
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
-    font-size: 14px;
+    font-size: 0.875rem;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -124,6 +132,50 @@
 }
 .message-highlight {
   animation: message-highlight 2s ease-out forwards;
+}
+
+.sidebar-tool-icon {
+  display: inline-flex;
+  height: 1.5rem;
+  width: 1.5rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.45rem;
+  color: var(--sidebar-icon-color);
+  opacity: 1;
+  transition:
+    color 150ms ease,
+    opacity 150ms ease;
+}
+
+.sidebar-tool-icon svg {
+  stroke-width: 2.35;
+}
+
+.sidebar-tool-label {
+  color: var(--sidebar-label-color);
+  transition: color 150ms ease;
+}
+
+.sidebar-action-row:hover .sidebar-tool-icon,
+.sidebar-action-row:focus-visible .sidebar-tool-icon {
+  color: var(--sidebar-icon-hover-color);
+  opacity: 1;
+}
+
+.sidebar-action-row:hover .sidebar-tool-label,
+.sidebar-action-row:focus-visible .sidebar-tool-label {
+  color: var(--sidebar-label-hover-color);
+}
+
+.sidebar-action-row[data-active='true'] .sidebar-tool-icon {
+  color: var(--sidebar-icon-active-color);
+  opacity: 1;
+}
+
+.sidebar-action-row[data-active='true'] .sidebar-tool-label {
+  color: var(--sidebar-label-active-color);
 }
 
 /* Constrain CodeMirror editor width */

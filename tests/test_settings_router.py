@@ -3,15 +3,17 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
-from app.models import AppSettings
-from app.repository import AppSettingsRepository
+from app.models import CONTACT_TYPE_REPEATER, AppSettings, ContactUpsert
+from app.repository import AppSettingsRepository, ContactRepository
 from app.routers.settings import (
     AppSettingsUpdate,
     FavoriteRequest,
-    MigratePreferencesRequest,
-    migrate_preferences,
+    TrackedTelemetryRequest,
+    get_telemetry_schedule,
     toggle_favorite,
+    toggle_tracked_telemetry,
     update_settings,
 )
 
@@ -83,11 +85,11 @@ class TestUpdateSettings:
     async def test_flood_scope_applies_to_radio(self, test_db):
         """When radio is connected, setting flood_scope calls set_flood_scope on radio."""
         mock_mc = AsyncMock()
-        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.commands.set_flood_scope = AsyncMock()
 
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
-        mock_rm.backend = mock_mc
+        mock_rm.meshcore = mock_mc
 
         from contextlib import asynccontextmanager
 
@@ -100,7 +102,7 @@ class TestUpdateSettings:
         with patch("app.radio.radio_manager", mock_rm):
             await update_settings(AppSettingsUpdate(flood_scope="TestRegion"))
 
-        mock_mc.set_flood_scope.assert_awaited_once_with("#TestRegion")
+        mock_mc.commands.set_flood_scope.assert_awaited_once_with("#TestRegion")
 
     @pytest.mark.asyncio
     async def test_flood_scope_empty_resets_radio(self, test_db):
@@ -109,11 +111,11 @@ class TestUpdateSettings:
         await update_settings(AppSettingsUpdate(flood_scope="#TestRegion"))
 
         mock_mc = AsyncMock()
-        mock_mc.set_flood_scope = AsyncMock()
+        mock_mc.commands.set_flood_scope = AsyncMock()
 
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
-        mock_rm.backend = mock_mc
+        mock_rm.meshcore = mock_mc
 
         from contextlib import asynccontextmanager
 
@@ -126,12 +128,13 @@ class TestUpdateSettings:
         with patch("app.radio.radio_manager", mock_rm):
             await update_settings(AppSettingsUpdate(flood_scope=""))
 
-        mock_mc.set_flood_scope.assert_awaited_once_with("")
+        mock_mc.commands.set_flood_scope.assert_awaited_once_with("")
 
 
 class TestToggleFavorite:
     @pytest.mark.asyncio
     async def test_adds_when_not_favorited(self, test_db):
+        await ContactRepository.upsert(ContactUpsert(public_key="aa" * 32, name="Alice"))
         request = FavoriteRequest(type="contact", id="aa" * 32)
         with (
             patch("app.radio_sync.ensure_contact_on_radio", new_callable=AsyncMock) as mock_sync,
@@ -140,16 +143,16 @@ class TestToggleFavorite:
             mock_create_task.side_effect = lambda coro: coro.close()
             result = await toggle_favorite(request)
 
-        assert len(result.favorites) == 1
-        assert result.favorites[0].type == "contact"
-        assert result.favorites[0].id == "aa" * 32
+        assert result.favorite is True
+        assert result.type == "contact"
+        assert result.id == "aa" * 32
         mock_sync.assert_called_once_with("aa" * 32, force=True)
         mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_removes_when_already_favorited(self, test_db):
-        # Pre-add a favorite
-        await AppSettingsRepository.add_favorite("contact", "aa" * 32)
+        await ContactRepository.upsert(ContactUpsert(public_key="aa" * 32, name="Alice"))
+        await ContactRepository.set_favorite("aa" * 32, True)
 
         request = FavoriteRequest(type="contact", id="aa" * 32)
         with (
@@ -159,47 +162,234 @@ class TestToggleFavorite:
             mock_create_task.side_effect = lambda coro: coro.close()
             result = await toggle_favorite(request)
 
-        assert result.favorites == []
+        assert result.favorite is False
         mock_sync.assert_not_called()
         mock_create_task.assert_not_called()
 
 
-class TestMigratePreferences:
-    @pytest.mark.asyncio
-    async def test_maps_frontend_payload_and_returns_migrated_true(self, test_db):
-        request = MigratePreferencesRequest(
-            favorites=[FavoriteRequest(type="contact", id="aa" * 32)],
-            sort_order="alpha",
-            last_message_times={"contact-aaaaaaaaaaaa": 123},
+class TestToggleTrackedTelemetry:
+    """Tests for POST /settings/tracked-telemetry/toggle."""
+
+    async def _create_repeater(self, key: str, name: str = "TestRepeater") -> None:
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=key, name=name, type=CONTACT_TYPE_REPEATER)
         )
-
-        response = await migrate_preferences(request)
-
-        assert response.migrated is True
-        assert response.settings.preferences_migrated is True
-        assert response.settings.sidebar_sort_order == "alpha"
-        assert len(response.settings.favorites) == 1
-        assert response.settings.favorites[0].type == "contact"
-        assert response.settings.favorites[0].id == "aa" * 32
-        assert response.settings.last_message_times == {"contact-aaaaaaaaaaaa": 123}
 
     @pytest.mark.asyncio
-    async def test_returns_migrated_false_when_already_done(self, test_db):
-        # First migration
-        first_request = MigratePreferencesRequest(
-            favorites=[FavoriteRequest(type="contact", id="bb" * 32)],
-            sort_order="recent",
-            last_message_times={},
-        )
-        await migrate_preferences(first_request)
+    async def test_add_repeater_to_tracking(self, test_db):
+        key = "aa" * 32
+        await self._create_repeater(key)
 
-        # Second attempt should be no-op
-        second_request = MigratePreferencesRequest(
-            favorites=[],
-            sort_order="recent",
-            last_message_times={},
-        )
-        response = await migrate_preferences(second_request)
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
 
-        assert response.migrated is False
-        assert response.settings.preferences_migrated is True
+        assert key in result.tracked_telemetry_repeaters
+        assert result.names[key] == "TestRepeater"
+
+        # Verify persisted
+        settings = await AppSettingsRepository.get()
+        assert key in settings.tracked_telemetry_repeaters
+
+    @pytest.mark.asyncio
+    async def test_remove_repeater_from_tracking(self, test_db):
+        key = "bb" * 32
+        await self._create_repeater(key)
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=[key])
+
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
+
+        assert key not in result.tracked_telemetry_repeaters
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_repeater_contact(self, test_db):
+        key = "cc" * 32
+        await ContactRepository.upsert(ContactUpsert(public_key=key, name="Client", type=1))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_contact(self, test_db):
+        with pytest.raises(HTTPException) as exc_info:
+            await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key="dd" * 32))
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_limit_reached(self, test_db):
+        existing_keys = []
+        for i in range(8):
+            key = f"{i:02x}" * 32
+            await self._create_repeater(key, name=f"Repeater{i}")
+            existing_keys.append(key)
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=existing_keys)
+
+        new_key = "ff" * 32
+        await self._create_repeater(new_key, name="NewRepeater")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=new_key))
+        assert exc_info.value.status_code == 409
+        detail = exc_info.value.detail
+        assert len(detail["tracked_telemetry_repeaters"]) == 8
+
+    @pytest.mark.asyncio
+    async def test_remove_still_works_when_limit_reached(self, test_db):
+        """Toggling OFF an already-tracked repeater should work even at max capacity."""
+        keys = []
+        for i in range(8):
+            key = f"{i:02x}" * 32
+            await self._create_repeater(key)
+            keys.append(key)
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=keys)
+
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=keys[0]))
+        assert keys[0] not in result.tracked_telemetry_repeaters
+        assert len(result.tracked_telemetry_repeaters) == 7
+
+    @pytest.mark.asyncio
+    async def test_toggle_response_includes_schedule(self, test_db):
+        """After toggle, response must carry the schedule derivation so the UI
+        can update the interval dropdown without a follow-up fetch."""
+        key = "aa" * 32
+        await self._create_repeater(key)
+
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
+
+        assert result.schedule.tracked_count == 1
+        # N=1 unlocks the full menu including 1h
+        assert 1 in result.schedule.options
+        assert result.schedule.max_tracked == 8
+
+
+class TestTelemetryIntervalValidation:
+    """PATCH /settings validation for telemetry_interval_hours."""
+
+    @pytest.mark.asyncio
+    async def test_accepts_valid_interval(self, test_db):
+        result = await update_settings(AppSettingsUpdate(telemetry_interval_hours=4))
+        assert result.telemetry_interval_hours == 4
+
+    @pytest.mark.asyncio
+    async def test_invalid_interval_falls_back_to_default(self, test_db):
+        """Non-menu values are defaulted rather than 400-ing to keep stale
+        clients from getting stuck on a save error."""
+        result = await update_settings(AppSettingsUpdate(telemetry_interval_hours=99))
+        assert result.telemetry_interval_hours == 8  # DEFAULT_TELEMETRY_INTERVAL_HOURS
+
+    @pytest.mark.asyncio
+    async def test_preference_is_preserved_even_when_illegal_for_count(self, test_db):
+        """User picks 1h at N=5 tracked: stored pref must stay 1h. Scheduler
+        handles the clamping at run time; storage is verbatim."""
+        # Seed 5 tracked repeaters
+        keys = [f"{i:02x}" * 32 for i in range(5)]
+        for k in keys:
+            await ContactRepository.upsert(
+                ContactUpsert(public_key=k, name=f"R{k[:4]}", type=CONTACT_TYPE_REPEATER)
+            )
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=keys)
+
+        result = await update_settings(AppSettingsUpdate(telemetry_interval_hours=1))
+        assert result.telemetry_interval_hours == 1
+
+        # But the GET schedule endpoint should report the clamped effective value.
+        schedule = await get_telemetry_schedule()
+        assert schedule.preferred_hours == 1
+        assert schedule.effective_hours == 6  # N=5 -> shortest legal = 6h
+
+
+class TestTelemetryScheduleEndpoint:
+    """GET /settings/tracked-telemetry/schedule."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_with_no_tracked_repeaters(self, test_db):
+        """No tracked repeaters means nothing to schedule; next_run_at is None.
+
+        At N=0 the clamp helper returns the default 8h, which is a fine
+        display value for an empty state. Options start at 8h for the same
+        reason — any lower shortest-legal only makes sense once the user
+        has at least one repeater tracked.
+        """
+        schedule = await get_telemetry_schedule()
+
+        assert schedule.tracked_count == 0
+        assert schedule.next_run_at is None
+        # At N=0 shortest-legal defaults to 8h.
+        assert schedule.options == [8, 12, 24]
+
+    @pytest.mark.asyncio
+    async def test_schedule_filters_options_by_tracked_count(self, test_db):
+        keys = [f"{i:02x}" * 32 for i in range(5)]
+        for k in keys:
+            await ContactRepository.upsert(
+                ContactUpsert(public_key=k, name=f"R{k[:4]}", type=CONTACT_TYPE_REPEATER)
+            )
+        await AppSettingsRepository.update(tracked_telemetry_repeaters=keys)
+
+        schedule = await get_telemetry_schedule()
+
+        assert schedule.tracked_count == 5
+        assert schedule.options == [6, 8, 12, 24]
+        assert schedule.next_run_at is not None
+
+
+class TestRoutedHourlySetting:
+    """Tests for the telemetry_routed_hourly setting."""
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_false(self, test_db):
+        settings = await AppSettingsRepository.get()
+        assert settings.telemetry_routed_hourly is False
+
+    @pytest.mark.asyncio
+    async def test_round_trip_via_patch(self, test_db):
+        result = await update_settings(AppSettingsUpdate(telemetry_routed_hourly=True))
+        assert result.telemetry_routed_hourly is True
+
+        result = await update_settings(AppSettingsUpdate(telemetry_routed_hourly=False))
+        assert result.telemetry_routed_hourly is False
+
+    @pytest.mark.asyncio
+    async def test_schedule_includes_routed_fields_when_enabled(self, test_db):
+        key = "aa" * 32
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=key, name="R1", type=CONTACT_TYPE_REPEATER)
+        )
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key],
+            telemetry_routed_hourly=True,
+        )
+
+        schedule = await get_telemetry_schedule()
+
+        assert schedule.routed_hourly is True
+        assert schedule.next_routed_run_at is not None
+        assert schedule.next_run_at is not None
+
+    @pytest.mark.asyncio
+    async def test_schedule_omits_routed_run_when_disabled(self, test_db):
+        key = "aa" * 32
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=key, name="R1", type=CONTACT_TYPE_REPEATER)
+        )
+        await AppSettingsRepository.update(
+            tracked_telemetry_repeaters=[key],
+            telemetry_routed_hourly=False,
+        )
+
+        schedule = await get_telemetry_schedule()
+
+        assert schedule.routed_hourly is False
+        assert schedule.next_routed_run_at is None
+
+    @pytest.mark.asyncio
+    async def test_toggle_response_carries_routed_hourly(self, test_db):
+        key = "bb" * 32
+        await ContactRepository.upsert(
+            ContactUpsert(public_key=key, name="R2", type=CONTACT_TYPE_REPEATER)
+        )
+        await AppSettingsRepository.update(telemetry_routed_hourly=True)
+
+        result = await toggle_tracked_telemetry(TrackedTelemetryRequest(public_key=key))
+
+        assert result.schedule.routed_hourly is True
+        assert result.schedule.next_routed_run_at is not None
