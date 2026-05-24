@@ -33,6 +33,7 @@ def _mock_meshcore_with_info():
     mc.commands.set_radio = AsyncMock()
     mc.commands.set_path_hash_mode = AsyncMock(return_value=_radio_result())
     mc.commands.set_advert_loc_policy = AsyncMock(return_value=_radio_result())
+    mc.commands.set_multi_acks = AsyncMock(return_value=_radio_result())
     mc.commands.send_appstart = AsyncMock()
     mc.commands.import_private_key = AsyncMock(return_value=_radio_result())
     return mc
@@ -83,6 +84,39 @@ class TestApplyRadioConfigUpdate:
 
         mc.commands.set_advert_loc_policy.assert_awaited_once_with(1)
         mc.commands.send_appstart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_updates_multi_acks_enabled(self):
+        mc = _mock_meshcore_with_info()
+
+        await apply_radio_config_update(
+            mc,
+            RadioConfigUpdate(multi_acks_enabled=True),
+            path_hash_mode_supported=True,
+            set_path_hash_mode=MagicMock(),
+            sync_radio_time_fn=AsyncMock(),
+        )
+
+        mc.commands.set_multi_acks.assert_awaited_once_with(1)
+        mc.commands.send_appstart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_radio_rejects_multi_acks(self):
+        mc = _mock_meshcore_with_info()
+        mc.commands.set_multi_acks = AsyncMock(
+            return_value=_radio_result(EventType.ERROR, {"error": "nope"})
+        )
+
+        with pytest.raises(RadioCommandRejectedError):
+            await apply_radio_config_update(
+                mc,
+                RadioConfigUpdate(multi_acks_enabled=False),
+                path_hash_mode_supported=True,
+                set_path_hash_mode=MagicMock(),
+                sync_radio_time_fn=AsyncMock(),
+            )
+
+        mc.commands.send_appstart.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_raises_when_radio_rejects_advert_location_source(self):

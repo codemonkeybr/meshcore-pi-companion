@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Checkbox } from '../ui/checkbox';
 import { PACKET_LEGEND_ITEMS } from '../../utils/visualizerUtils';
 import { NODE_LEGEND_ITEMS } from './shared';
@@ -71,6 +72,19 @@ export function VisualizerControls({
   onExpandContract,
   onClearAndReset,
 }: VisualizerControlsProps) {
+  const [observationWindowInput, setObservationWindowInput] = useState(
+    String(observationWindowSec)
+  );
+  const [pruneWindowInput, setPruneWindowInput] = useState(String(pruneStaleMinutes));
+
+  useEffect(() => {
+    setObservationWindowInput(String(observationWindowSec));
+  }, [observationWindowSec]);
+
+  useEffect(() => {
+    setPruneWindowInput(String(pruneStaleMinutes));
+  }, [pruneStaleMinutes]);
+
   return (
     <>
       {showControls && (
@@ -81,7 +95,7 @@ export function VisualizerControls({
               {PACKET_LEGEND_ITEMS.map((item) => (
                 <div key={item.label} className="flex items-center gap-2">
                   <div
-                    className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white"
+                    className="w-5 h-5 rounded-full flex items-center justify-center text-[0.5rem] font-bold text-white"
                     style={{ backgroundColor: item.color }}
                   >
                     {item.label}
@@ -212,12 +226,25 @@ export function VisualizerControls({
                         type="number"
                         min="1"
                         max="60"
-                        value={observationWindowSec}
-                        onChange={(e) =>
-                          setObservationWindowSec(
-                            Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 1))
-                          )
-                        }
+                        value={observationWindowInput}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          setObservationWindowInput(nextValue);
+                          if (nextValue === '') return;
+                          const parsed = Number.parseInt(nextValue, 10);
+                          if (Number.isNaN(parsed)) return;
+                          setObservationWindowSec(Math.max(1, Math.min(60, parsed)));
+                        }}
+                        onBlur={() => {
+                          const parsed = Number.parseInt(observationWindowInput, 10);
+                          const nextValue = Number.isNaN(parsed)
+                            ? observationWindowSec
+                            : Math.max(1, Math.min(60, parsed));
+                          setObservationWindowInput(String(nextValue));
+                          if (nextValue !== observationWindowSec) {
+                            setObservationWindowSec(nextValue);
+                          }
+                        }}
                         className="w-12 px-1 py-0.5 bg-background border border-border rounded text-xs text-center"
                       />
                       <span className="text-muted-foreground">sec</span>
@@ -247,10 +274,25 @@ export function VisualizerControls({
                         type="number"
                         min={1}
                         max={60}
-                        value={pruneStaleMinutes}
+                        value={pruneWindowInput}
                         onChange={(e) => {
-                          const v = parseInt(e.target.value, 10);
-                          if (!isNaN(v) && v >= 1 && v <= 60) setPruneStaleMinutes(v);
+                          const nextValue = e.target.value;
+                          setPruneWindowInput(nextValue);
+                          if (nextValue === '') return;
+                          const parsed = Number.parseInt(nextValue, 10);
+                          if (Number.isNaN(parsed)) return;
+                          if (parsed >= 1 && parsed <= 60) setPruneStaleMinutes(parsed);
+                        }}
+                        onBlur={() => {
+                          const parsed = Number.parseInt(pruneWindowInput, 10);
+                          const nextValue =
+                            Number.isNaN(parsed) || parsed < 1 || parsed > 60
+                              ? pruneStaleMinutes
+                              : parsed;
+                          setPruneWindowInput(String(nextValue));
+                          if (nextValue !== pruneStaleMinutes) {
+                            setPruneStaleMinutes(nextValue);
+                          }
                         }}
                         className="w-14 rounded border border-border bg-background px-2 py-0.5 text-sm"
                       />

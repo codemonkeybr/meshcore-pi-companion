@@ -112,7 +112,10 @@ export function RadioSettingsPane({
         <NotFetched />
       ) : (
         <div>
-          <KvRow label="Local Advert" value={formatAdvertInterval(advertData.advert_interval)} />
+          <KvRow
+            label="Local Advert"
+            value={formatAdvertInterval(advertData.advert_interval, 'minutes')}
+          />
           <KvRow
             label="Flood Advert"
             value={formatAdvertInterval(advertData.flood_advert_interval)}

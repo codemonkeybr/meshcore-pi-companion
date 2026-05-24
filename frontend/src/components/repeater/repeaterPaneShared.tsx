@@ -39,7 +39,10 @@ export function formatDuration(seconds: number): string {
   return `${mins}m`;
 }
 
-export function formatClockDrift(clockUtc: string): { text: string; isLarge: boolean } {
+export function formatClockDrift(
+  clockUtc: string,
+  referenceTimeMs: number = Date.now()
+): { text: string; isLarge: boolean } {
   // Firmware format: "HH:MM - D/M/YYYY UTC" or "HH:MM:SS - D/M/YYYY UTC"
   // Also handle ISO-like: "YYYY-MM-DD HH:MM:SS"
   let parsed: Date;
@@ -56,7 +59,7 @@ export function formatClockDrift(clockUtc: string): { text: string; isLarge: boo
   }
   if (isNaN(parsed.getTime())) return { text: '(invalid)', isLarge: false };
 
-  const driftMs = Math.abs(Date.now() - parsed.getTime());
+  const driftMs = Math.abs(referenceTimeMs - parsed.getTime());
   const driftSec = Math.floor(driftMs / 1000);
 
   if (driftSec >= 86400) return { text: '>24 hours!', isLarge: true };
@@ -73,21 +76,19 @@ export function formatClockDrift(clockUtc: string): { text: string; isLarge: boo
   return { text: parts.join(''), isLarge: false };
 }
 
-export function formatAdvertInterval(val: string | null): string {
+export function formatAdvertInterval(
+  val: string | null,
+  unit: 'minutes' | 'hours' = 'hours'
+): string {
   if (val == null) return '—';
   const trimmed = val.trim();
   if (trimmed === '0') return '<disabled>';
-  // Firmware reports repeater advert intervals in minutes (CLI: get advert.interval).
-  // The UI is hour-based (minimum advert interval is 1 hour), so convert to h display.
-  const minutes = Number(trimmed);
-  if (!Number.isFinite(minutes)) return trimmed;
-  if (minutes >= 60) {
-    if (minutes % 60 === 0) return `${minutes / 60}h`;
-    const hours = Math.floor(minutes / 60);
-    const remMins = Math.floor(minutes % 60);
-    return `${hours}h${remMins}m`;
-  }
-  return `${minutes}m`;
+  if (unit === 'hours') return `${trimmed}h`;
+  const mins = parseInt(trimmed, 10);
+  if (isNaN(mins)) return trimmed;
+  if (mins >= 60 && mins % 60 === 0) return `${mins / 60}h`;
+  if (mins >= 60) return `${Math.floor(mins / 60)}h${mins % 60}m`;
+  return `${mins}m`;
 }
 
 function formatFetchedRelative(fetchedAt: number): string {
@@ -116,6 +117,7 @@ function formatFetchedTime(fetchedAt: number): string {
 
 export function RepeaterPane({
   title,
+  headerNote,
   state,
   onRefresh,
   disabled,
@@ -124,6 +126,7 @@ export function RepeaterPane({
   contentClassName,
 }: {
   title: string;
+  headerNote?: ReactNode;
   state: PaneState;
   onRefresh?: () => void;
   disabled?: boolean;
@@ -138,9 +141,10 @@ export function RepeaterPane({
       <div className="flex items-center justify-between px-3 py-2 bg-muted/50 border-b border-border">
         <div className="min-w-0">
           <h3 className="text-sm font-medium">{title}</h3>
+          {headerNote && <p className="text-[0.6875rem] text-muted-foreground">{headerNote}</p>}
           {fetchedAt && (
             <p
-              className="text-[11px] text-muted-foreground"
+              className="text-[0.6875rem] text-muted-foreground"
               title={new Date(fetchedAt).toLocaleString()}
             >
               Fetched {formatFetchedTime(fetchedAt)} ({formatFetchedRelative(fetchedAt)})
@@ -208,23 +212,49 @@ export const LPP_UNIT_MAP: Record<string, string> = {
   humidity: '%',
   barometer: 'hPa',
   voltage: 'V',
-  current: 'mA',
+  current: 'A',
   luminosity: 'lux',
   altitude: 'm',
   power: 'W',
-  distance: 'mm',
+  distance: 'm',
   energy: 'kWh',
   direction: '°',
   concentration: 'ppm',
   colour: '',
 };
 
+/**
+ * Return the display unit and converted value for an LPP sensor,
+ * respecting the user's unit preference for temperature.
+ */
+export function lppDisplayUnit(
+  typeName: string,
+  value: number,
+  unitPref: 'metric' | 'imperial' | string
+): { unit: string; value: number } {
+  if (typeName === 'temperature' && unitPref === 'imperial') {
+    return { unit: '°F', value: (value * 9) / 5 + 32 };
+  }
+  if (typeName === 'current') {
+    if (value <= 1) return { unit: 'mA', value: value * 1000 };
+  }
+  return { unit: LPP_UNIT_MAP[typeName] ?? '', value };
+}
+
 export function formatLppLabel(typeName: string): string {
   return typeName.charAt(0).toUpperCase() + typeName.slice(1).replace(/_/g, ' ');
 }
 
-export function LppSensorRow({ sensor }: { sensor: LppSensor }) {
-  const label = formatLppLabel(sensor.type_name);
+export function LppSensorRow({
+  sensor,
+  unitPref,
+  label: labelOverride,
+}: {
+  sensor: LppSensor;
+  unitPref?: string;
+  label?: string;
+}) {
+  const label = labelOverride ?? formatLppLabel(sensor.type_name);
 
   if (typeof sensor.value === 'object' && sensor.value !== null) {
     // Multi-value sensor (GPS, accelerometer, etc.)
@@ -244,10 +274,10 @@ export function LppSensorRow({ sensor }: { sensor: LppSensor }) {
     );
   }
 
-  const unit = LPP_UNIT_MAP[sensor.type_name] ?? '';
+  const display = lppDisplayUnit(sensor.type_name, sensor.value as number, unitPref ?? 'metric');
   const formatted =
     typeof sensor.value === 'number'
-      ? `${sensor.value % 1 === 0 ? sensor.value : sensor.value.toFixed(2)}${unit ? ` ${unit}` : ''}`
+      ? `${display.value % 1 === 0 ? display.value : display.value.toFixed(2)}${display.unit ? ` ${display.unit}` : ''}`
       : String(sensor.value);
 
   return <KvRow label={label} value={formatted} />;

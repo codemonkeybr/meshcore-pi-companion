@@ -6,7 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSenderFromText, formatTime } from '../utils/messageParser';
+import {
+  findLinkedChannelReferences,
+  formatTime,
+  HASHTAG_CHANNEL_NAME_PATTERN,
+  parseSenderFromText,
+} from '../utils/messageParser';
 
 describe('parseSenderFromText', () => {
   it('extracts sender and content from "sender: message" format', () => {
@@ -93,5 +98,45 @@ describe('formatTime', () => {
     // Should contain month, day, and time
     expect(result).toMatch(/\w+ \d{1,2}/); // e.g., "Nov 14"
     expect(result).toMatch(/\d{1,2}:\d{2}/); // time portion
+  });
+});
+
+describe('linked channel references', () => {
+  it('accepts lowercase alphanumeric names with single dashes', () => {
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('ops')).toBe(true);
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('ops-1')).toBe(true);
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('1-2-3')).toBe(true);
+  });
+
+  it('rejects uppercase, leading or trailing dashes, and repeated dashes', () => {
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('Ops')).toBe(false);
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('-ops')).toBe(false);
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('ops-')).toBe(false);
+    expect(HASHTAG_CHANNEL_NAME_PATTERN.test('ops--room')).toBe(false);
+  });
+
+  it('finds standalone linked channel references in message text', () => {
+    expect(findLinkedChannelReferences('Join #mesh-room then say hi in #ops2')).toEqual([
+      { label: '#mesh-room', start: 5, end: 15 },
+      { label: '#ops2', start: 31, end: 36 },
+    ]);
+  });
+
+  it('finds linked channel references terminated by clause punctuation', () => {
+    expect(
+      findLinkedChannelReferences('Join #mesh-room, then #ops2; finally #alpha-room.')
+    ).toEqual([
+      { label: '#mesh-room', start: 5, end: 15 },
+      { label: '#ops2', start: 22, end: 27 },
+      { label: '#alpha-room', start: 37, end: 48 },
+    ]);
+  });
+
+  it('ignores invalid or embedded channel-like text', () => {
+    const references = findLinkedChannelReferences(
+      'skip #Bad #bad--name abc#ops #ops- #opsRoom #ops_room #good-room,'
+    );
+
+    expect(references.map((reference) => reference.label)).toEqual(['#good-room']);
   });
 });

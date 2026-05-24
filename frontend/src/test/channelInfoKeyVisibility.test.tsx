@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChannelInfoPane } from '../components/ChannelInfoPane';
-import type { Channel, ChannelDetail, Favorite } from '../types';
+import type { Channel, ChannelDetail } from '../types';
 
 // Mock the api module
 vi.mock('../api', () => ({
@@ -15,7 +15,15 @@ import { api } from '../api';
 const mockGetChannelDetail = vi.mocked(api.getChannelDetail);
 
 function makeChannel(key: string, name: string, isHashtag: boolean): Channel {
-  return { key, name, is_hashtag: isHashtag, on_radio: false, last_read_at: null };
+  return {
+    key,
+    name,
+    is_hashtag: isHashtag,
+    on_radio: false,
+    last_read_at: null,
+    favorite: false,
+    muted: false,
+  };
 }
 
 function makeDetail(channel: Channel): ChannelDetail {
@@ -25,6 +33,15 @@ function makeDetail(channel: Channel): ChannelDetail {
     first_message_at: null,
     unique_sender_count: 0,
     top_senders_24h: [],
+    path_hash_width_24h: {
+      total_packets: 0,
+      single_byte: 0,
+      double_byte: 0,
+      triple_byte: 0,
+      single_byte_pct: 0,
+      double_byte_pct: 0,
+      triple_byte_pct: 0,
+    },
   };
 }
 
@@ -32,7 +49,6 @@ const noop = () => {};
 
 const baseProps = {
   onClose: noop,
-  favorites: [] as Favorite[],
   onToggleFavorite: noop,
 };
 

@@ -28,13 +28,30 @@ def cleanup_test_db_dir():
 @pytest.fixture
 async def test_db():
     """Create an in-memory test database with schema + migrations."""
-    from app.repository import channels, contacts, messages, raw_packets, settings
+    from app.repository import (
+        channels,
+        contact_telemetry,
+        contacts,
+        messages,
+        raw_packets,
+        repeater_telemetry,
+        settings,
+    )
     from app.repository import fanout as fanout_repo
 
     db = Database(":memory:")
     await db.connect()
 
-    submodules = [contacts, channels, messages, raw_packets, settings, fanout_repo]
+    submodules = [
+        contacts,
+        channels,
+        messages,
+        raw_packets,
+        settings,
+        fanout_repo,
+        repeater_telemetry,
+        contact_telemetry,
+    ]
     originals = [(mod, mod.db) for mod in submodules]
 
     for mod in submodules:

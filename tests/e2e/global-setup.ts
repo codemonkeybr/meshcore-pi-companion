@@ -1,8 +1,10 @@
 import type { FullConfig } from '@playwright/test';
 
-const BASE_URL = 'http://localhost:8001';
-const MAX_RETRIES = 10;
-const RETRY_DELAY_MS = 2000;
+const BASE_URL = process.env.E2E_BASE_URL ?? 'http://localhost:8001';
+// Post-connect sync (contact offload, channel sync, key export) can take
+// 30-60s on a radio with many contacts, so allow generous polling here.
+const MAX_RETRIES = 60;
+const RETRY_DELAY_MS = 3000;
 
 interface HealthStatus {
   radio_connected: boolean;

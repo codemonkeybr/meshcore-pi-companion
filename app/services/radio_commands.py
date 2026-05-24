@@ -44,6 +44,37 @@ async def apply_radio_config_update(
                 f"Failed to set advert location policy: {result.payload}"
             )
 
+    if update.multi_acks_enabled is not None:
+        multi_acks = 1 if update.multi_acks_enabled else 0
+        logger.info("Setting multi ACKs to %d", multi_acks)
+        result = await mc.commands.set_multi_acks(multi_acks)
+        if result is not None and result.type == EventType.ERROR:
+            raise RadioCommandRejectedError(f"Failed to set multi ACKs: {result.payload}")
+
+    if update.telemetry_mode_base is not None:
+        logger.info("Setting telemetry_mode_base to %d", update.telemetry_mode_base)
+        result = await mc.commands.set_telemetry_mode_base(update.telemetry_mode_base)
+        if result is not None and result.type == EventType.ERROR:
+            raise RadioCommandRejectedError(
+                f"Failed to set telemetry mode (base): {result.payload}"
+            )
+
+    if update.telemetry_mode_loc is not None:
+        logger.info("Setting telemetry_mode_loc to %d", update.telemetry_mode_loc)
+        result = await mc.commands.set_telemetry_mode_loc(update.telemetry_mode_loc)
+        if result is not None and result.type == EventType.ERROR:
+            raise RadioCommandRejectedError(
+                f"Failed to set telemetry mode (location): {result.payload}"
+            )
+
+    if update.telemetry_mode_env is not None:
+        logger.info("Setting telemetry_mode_env to %d", update.telemetry_mode_env)
+        result = await mc.commands.set_telemetry_mode_env(update.telemetry_mode_env)
+        if result is not None and result.type == EventType.ERROR:
+            raise RadioCommandRejectedError(
+                f"Failed to set telemetry mode (environment): {result.payload}"
+            )
+
     if update.name is not None:
         logger.info("Setting radio name to %s", update.name)
         await mc.commands.set_name(update.name)

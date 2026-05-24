@@ -2,22 +2,22 @@ import { useState, useCallback, type MutableRefObject } from 'react';
 import { api } from '../api';
 import { takePrefetchOrFetch } from '../prefetch';
 import { toast } from '../components/ui/sonner';
-import * as messageCache from '../messageCache';
 import { getContactDisplayName } from '../utils/pubkey';
-import type { Channel, Contact, Conversation } from '../types';
-
-const PUBLIC_CHANNEL_KEY = '8B3387E9C5CDEA6AC9E5EDBAA115CD72';
+import { findPublicChannel, PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME } from '../utils/publicChannel';
+import type { BulkCreateHashtagChannelsResult, Channel, Contact, Conversation } from '../types';
 
 interface UseContactsAndChannelsArgs {
   setActiveConversation: (conv: Conversation | null) => void;
   pendingDeleteFallbackRef: MutableRefObject<boolean>;
   hasSetDefaultConversation: MutableRefObject<boolean>;
+  removeConversationMessages: (conversationId: string) => void;
 }
 
 export function useContactsAndChannels({
   setActiveConversation,
   pendingDeleteFallbackRef,
   hasSetDefaultConversation,
+  removeConversationMessages,
 }: UseContactsAndChannelsArgs) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactsLoaded, setContactsLoaded] = useState(false);
@@ -50,8 +50,8 @@ export function useContactsAndChannels({
   }, []);
 
   const handleCreateContact = useCallback(
-    async (name: string, publicKey: string, tryHistorical: boolean) => {
-      const created = await api.createContact(publicKey, name || undefined, tryHistorical);
+    async (name: string, publicKey: string, tryHistorical: boolean, type?: number) => {
+      const created = await api.createContact(publicKey, name || undefined, tryHistorical, type);
       const data = await fetchAllContacts();
       setContacts(data);
 
@@ -112,23 +112,39 @@ export function useContactsAndChannels({
     [fetchUndecryptedCountInternal, setActiveConversation]
   );
 
+  const handleBulkCreateHashtagChannels = useCallback(
+    async (
+      channelNames: string[],
+      tryHistorical: boolean
+    ): Promise<BulkCreateHashtagChannelsResult> => {
+      const result = await api.bulkCreateHashtagChannels(channelNames, tryHistorical);
+      const data = await api.getChannels();
+      setChannels(data);
+
+      if (tryHistorical && result.decrypt_started) {
+        fetchUndecryptedCountInternal();
+      }
+
+      return result;
+    },
+    [fetchUndecryptedCountInternal]
+  );
+
   const handleDeleteChannel = useCallback(
     async (key: string) => {
       if (!confirm('Delete this channel? Message history will be preserved.')) return;
       try {
         pendingDeleteFallbackRef.current = true;
         await api.deleteChannel(key);
-        messageCache.remove(key);
+        removeConversationMessages(key);
         const refreshedChannels = await api.getChannels();
         setChannels(refreshedChannels);
-        const publicChannel =
-          refreshedChannels.find((c) => c.key === PUBLIC_CHANNEL_KEY) ||
-          refreshedChannels.find((c) => c.name === 'Public');
+        const publicChannel = findPublicChannel(refreshedChannels);
         hasSetDefaultConversation.current = true;
         setActiveConversation({
           type: 'channel',
           id: publicChannel?.key || PUBLIC_CHANNEL_KEY,
-          name: publicChannel?.name || 'Public',
+          name: publicChannel?.name || PUBLIC_CHANNEL_NAME,
         });
         toast.success('Channel deleted');
       } catch (err) {
@@ -138,7 +154,12 @@ export function useContactsAndChannels({
         });
       }
     },
-    [setActiveConversation, pendingDeleteFallbackRef, hasSetDefaultConversation]
+    [
+      hasSetDefaultConversation,
+      pendingDeleteFallbackRef,
+      removeConversationMessages,
+      setActiveConversation,
+    ]
   );
 
   const handleDeleteContact = useCallback(
@@ -147,18 +168,16 @@ export function useContactsAndChannels({
       try {
         pendingDeleteFallbackRef.current = true;
         await api.deleteContact(publicKey);
-        messageCache.remove(publicKey);
+        removeConversationMessages(publicKey);
         setContacts((prev) => prev.filter((c) => c.public_key !== publicKey));
         const refreshedChannels = await api.getChannels();
         setChannels(refreshedChannels);
-        const publicChannel =
-          refreshedChannels.find((c) => c.key === PUBLIC_CHANNEL_KEY) ||
-          refreshedChannels.find((c) => c.name === 'Public');
+        const publicChannel = findPublicChannel(refreshedChannels);
         hasSetDefaultConversation.current = true;
         setActiveConversation({
           type: 'channel',
           id: publicChannel?.key || PUBLIC_CHANNEL_KEY,
-          name: publicChannel?.name || 'Public',
+          name: publicChannel?.name || PUBLIC_CHANNEL_NAME,
         });
         toast.success('Contact deleted');
       } catch (err) {
@@ -168,7 +187,12 @@ export function useContactsAndChannels({
         });
       }
     },
-    [setActiveConversation, pendingDeleteFallbackRef, hasSetDefaultConversation]
+    [
+      hasSetDefaultConversation,
+      pendingDeleteFallbackRef,
+      removeConversationMessages,
+      setActiveConversation,
+    ]
   );
 
   return {
@@ -184,6 +208,7 @@ export function useContactsAndChannels({
     handleCreateContact,
     handleCreateChannel,
     handleCreateHashtagChannel,
+    handleBulkCreateHashtagChannels,
     handleDeleteChannel,
     handleDeleteContact,
   };

@@ -56,6 +56,50 @@ class TestUndecryptedCount:
         assert response.json()["count"] == 3
 
 
+class TestGetRawPacket:
+    """Test GET /api/packets/{id}."""
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_missing(self, test_db, client):
+        response = await client.get("/api/packets/999999")
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_returns_linked_packet_details(self, test_db, client):
+        channel_key = "DEADBEEF" * 4
+        await ChannelRepository.upsert(key=channel_key, name="#ops", is_hashtag=False)
+        packet_id, _ = await RawPacketRepository.create(b"\x09\x00test-packet", 1700000000)
+        msg_id = await MessageRepository.create(
+            msg_type="CHAN",
+            text="Alice: hello",
+            conversation_key=channel_key,
+            sender_timestamp=1700000000,
+            received_at=1700000000,
+            sender_name="Alice",
+        )
+        assert msg_id is not None
+        await RawPacketRepository.mark_decrypted(packet_id, msg_id)
+
+        response = await client.get(f"/api/packets/{packet_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == packet_id
+        assert data["timestamp"] == 1700000000
+        assert data["data"] == "0900746573742d7061636b6574"
+        assert data["decrypted"] is True
+        assert data["decrypted_info"] == {
+            "channel_name": "#ops",
+            "sender": "Alice",
+            "channel_key": channel_key,
+            "contact_key": None,
+            "sender_timestamp": 1700000000,
+            "message": "Alice: hello",
+        }
+
+
 class TestDecryptHistoricalPackets:
     """Test POST /api/packets/decrypt/historical."""
 
@@ -72,7 +116,7 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["started"] is True
         assert data["total_packets"] == 5
@@ -91,7 +135,7 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["started"] is True
         assert data["total_packets"] == 3
@@ -107,10 +151,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "invalid" in data["message"].lower()
+        assert "invalid" in data["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_channel_decrypt_wrong_key_length(self, test_db, client):
@@ -123,10 +166,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "16 bytes" in data["message"]
+        assert "16 bytes" in data["detail"]
 
     @pytest.mark.asyncio
     async def test_channel_decrypt_no_key_or_name(self, test_db, client):
@@ -136,10 +178,9 @@ class TestDecryptHistoricalPackets:
             json={"key_type": "channel"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "must provide" in data["message"].lower()
+        assert "must provide" in data["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_channel_decrypt_no_undecrypted_packets(self, test_db, client):
@@ -172,7 +213,7 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert response.json()["started"] is True
 
     @pytest.mark.asyncio
@@ -186,10 +227,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "private_key" in data["message"].lower()
+        assert "private_key" in data["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_contact_decrypt_missing_contact_key(self, test_db, client):
@@ -202,10 +242,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "contact_public_key" in data["message"].lower()
+        assert "contact_public_key" in data["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_contact_decrypt_wrong_private_key_length(self, test_db, client):
@@ -219,10 +258,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "64 bytes" in data["message"]
+        assert "64 bytes" in data["detail"]
 
     @pytest.mark.asyncio
     async def test_contact_decrypt_wrong_public_key_length(self, test_db, client):
@@ -236,10 +274,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "32 bytes" in data["message"]
+        assert "32 bytes" in data["detail"]
 
     @pytest.mark.asyncio
     async def test_contact_decrypt_invalid_hex(self, test_db, client):
@@ -253,10 +290,9 @@ class TestDecryptHistoricalPackets:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "invalid" in data["message"].lower()
+        assert "invalid" in data["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_invalid_key_type(self, test_db, client):
@@ -266,10 +302,55 @@ class TestDecryptHistoricalPackets:
             json={"key_type": "invalid"},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
-        assert data["started"] is False
-        assert "key_type" in data["message"].lower()
+        assert "key_type" in data["detail"].lower()
+
+
+class TestUndecryptedTextPacketStreaming:
+    @pytest.mark.asyncio
+    async def test_count_undecrypted_text_messages_uses_keyset_pagination(self, test_db):
+        """Counting undecrypted DM packets should use keyset pagination and filter by payload type."""
+
+        # Simulate keyset pagination: each execute() call returns a cursor
+        # whose fetchall() yields one batch.  The generator stops when a
+        # batch is empty.
+        batches = [
+            [
+                {"id": 1, "data": b"\x09\x00dm", "timestamp": 1000},
+                {"id": 2, "data": b"\x15\x00chan", "timestamp": 1001},
+            ],
+            [{"id": 3, "data": b"\x09\x00dm2", "timestamp": 1002}],
+            [],
+        ]
+
+        def fake_execute(*_args, **_kwargs):
+            batch = batches.pop(0)
+
+            class FakeCursor:
+                async def fetchall(self):
+                    return batch
+
+                async def close(self):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            # aiosqlite's execute() returns a `contextmanager`-decorated
+            # coroutine that is both awaitable and usable as an async-with.
+            # Our repo code now uses `async with conn.execute(...) as cursor:`,
+            # so the mock just needs to return something with __aenter__/__aexit__.
+            return FakeCursor()
+
+        with patch.object(test_db.conn, "execute", side_effect=fake_execute):
+            count = await RawPacketRepository.count_undecrypted_text_messages(batch_size=2)
+
+        # header byte 0x09 -> payload type 2 (TEXT_MESSAGE); 0x15 -> type 5 (not TEXT_MESSAGE)
+        assert count == 2
 
 
 class TestRunHistoricalChannelDecryption:

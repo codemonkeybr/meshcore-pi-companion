@@ -9,6 +9,7 @@ The path_len wire byte is packed as [hash_mode:2][hop_count:6]:
 Mode 3 (hash_size=4) is reserved and rejected.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 MAX_PATH_SIZE = 64
@@ -153,12 +154,12 @@ def first_hop_hex(path_hex: str, hop_count: int) -> str | None:
 def normalize_contact_route(
     path_hex: str | None,
     path_len: int | None,
-    out_path_hash_mode: int | None,
+    path_hash_mode: int | None,
 ) -> tuple[str, int, int]:
     """Normalize stored contact route fields.
 
     Handles legacy/bad rows where the packed wire path byte was stored directly
-    in `last_path_len` (sometimes as a signed byte, e.g. `-125` for `0x83`).
+    in the hop-count column (sometimes as a signed byte, e.g. `-125` for `0x83`).
     Returns `(path_hex, hop_count, hash_mode)`.
     """
     normalized_path = path_hex or ""
@@ -169,7 +170,7 @@ def normalize_contact_route(
         normalized_len = -1
 
     try:
-        normalized_mode = int(out_path_hash_mode) if out_path_hash_mode is not None else None
+        normalized_mode = int(path_hash_mode) if path_hash_mode is not None else None
     except (TypeError, ValueError):
         normalized_mode = None
 
@@ -207,7 +208,7 @@ def normalize_contact_route(
 def normalize_route_override(
     path_hex: str | None,
     path_len: int | None,
-    out_path_hash_mode: int | None,
+    path_hash_mode: int | None,
 ) -> tuple[str | None, int | None, int | None]:
     """Normalize optional route-override fields while preserving the unset state."""
     if path_len is None:
@@ -216,7 +217,7 @@ def normalize_route_override(
     normalized_path, normalized_len, normalized_mode = normalize_contact_route(
         path_hex,
         path_len,
-        out_path_hash_mode,
+        path_hash_mode,
     )
     return normalized_path, normalized_len, normalized_mode
 
@@ -244,3 +245,47 @@ def parse_explicit_hop_route(route_text: str) -> tuple[str, int, int]:
         raise ValueError(f"Explicit path exceeds MAX_PATH_SIZE={MAX_PATH_SIZE} bytes")
 
     return "".join(hops), len(hops), hash_size - 1
+
+
+def bucket_path_hash_widths(rows: Iterable) -> dict[str, int | float]:
+    """Bucket raw packet rows by hop hash width and return counts + percentages.
+
+    *rows* must be an already-fetched list whose elements have a ``data``
+    column containing raw packet bytes.
+    """
+    single_byte = 0
+    double_byte = 0
+    triple_byte = 0
+
+    for row in rows:
+        envelope = parse_packet_envelope(bytes(row["data"]))
+        if envelope is None:
+            continue
+        if envelope.hash_size == 1:
+            single_byte += 1
+        elif envelope.hash_size == 2:
+            double_byte += 1
+        elif envelope.hash_size == 3:
+            triple_byte += 1
+
+    total = single_byte + double_byte + triple_byte
+    if total == 0:
+        return {
+            "total_packets": 0,
+            "single_byte": 0,
+            "double_byte": 0,
+            "triple_byte": 0,
+            "single_byte_pct": 0.0,
+            "double_byte_pct": 0.0,
+            "triple_byte_pct": 0.0,
+        }
+
+    return {
+        "total_packets": total,
+        "single_byte": single_byte,
+        "double_byte": double_byte,
+        "triple_byte": triple_byte,
+        "single_byte_pct": (single_byte / total) * 100,
+        "double_byte_pct": (double_byte / total) * 100,
+        "triple_byte_pct": (triple_byte / total) * 100,
+    }

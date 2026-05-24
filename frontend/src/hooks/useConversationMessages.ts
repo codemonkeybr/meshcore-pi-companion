@@ -1,34 +1,210 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type Dispatch,
-  type MutableRefObject,
-  type SetStateAction,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from '../components/ui/sonner';
 import { api, isAbortError } from '../api';
-import * as messageCache from '../messageCache';
 import type { Conversation, Message, MessagePath } from '../types';
+import { getMessageContentKey } from '../utils/messageIdentity';
 
 const MAX_PENDING_ACKS = 500;
 const MESSAGE_PAGE_SIZE = 200;
+export const MAX_CACHED_CONVERSATIONS = 20;
+export const MAX_MESSAGES_PER_ENTRY = 200;
+
+interface CachedConversationEntry {
+  messages: Message[];
+  hasOlderMessages: boolean;
+}
+
+interface InternalCachedConversationEntry extends CachedConversationEntry {
+  contentKeys: Set<string>;
+}
+
+export class ConversationMessageCache {
+  private readonly cache = new Map<string, InternalCachedConversationEntry>();
+
+  private normalizeEntry(entry: CachedConversationEntry): InternalCachedConversationEntry {
+    let messages = entry.messages;
+    let hasOlderMessages = entry.hasOlderMessages;
+
+    if (messages.length > MAX_MESSAGES_PER_ENTRY) {
+      messages = [...messages]
+        .sort((a, b) => b.received_at - a.received_at)
+        .slice(0, MAX_MESSAGES_PER_ENTRY);
+      hasOlderMessages = true;
+    }
+
+    return {
+      messages,
+      hasOlderMessages,
+      contentKeys: new Set(messages.map((message) => getMessageContentKey(message))),
+    };
+  }
+
+  get(id: string): CachedConversationEntry | undefined {
+    const entry = this.cache.get(id);
+    if (!entry) return undefined;
+    this.cache.delete(id);
+    this.cache.set(id, entry);
+    return {
+      messages: entry.messages,
+      hasOlderMessages: entry.hasOlderMessages,
+    };
+  }
+
+  set(id: string, entry: CachedConversationEntry): void {
+    const internalEntry = this.normalizeEntry(entry);
+    this.cache.delete(id);
+    this.cache.set(id, internalEntry);
+    if (this.cache.size > MAX_CACHED_CONVERSATIONS) {
+      const lruKey = this.cache.keys().next().value as string;
+      this.cache.delete(lruKey);
+    }
+  }
+
+  addMessage(id: string, msg: Message): boolean {
+    const entry = this.cache.get(id);
+    const contentKey = getMessageContentKey(msg);
+    if (!entry) {
+      this.cache.set(id, {
+        messages: [msg],
+        hasOlderMessages: true,
+        contentKeys: new Set([contentKey]),
+      });
+      if (this.cache.size > MAX_CACHED_CONVERSATIONS) {
+        const lruKey = this.cache.keys().next().value as string;
+        this.cache.delete(lruKey);
+      }
+      return true;
+    }
+    if (entry.contentKeys.has(contentKey)) return false;
+    if (entry.messages.some((message) => message.id === msg.id)) return false;
+    const nextEntry = this.normalizeEntry({
+      messages: [...entry.messages, msg],
+      hasOlderMessages: entry.hasOlderMessages,
+    });
+    this.cache.delete(id);
+    this.cache.set(id, nextEntry);
+    return true;
+  }
+
+  updateAck(
+    messageId: number,
+    ackCount: number,
+    paths?: MessagePath[],
+    packetId?: number | null
+  ): void {
+    for (const entry of this.cache.values()) {
+      const index = entry.messages.findIndex((message) => message.id === messageId);
+      if (index < 0) continue;
+      const current = entry.messages[index];
+      const updated = [...entry.messages];
+      updated[index] = {
+        ...current,
+        acked: Math.max(current.acked, ackCount),
+        ...(paths !== undefined && paths.length >= (current.paths?.length ?? 0) && { paths }),
+        ...(packetId !== undefined && { packet_id: packetId }),
+      };
+      entry.messages = updated;
+      return;
+    }
+  }
+
+  remove(id: string): void {
+    this.cache.delete(id);
+  }
+
+  rename(oldId: string, newId: string): void {
+    if (oldId === newId) return;
+    const oldEntry = this.cache.get(oldId);
+    if (!oldEntry) return;
+
+    const newEntry = this.cache.get(newId);
+    if (!newEntry) {
+      this.cache.delete(oldId);
+      this.cache.set(newId, oldEntry);
+      return;
+    }
+
+    const mergedMessages = [...newEntry.messages];
+    const seenIds = new Set(mergedMessages.map((message) => message.id));
+    for (const message of oldEntry.messages) {
+      if (!seenIds.has(message.id)) {
+        mergedMessages.push(message);
+        seenIds.add(message.id);
+      }
+    }
+
+    this.cache.delete(oldId);
+    this.cache.set(
+      newId,
+      this.normalizeEntry({
+        messages: mergedMessages,
+        hasOlderMessages: newEntry.hasOlderMessages || oldEntry.hasOlderMessages,
+      })
+    );
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+export function reconcileConversationMessages(
+  current: Message[],
+  fetched: Message[]
+): Message[] | null {
+  const currentById = new Map<
+    number,
+    { acked: number; pathsLen: number; text: string; packetId: number | null | undefined }
+  >();
+  for (const message of current) {
+    currentById.set(message.id, {
+      acked: message.acked,
+      pathsLen: message.paths?.length ?? 0,
+      text: message.text,
+      packetId: message.packet_id,
+    });
+  }
+
+  let needsUpdate = false;
+  for (const message of fetched) {
+    const currentMessage = currentById.get(message.id);
+    if (
+      !currentMessage ||
+      currentMessage.acked !== message.acked ||
+      currentMessage.pathsLen !== (message.paths?.length ?? 0) ||
+      currentMessage.text !== message.text ||
+      currentMessage.packetId !== message.packet_id
+    ) {
+      needsUpdate = true;
+      break;
+    }
+  }
+  if (!needsUpdate) return null;
+
+  const fetchedIds = new Set(fetched.map((message) => message.id));
+  const olderMessages = current.filter((message) => !fetchedIds.has(message.id));
+  return [...fetched, ...olderMessages];
+}
+
+export const conversationMessageCache = new ConversationMessageCache();
 
 interface PendingAckUpdate {
   ackCount: number;
   paths?: MessagePath[];
+  packetId?: number | null;
 }
 
 export function mergePendingAck(
   existing: PendingAckUpdate | undefined,
   ackCount: number,
-  paths?: MessagePath[]
+  paths?: MessagePath[],
+  packetId?: number | null
 ): PendingAckUpdate {
   if (!existing) {
     return {
       ackCount,
       ...(paths !== undefined && { paths }),
+      ...(packetId !== undefined && { packetId }),
     };
   }
 
@@ -37,6 +213,9 @@ export function mergePendingAck(
       ackCount,
       ...(paths !== undefined && { paths }),
       ...(paths === undefined && existing.paths !== undefined && { paths: existing.paths }),
+      ...(packetId !== undefined && { packetId }),
+      ...(packetId === undefined &&
+        existing.packetId !== undefined && { packetId: existing.packetId }),
     };
   }
 
@@ -44,25 +223,31 @@ export function mergePendingAck(
     return existing;
   }
 
+  const packetIdChanged = packetId !== undefined && packetId !== existing.packetId;
+
   if (paths === undefined) {
-    return existing;
+    if (!packetIdChanged) {
+      return existing;
+    }
+    return {
+      ...existing,
+      packetId,
+    };
   }
 
   const existingPathCount = existing.paths?.length ?? -1;
   if (paths.length >= existingPathCount) {
-    return { ackCount, paths };
+    return { ackCount, paths, ...(packetId !== undefined && { packetId }) };
   }
 
-  return existing;
-}
+  if (!packetIdChanged) {
+    return existing;
+  }
 
-// Generate a key for deduplicating messages by content
-export function getMessageContentKey(msg: Message): string {
-  // When sender_timestamp exists, dedup by content (catches radio-path duplicates with different IDs).
-  // When null, include msg.id so each message gets a unique key — avoids silently dropping
-  // different messages that share the same text and received_at second.
-  const ts = msg.sender_timestamp ?? `r${msg.received_at}-${msg.id}`;
-  return `${msg.type}-${msg.conversation_key}-${msg.text}-${ts}`;
+  return {
+    ...existing,
+    packetId,
+  };
 }
 
 interface UseConversationMessagesResult {
@@ -72,18 +257,41 @@ interface UseConversationMessagesResult {
   hasOlderMessages: boolean;
   hasNewerMessages: boolean;
   loadingNewer: boolean;
-  hasNewerMessagesRef: MutableRefObject<boolean>;
-  setMessages: Dispatch<SetStateAction<Message[]>>;
   fetchOlderMessages: () => Promise<void>;
   fetchNewerMessages: () => Promise<void>;
   jumpToBottom: () => void;
-  addMessageIfNew: (msg: Message) => boolean;
-  updateMessageAck: (messageId: number, ackCount: number, paths?: MessagePath[]) => void;
-  triggerReconcile: () => void;
+  reloadCurrentConversation: () => void;
+  observeMessage: (msg: Message) => { added: boolean; activeConversation: boolean };
+  receiveMessageAck: (
+    messageId: number,
+    ackCount: number,
+    paths?: MessagePath[],
+    packetId?: number | null
+  ) => void;
+  reconcileOnReconnect: () => void;
+  renameConversationMessages: (oldId: string, newId: string) => void;
+  removeConversationMessages: (conversationId: string) => void;
+  clearConversationMessages: () => void;
 }
 
 function isMessageConversation(conversation: Conversation | null): conversation is Conversation {
-  return !!conversation && !['raw', 'map', 'visualizer', 'search'].includes(conversation.type);
+  return (
+    !!conversation && !['raw', 'map', 'visualizer', 'search', 'trace'].includes(conversation.type)
+  );
+}
+
+function isActiveConversationMessage(
+  activeConversation: Conversation | null,
+  msg: Message
+): boolean {
+  if (!activeConversation) return false;
+  if (msg.type === 'CHAN' && activeConversation.type === 'channel') {
+    return msg.conversation_key === activeConversation.id;
+  }
+  if (msg.type === 'PRIV' && activeConversation.type === 'contact') {
+    return msg.conversation_key === activeConversation.id;
+  }
+  return false;
 }
 
 function appendUniqueMessages(current: Message[], incoming: Message[]): Message[] {
@@ -122,9 +330,9 @@ export function useConversationMessages(
   const pendingAcksRef = useRef<Map<number, PendingAckUpdate>>(new Map());
 
   const setPendingAck = useCallback(
-    (messageId: number, ackCount: number, paths?: MessagePath[]) => {
+    (messageId: number, ackCount: number, paths?: MessagePath[], packetId?: number | null) => {
       const existing = pendingAcksRef.current.get(messageId);
-      const merged = mergePendingAck(existing, ackCount, paths);
+      const merged = mergePendingAck(existing, ackCount, paths, packetId);
 
       // Update insertion order so most recent updates remain in the buffer longest.
       pendingAcksRef.current.delete(messageId);
@@ -150,6 +358,7 @@ export function useConversationMessages(
       ...msg,
       acked: Math.max(msg.acked, pending.ackCount),
       ...(pending.paths !== undefined && { paths: pending.paths }),
+      ...(pending.packetId !== undefined && { packet_id: pending.packetId }),
     };
   }, []);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -160,13 +369,21 @@ export function useConversationMessages(
   const [loadingNewer, setLoadingNewer] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const olderAbortControllerRef = useRef<AbortController | null>(null);
+  const newerAbortControllerRef = useRef<AbortController | null>(null);
   const fetchingConversationIdRef = useRef<string | null>(null);
+  const activeConversationRef = useRef(activeConversation);
+  activeConversationRef.current = activeConversation;
   const latestReconcileRequestIdRef = useRef(0);
+  const pendingReconnectReconcileRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
   const loadingOlderRef = useRef(false);
+  const loadingNewerRef = useRef(false);
   const hasOlderMessagesRef = useRef(false);
   const hasNewerMessagesRef = useRef(false);
   const prevConversationIdRef = useRef<string | null>(null);
+  const prevReloadVersionRef = useRef(0);
+  const [reloadVersion, setReloadVersion] = useState(0);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -175,6 +392,10 @@ export function useConversationMessages(
   useEffect(() => {
     loadingOlderRef.current = loadingOlder;
   }, [loadingOlder]);
+
+  useEffect(() => {
+    loadingNewerRef.current = loadingNewer;
+  }, [loadingNewer]);
 
   useEffect(() => {
     hasOlderMessagesRef.current = hasOlderMessages;
@@ -203,6 +424,7 @@ export function useConversationMessages(
       }
 
       const conversationId = activeConversation.id;
+      pendingReconnectReconcileRef.current = false;
 
       if (showLoading) {
         setMessagesLoading(true);
@@ -224,7 +446,7 @@ export function useConversationMessages(
         }
 
         const messagesWithPendingAck = data.map((msg) => applyPendingAck(msg));
-        const merged = messageCache.reconcile(messagesRef.current, messagesWithPendingAck);
+        const merged = reconcileConversationMessages(messagesRef.current, messagesWithPendingAck);
         const nextMessages = merged ?? messagesRef.current;
         if (merged) {
           setMessages(merged);
@@ -266,7 +488,7 @@ export function useConversationMessages(
 
           const dataWithPendingAck = data.map((msg) => applyPendingAck(msg));
           setHasOlderMessages(dataWithPendingAck.length >= MESSAGE_PAGE_SIZE);
-          const merged = messageCache.reconcile(messagesRef.current, dataWithPendingAck);
+          const merged = reconcileConversationMessages(messagesRef.current, dataWithPendingAck);
           if (!merged) return;
 
           setMessages(merged);
@@ -290,7 +512,7 @@ export function useConversationMessages(
     }
 
     const conversationId = activeConversation.id;
-    const oldestMessage = messages.reduce(
+    const oldestMessage = messagesRef.current.reduce(
       (oldest, msg) => {
         if (!oldest) return msg;
         if (msg.received_at < oldest.received_at) return msg;
@@ -303,14 +525,19 @@ export function useConversationMessages(
 
     loadingOlderRef.current = true;
     setLoadingOlder(true);
+    const controller = new AbortController();
+    olderAbortControllerRef.current = controller;
     try {
-      const data = await api.getMessages({
-        type: activeConversation.type === 'channel' ? 'CHAN' : 'PRIV',
-        conversation_key: conversationId,
-        limit: MESSAGE_PAGE_SIZE,
-        before: oldestMessage.received_at,
-        before_id: oldestMessage.id,
-      });
+      const data = await api.getMessages(
+        {
+          type: activeConversation.type === 'channel' ? 'CHAN' : 'PRIV',
+          conversation_key: conversationId,
+          limit: MESSAGE_PAGE_SIZE,
+          before: oldestMessage.received_at,
+          before_id: oldestMessage.id,
+        },
+        controller.signal
+      );
 
       if (fetchingConversationIdRef.current !== conversationId) return;
 
@@ -332,21 +559,33 @@ export function useConversationMessages(
       }
       setHasOlderMessages(dataWithPendingAck.length >= MESSAGE_PAGE_SIZE);
     } catch (err) {
+      if (isAbortError(err)) {
+        return;
+      }
       console.error('Failed to fetch older messages:', err);
       toast.error('Failed to load older messages', {
         description: err instanceof Error ? err.message : 'Check your connection',
       });
     } finally {
+      if (olderAbortControllerRef.current === controller) {
+        olderAbortControllerRef.current = null;
+      }
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-  }, [activeConversation, applyPendingAck, messages, syncSeenContent]);
+  }, [activeConversation, applyPendingAck, syncSeenContent]);
 
   const fetchNewerMessages = useCallback(async () => {
-    if (!isMessageConversation(activeConversation) || loadingNewer || !hasNewerMessages) return;
+    if (
+      !isMessageConversation(activeConversation) ||
+      loadingNewerRef.current ||
+      !hasNewerMessagesRef.current
+    ) {
+      return;
+    }
 
     const conversationId = activeConversation.id;
-    const newestMessage = messages.reduce(
+    const newestMessage = messagesRef.current.reduce(
       (newest, msg) => {
         if (!newest) return msg;
         if (msg.received_at > newest.received_at) return msg;
@@ -357,15 +596,21 @@ export function useConversationMessages(
     );
     if (!newestMessage) return;
 
+    loadingNewerRef.current = true;
     setLoadingNewer(true);
+    const controller = new AbortController();
+    newerAbortControllerRef.current = controller;
     try {
-      const data = await api.getMessages({
-        type: activeConversation.type === 'channel' ? 'CHAN' : 'PRIV',
-        conversation_key: conversationId,
-        limit: MESSAGE_PAGE_SIZE,
-        after: newestMessage.received_at,
-        after_id: newestMessage.id,
-      });
+      const data = await api.getMessages(
+        {
+          type: activeConversation.type === 'channel' ? 'CHAN' : 'PRIV',
+          conversation_key: conversationId,
+          limit: MESSAGE_PAGE_SIZE,
+          after: newestMessage.received_at,
+          after_id: newestMessage.id,
+        },
+        controller.signal
+      );
 
       if (fetchingConversationIdRef.current !== conversationId) return;
 
@@ -380,46 +625,90 @@ export function useConversationMessages(
           seenMessageContent.current.add(getMessageContentKey(msg));
         }
       }
-      setHasNewerMessages(dataWithPendingAck.length >= MESSAGE_PAGE_SIZE);
+      const stillHasNewerMessages = dataWithPendingAck.length >= MESSAGE_PAGE_SIZE;
+      setHasNewerMessages(stillHasNewerMessages);
+      if (!stillHasNewerMessages && pendingReconnectReconcileRef.current) {
+        pendingReconnectReconcileRef.current = false;
+        const requestId = latestReconcileRequestIdRef.current + 1;
+        latestReconcileRequestIdRef.current = requestId;
+        const reconcileController = new AbortController();
+        reconcileFromBackend(activeConversation, reconcileController.signal, requestId);
+      }
     } catch (err) {
+      if (isAbortError(err)) {
+        return;
+      }
       console.error('Failed to fetch newer messages:', err);
       toast.error('Failed to load newer messages', {
         description: err instanceof Error ? err.message : 'Check your connection',
       });
     } finally {
+      if (newerAbortControllerRef.current === controller) {
+        newerAbortControllerRef.current = null;
+      }
+      loadingNewerRef.current = false;
       setLoadingNewer(false);
     }
-  }, [activeConversation, applyPendingAck, hasNewerMessages, loadingNewer, messages]);
+  }, [activeConversation, applyPendingAck, reconcileFromBackend]);
 
   const jumpToBottom = useCallback(() => {
     if (!activeConversation) return;
     setHasNewerMessages(false);
-    messageCache.remove(activeConversation.id);
+    conversationMessageCache.remove(activeConversation.id);
     void fetchLatestMessages(true);
   }, [activeConversation, fetchLatestMessages]);
 
-  const triggerReconcile = useCallback(() => {
+  const reloadCurrentConversation = useCallback(() => {
     if (!isMessageConversation(activeConversation)) return;
+    setHasNewerMessages(false);
+    conversationMessageCache.remove(activeConversation.id);
+    setReloadVersion((current) => current + 1);
+  }, [activeConversation]);
+
+  const reconcileOnReconnect = useCallback(() => {
+    // Read the current conversation from the ref rather than closing over
+    // activeConversation, so that a conversation switch during WS reconnect
+    // targets the right conversation instead of a stale capture.
+    const current = activeConversationRef.current;
+    if (!isMessageConversation(current)) return;
+
+    if (hasNewerMessagesRef.current) {
+      pendingReconnectReconcileRef.current = true;
+      return;
+    }
+
+    pendingReconnectReconcileRef.current = false;
     const controller = new AbortController();
     const requestId = latestReconcileRequestIdRef.current + 1;
     latestReconcileRequestIdRef.current = requestId;
-    reconcileFromBackend(activeConversation, controller.signal, requestId);
-  }, [activeConversation, reconcileFromBackend]);
+    reconcileFromBackend(current, controller.signal, requestId);
+  }, [reconcileFromBackend]);
 
   useEffect(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
+    if (olderAbortControllerRef.current) {
+      olderAbortControllerRef.current.abort();
+      olderAbortControllerRef.current = null;
+    }
+    if (newerAbortControllerRef.current) {
+      newerAbortControllerRef.current.abort();
+      newerAbortControllerRef.current = null;
+    }
 
     const prevId = prevConversationIdRef.current;
     const newId = activeConversation?.id ?? null;
     const conversationChanged = prevId !== newId;
+    const reloadRequested = prevReloadVersionRef.current !== reloadVersion;
     fetchingConversationIdRef.current = newId;
     prevConversationIdRef.current = newId;
+    prevReloadVersionRef.current = reloadVersion;
     latestReconcileRequestIdRef.current = 0;
+    pendingReconnectReconcileRef.current = false;
 
     // Preserve around-loaded context on the same conversation when search clears targetMessageId.
-    if (!conversationChanged && !targetMessageId) {
+    if (!conversationChanged && !targetMessageId && !reloadRequested) {
       return;
     }
 
@@ -436,9 +725,8 @@ export function useConversationMessages(
       messagesRef.current.length > 0 &&
       !hasNewerMessagesRef.current
     ) {
-      messageCache.set(prevId, {
+      conversationMessageCache.set(prevId, {
         messages: messagesRef.current,
-        seenContent: new Set(seenMessageContent.current),
         hasOlderMessages: hasOlderMessagesRef.current,
       });
     }
@@ -480,10 +768,12 @@ export function useConversationMessages(
           setMessagesLoading(false);
         });
     } else {
-      const cached = messageCache.get(activeConversation.id);
+      const cached = conversationMessageCache.get(activeConversation.id);
       if (cached) {
         setMessages(cached.messages);
-        seenMessageContent.current = new Set(cached.seenContent);
+        seenMessageContent.current = new Set(
+          cached.messages.map((message) => getMessageContentKey(message))
+        );
         setHasOlderMessages(cached.hasOlderMessages);
         setMessagesLoading(false);
         const requestId = latestReconcileRequestIdRef.current + 1;
@@ -498,11 +788,10 @@ export function useConversationMessages(
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConversation?.id, activeConversation?.type, targetMessageId]);
+  }, [activeConversation?.id, activeConversation?.type, targetMessageId, reloadVersion]);
 
-  // Add a message if it's new (deduplication)
-  // Returns true if the message was added, false if it was a duplicate
-  const addMessageIfNew = useCallback(
+  // Add a message to the active conversation if it is new.
+  const appendActiveMessageIfNew = useCallback(
     (msg: Message): boolean => {
       const msgWithPendingAck = applyPendingAck(msg);
       const contentKey = getMessageContentKey(msgWithPendingAck);
@@ -537,10 +826,10 @@ export function useConversationMessages(
 
   // Update a message's ack count and paths
   const updateMessageAck = useCallback(
-    (messageId: number, ackCount: number, paths?: MessagePath[]) => {
+    (messageId: number, ackCount: number, paths?: MessagePath[], packetId?: number | null) => {
       const hasMessageLoaded = messagesRef.current.some((m) => m.id === messageId);
       if (!hasMessageLoaded) {
-        setPendingAck(messageId, ackCount, paths);
+        setPendingAck(messageId, ackCount, paths, packetId);
         return;
       }
 
@@ -562,15 +851,66 @@ export function useConversationMessages(
             ...current,
             acked: nextAck,
             ...(paths !== undefined && { paths: nextPaths }),
+            ...(packetId !== undefined && { packet_id: packetId }),
           };
           return updated;
         }
-        setPendingAck(messageId, ackCount, paths);
+        setPendingAck(messageId, ackCount, paths, packetId);
         return prev;
       });
     },
     [messagesRef, setMessages, setPendingAck]
   );
+
+  const receiveMessageAck = useCallback(
+    (messageId: number, ackCount: number, paths?: MessagePath[], packetId?: number | null) => {
+      updateMessageAck(messageId, ackCount, paths, packetId);
+      conversationMessageCache.updateAck(messageId, ackCount, paths, packetId);
+    },
+    [updateMessageAck]
+  );
+
+  const observeMessage = useCallback(
+    (msg: Message): { added: boolean; activeConversation: boolean } => {
+      const msgWithPendingAck = applyPendingAck(msg);
+      const activeConversationMessage = isActiveConversationMessage(
+        activeConversation,
+        msgWithPendingAck
+      );
+
+      if (activeConversationMessage) {
+        if (hasNewerMessagesRef.current) {
+          return { added: false, activeConversation: true };
+        }
+
+        return {
+          added: appendActiveMessageIfNew(msgWithPendingAck),
+          activeConversation: true,
+        };
+      }
+
+      return {
+        added: conversationMessageCache.addMessage(
+          msgWithPendingAck.conversation_key,
+          msgWithPendingAck
+        ),
+        activeConversation: false,
+      };
+    },
+    [activeConversation, appendActiveMessageIfNew, applyPendingAck, hasNewerMessagesRef]
+  );
+
+  const renameConversationMessages = useCallback((oldId: string, newId: string) => {
+    conversationMessageCache.rename(oldId, newId);
+  }, []);
+
+  const removeConversationMessages = useCallback((conversationId: string) => {
+    conversationMessageCache.remove(conversationId);
+  }, []);
+
+  const clearConversationMessages = useCallback(() => {
+    conversationMessageCache.clear();
+  }, []);
 
   return {
     messages,
@@ -579,13 +919,15 @@ export function useConversationMessages(
     hasOlderMessages,
     hasNewerMessages,
     loadingNewer,
-    hasNewerMessagesRef,
-    setMessages,
     fetchOlderMessages,
     fetchNewerMessages,
     jumpToBottom,
-    addMessageIfNew,
-    updateMessageAck,
-    triggerReconcile,
+    reloadCurrentConversation,
+    observeMessage,
+    receiveMessageAck,
+    reconcileOnReconnect,
+    renameConversationMessages,
+    removeConversationMessages,
+    clearConversationMessages,
   };
 }

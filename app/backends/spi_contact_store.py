@@ -68,7 +68,7 @@ class SpiContactStore:
             sc = SpiContact(
                 public_key=c.public_key.lower(),
                 name=c.name or "",
-                out_path=_parse_path(c.last_path),
+                out_path=_parse_path(getattr(c, "last_path", c.direct_path)),
             )
             new_cache.append(sc)
             if sc.name:

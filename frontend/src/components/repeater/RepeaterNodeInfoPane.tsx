@@ -16,8 +16,8 @@ export function NodeInfoPane({
 }) {
   const clockDrift = useMemo(() => {
     if (!data?.clock_utc) return null;
-    return formatClockDrift(data.clock_utc);
-  }, [data?.clock_utc]);
+    return formatClockDrift(data.clock_utc, state.fetched_at ?? undefined);
+  }, [data?.clock_utc, state.fetched_at]);
 
   return (
     <RepeaterPane title="Node Info" state={state} onRefresh={onRefresh} disabled={disabled}>

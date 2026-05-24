@@ -1,5 +1,5 @@
 export { useUnreadCounts } from './useUnreadCounts';
-export { useConversationMessages, getMessageContentKey } from './useConversationMessages';
+export { useConversationMessages } from './useConversationMessages';
 export { useRadioControl } from './useRadioControl';
 export { useRepeaterDashboard } from './useRepeaterDashboard';
 export { useAppShell } from './useAppShell';
@@ -10,3 +10,5 @@ export { useRealtimeAppState } from './useRealtimeAppState';
 export { useConversationActions } from './useConversationActions';
 export { useConversationNavigation } from './useConversationNavigation';
 export { useBrowserNotifications } from './useBrowserNotifications';
+export { useFaviconBadge, useUnreadTitle } from './useFaviconBadge';
+export { useRawPacketStatsSession } from './useRawPacketStatsSession';

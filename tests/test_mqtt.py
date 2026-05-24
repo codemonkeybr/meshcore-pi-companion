@@ -132,8 +132,9 @@ class TestMqttPublisher:
         assert call_args[1]["retain"] is False
 
     @pytest.mark.asyncio
-    async def test_publish_handles_exception_gracefully(self):
+    async def test_publish_handles_exception_gracefully(self, caplog):
         pub = MqttPublisher()
+        pub.set_integration_name("Primary MQTT")
         pub.connected = True
         mock_client = AsyncMock()
         mock_client.publish.side_effect = Exception("Network error")
@@ -145,6 +146,9 @@ class TestMqttPublisher:
         # After a publish failure, connected should be cleared to stop
         # further attempts and reflect accurate status
         assert pub.connected is False
+        assert pub.last_error == "Network error"
+        assert "Primary MQTT" in caplog.text
+        assert "usually transient network noise" in caplog.text
 
     @pytest.mark.asyncio
     async def test_stop_resets_state(self):
@@ -338,8 +342,8 @@ class TestConnectionLoop:
         assert sleep_args[0] == _BACKOFF_MIN
         assert sleep_args[1] == _BACKOFF_MIN * 2
         assert sleep_args[2] == _BACKOFF_MIN * 4
-        # Fourth should be capped at _backoff_max (5*8=40 > 30)
-        assert sleep_args[3] == MqttPublisher._backoff_max
+        # Fourth is still doubling (5*8=40), not yet at _backoff_max
+        assert sleep_args[3] == _BACKOFF_MIN * 8
 
     @pytest.mark.asyncio
     async def test_waits_for_settings_when_unconfigured(self):

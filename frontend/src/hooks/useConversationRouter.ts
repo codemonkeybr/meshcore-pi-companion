@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef, type MutableRefObject } from 'react';
 import {
   parseHashConversation,
+  parseHashSettingsSection,
   updateUrlHash,
   resolveChannelFromHashToken,
   resolveContactFromHashToken,
@@ -10,15 +11,16 @@ import {
   getReopenLastConversationEnabled,
   saveLastViewedConversation,
 } from '../utils/lastViewedConversation';
+import { findPublicChannel } from '../utils/publicChannel';
 import { getContactDisplayName } from '../utils/pubkey';
+import { toast } from '../components/ui/sonner';
 import type { Channel, Contact, Conversation } from '../types';
-
-const PUBLIC_CHANNEL_KEY = '8B3387E9C5CDEA6AC9E5EDBAA115CD72';
 
 interface UseConversationRouterArgs {
   channels: Channel[];
   contacts: Contact[];
   contactsLoaded: boolean;
+  suspendHashSync: boolean;
   setSidebarOpen: (open: boolean) => void;
   pendingDeleteFallbackRef: MutableRefObject<boolean>;
   hasSetDefaultConversation: MutableRefObject<boolean>;
@@ -28,6 +30,7 @@ export function useConversationRouter({
   channels,
   contacts,
   contactsLoaded,
+  suspendHashSync,
   setSidebarOpen,
   pendingDeleteFallbackRef,
   hasSetDefaultConversation,
@@ -35,7 +38,9 @@ export function useConversationRouter({
   const [activeConversation, setActiveConversationState] = useState<Conversation | null>(null);
   const activeConversationRef = useRef<Conversation | null>(null);
   const hashSyncEnabledRef = useRef(
-    typeof window !== 'undefined' ? window.location.hash.length > 0 : false
+    typeof window !== 'undefined'
+      ? window.location.hash.length > 0 && parseHashSettingsSection() === null
+      : false
   );
 
   const setActiveConversation = useCallback((conv: Conversation | null) => {
@@ -44,7 +49,7 @@ export function useConversationRouter({
   }, []);
 
   const getPublicChannelConversation = useCallback((): Conversation | null => {
-    const publicChannel = channels.find((c) => c.name === 'Public');
+    const publicChannel = findPublicChannel(channels);
     if (!publicChannel) return null;
     return {
       type: 'channel',
@@ -57,9 +62,8 @@ export function useConversationRouter({
   // Only needs channels (fast path) - doesn't wait for contacts
   useEffect(() => {
     if (hasSetDefaultConversation.current || activeConversation) return;
-    if (channels.length === 0) return;
 
-    const hashConv = parseHashConversation();
+    const hashConv = parseHashSettingsSection() ? null : parseHashConversation();
 
     // Handle non-data views immediately
     if (hashConv?.type === 'raw') {
@@ -87,6 +91,29 @@ export function useConversationRouter({
       hasSetDefaultConversation.current = true;
       return;
     }
+    if (hashConv?.type === 'trace') {
+      setActiveConversationState({ type: 'trace', id: 'trace', name: 'Trace' });
+      hasSetDefaultConversation.current = true;
+      return;
+    }
+
+    // No hash: optionally restore last-viewed non-data conversation if enabled on this device.
+    if (!hashConv && getReopenLastConversationEnabled()) {
+      const lastViewed = getLastViewedConversation();
+      if (
+        lastViewed &&
+        (lastViewed.type === 'raw' ||
+          lastViewed.type === 'map' ||
+          lastViewed.type === 'visualizer' ||
+          lastViewed.type === 'trace')
+      ) {
+        setActiveConversationState(lastViewed);
+        hasSetDefaultConversation.current = true;
+        return;
+      }
+    }
+
+    if (channels.length === 0) return;
 
     // Handle channel hash (ID-first with legacy-name fallback)
     if (hashConv?.type === 'channel') {
@@ -104,14 +131,6 @@ export function useConversationRouter({
     // No hash: optionally restore last-viewed conversation if enabled on this device.
     if (!hashConv && getReopenLastConversationEnabled()) {
       const lastViewed = getLastViewedConversation();
-      if (
-        lastViewed &&
-        (lastViewed.type === 'raw' || lastViewed.type === 'map' || lastViewed.type === 'visualizer')
-      ) {
-        setActiveConversationState(lastViewed);
-        hasSetDefaultConversation.current = true;
-        return;
-      }
       if (lastViewed?.type === 'channel') {
         const channel =
           channels.find((c) => c.key.toLowerCase() === lastViewed.id.toLowerCase()) ||
@@ -133,6 +152,11 @@ export function useConversationRouter({
     // No hash or unresolvable — default to Public
     const publicConversation = getPublicChannelConversation();
     if (publicConversation) {
+      if (hashConv?.type === 'channel') {
+        const token =
+          hashConv.name.length > 16 ? hashConv.name.substring(0, 16) + '…' : hashConv.name;
+        toast.error(`Channel not found: ${token}`);
+      }
       setActiveConversationState(publicConversation);
       hasSetDefaultConversation.current = true;
     }
@@ -142,7 +166,7 @@ export function useConversationRouter({
   useEffect(() => {
     if (hasSetDefaultConversation.current || activeConversation) return;
 
-    const hashConv = parseHashConversation();
+    const hashConv = parseHashSettingsSection() ? null : parseHashConversation();
     if (hashConv?.type === 'contact') {
       if (!contactsLoaded) return;
 
@@ -158,6 +182,9 @@ export function useConversationRouter({
       }
 
       // Contact hash didn't match — fall back to Public if channels loaded.
+      const token =
+        hashConv.name.length > 16 ? hashConv.name.substring(0, 16) + '…' : hashConv.name;
+      toast.error(`Contact not found: ${token}`);
       const publicConversation = getPublicChannelConversation();
       if (publicConversation) {
         setActiveConversationState(publicConversation);
@@ -204,14 +231,14 @@ export function useConversationRouter({
   useEffect(() => {
     activeConversationRef.current = activeConversation;
     if (activeConversation) {
-      if (hashSyncEnabledRef.current) {
+      if (hashSyncEnabledRef.current && !suspendHashSync) {
         updateUrlHash(activeConversation);
       }
-      if (getReopenLastConversationEnabled() && activeConversation.type !== 'search') {
+      if (activeConversation.type !== 'search') {
         saveLastViewedConversation(activeConversation);
       }
     }
-  }, [activeConversation]);
+  }, [activeConversation, suspendHashSync]);
 
   // If a delete action left us without an active conversation, recover to Public
   useEffect(() => {
@@ -221,9 +248,7 @@ export function useConversationRouter({
       return;
     }
 
-    const publicChannel =
-      channels.find((c) => c.key === PUBLIC_CHANNEL_KEY) ||
-      channels.find((c) => c.name === 'Public');
+    const publicChannel = findPublicChannel(channels);
     if (!publicChannel) return;
 
     hasSetDefaultConversation.current = true;

@@ -12,9 +12,9 @@ test.describe('Statistics page', () => {
     await page.getByRole('button', { name: /Statistics/i }).click();
 
     // Verify section headings/labels are visible (use heading role or exact match to avoid ambiguity)
-    await expect(page.locator('h4').getByText('Network')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('h3').getByText('Network')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Contacts', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Channels', { exact: true }).first()).toBeVisible();
-    await expect(page.locator('h4').getByText('Packets')).toBeVisible();
+    await expect(page.locator('h3').getByText('Packets', { exact: true })).toBeVisible();
   });
 });

@@ -1,21 +1,30 @@
-import { lazy, Suspense, useMemo, type Ref } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type Ref } from 'react';
 
 import { ChatHeader } from './ChatHeader';
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { MessageList } from './MessageList';
-import { RawPacketList } from './RawPacketList';
+import { RawPacketFeedView } from './RawPacketFeedView';
+import { RoomServerPanel } from './RoomServerPanel';
+import { TracePane } from './TracePane';
 import type {
   Channel,
   Contact,
   Conversation,
-  Favorite,
   HealthStatus,
   Message,
+  PathDiscoveryResponse,
   RawPacket,
   RadioConfig,
+  RadioTraceHopRequest,
+  RadioTraceResponse,
 } from '../types';
-import { CONTACT_TYPE_REPEATER } from '../types';
-import { isPrefixOnlyContact, isUnknownFullKeyContact } from '../utils/pubkey';
+import type { RawPacketStatsSessionState } from '../utils/rawPacketStats';
+import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
+import {
+  getContactDisplayName,
+  isPrefixOnlyContact,
+  isUnknownFullKeyContact,
+} from '../utils/pubkey';
 
 const RepeaterDashboard = lazy(() =>
   import('./RepeaterDashboard').then((m) => ({ default: m.RepeaterDashboard }))
@@ -30,13 +39,14 @@ interface ConversationPaneProps {
   contacts: Contact[];
   channels: Channel[];
   rawPackets: RawPacket[];
+  rawPacketStatsSession: RawPacketStatsSessionState;
   config: RadioConfig | null;
   health: HealthStatus | null;
   notificationsSupported: boolean;
   notificationsEnabled: boolean;
   notificationsPermission: NotificationPermission | 'unsupported';
-  favorites: Favorite[];
   messages: Message[];
+  preSorted?: boolean;
   messagesLoading: boolean;
   loadingOlder: boolean;
   hasOlderMessages: boolean;
@@ -46,13 +56,25 @@ interface ConversationPaneProps {
   loadingNewer: boolean;
   messageInputRef: Ref<MessageInputHandle>;
   onTrace: () => Promise<void>;
+  onRunTracePath: (
+    hopHashBytes: 1 | 2 | 4,
+    hops: RadioTraceHopRequest[]
+  ) => Promise<RadioTraceResponse>;
+  onPathDiscovery: (publicKey: string) => Promise<PathDiscoveryResponse>;
   onToggleFavorite: (type: 'channel' | 'contact', id: string) => Promise<void>;
+  onToggleMute: (key: string) => Promise<void>;
   onDeleteContact: (publicKey: string) => Promise<void>;
   onDeleteChannel: (key: string) => Promise<void>;
   onSetChannelFloodScopeOverride: (channelKey: string, floodScopeOverride: string) => Promise<void>;
+  onSetChannelPathHashModeOverride?: (
+    channelKey: string,
+    pathHashModeOverride: number | null
+  ) => Promise<void>;
+  onSelectConversation: (conversation: Conversation) => void;
   onOpenContactInfo: (publicKey: string, fromChannel?: boolean) => void;
   onOpenChannelInfo: (channelKey: string) => void;
   onSenderClick: (sender: string) => void;
+  onChannelReferenceClick?: (channelName: string) => void;
   onLoadOlder: () => Promise<void>;
   onResendChannelMessage: (messageId: number, newTimestamp?: boolean) => Promise<void>;
   onTargetReached: () => void;
@@ -61,6 +83,15 @@ interface ConversationPaneProps {
   onDismissUnreadMarker: () => void;
   onSendMessage: (text: string) => Promise<void>;
   onToggleNotifications: () => void;
+  pushSupported?: boolean;
+  pushSubscribed?: boolean;
+  pushEnabledForConversation?: boolean;
+  onTogglePush?: () => void;
+  onOpenPushSettings?: () => void;
+  trackedTelemetryRepeaters: string[];
+  onToggleTrackedTelemetry: (publicKey: string) => Promise<void>;
+  repeaterAutoLoginKey: string | null;
+  onClearRepeaterAutoLogin: () => void;
 }
 
 function LoadingPane({ label }: { label: string }) {
@@ -73,17 +104,17 @@ function ContactResolutionBanner({ variant }: { variant: 'unknown-full-key' | 'p
   if (variant === 'prefix-only') {
     return (
       <div className="mx-4 mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        We only know a key prefix for this sender, which can happen when a fallback DM arrives
-        before we learn their full identity. This conversation is read-only until we hear an
-        advertisement that resolves the full key.
+        We&apos;ve received a message from this sender but don&apos;t have their full identity yet.
+        Sending is disabled until their identity is confirmed &mdash; this usually happens
+        automatically when they next advertise.
       </div>
     );
   }
 
   return (
     <div className="mx-4 mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
-      A full identity profile is not yet available because we have not heard an advertisement from
-      this sender. The contact will fill in automatically when an advertisement arrives.
+      This sender&apos;s profile details (name, location) haven&apos;t arrived yet. They will fill
+      in automatically when the sender&apos;s next advert is heard.
     </div>
   );
 }
@@ -93,13 +124,14 @@ export function ConversationPane({
   contacts,
   channels,
   rawPackets,
+  rawPacketStatsSession,
   config,
   health,
   notificationsSupported,
   notificationsEnabled,
   notificationsPermission,
-  favorites,
   messages,
+  preSorted,
   messagesLoading,
   loadingOlder,
   hasOlderMessages,
@@ -109,13 +141,19 @@ export function ConversationPane({
   loadingNewer,
   messageInputRef,
   onTrace,
+  onRunTracePath,
+  onPathDiscovery,
   onToggleFavorite,
+  onToggleMute,
   onDeleteContact,
   onDeleteChannel,
   onSetChannelFloodScopeOverride,
+  onSetChannelPathHashModeOverride,
+  onSelectConversation,
   onOpenContactInfo,
   onOpenChannelInfo,
   onSenderClick,
+  onChannelReferenceClick,
   onLoadOlder,
   onResendChannelMessage,
   onTargetReached,
@@ -124,7 +162,17 @@ export function ConversationPane({
   onDismissUnreadMarker,
   onSendMessage,
   onToggleNotifications,
+  pushSupported,
+  pushSubscribed,
+  pushEnabledForConversation,
+  onTogglePush,
+  onOpenPushSettings,
+  trackedTelemetryRepeaters,
+  onToggleTrackedTelemetry,
+  repeaterAutoLoginKey,
+  onClearRepeaterAutoLogin,
 }: ConversationPaneProps) {
+  const [roomAuthenticated, setRoomAuthenticated] = useState(false);
   const activeContactIsRepeater = useMemo(() => {
     if (!activeConversation || activeConversation.type !== 'contact') return false;
     const contact = contacts.find((candidate) => candidate.public_key === activeConversation.id);
@@ -134,6 +182,10 @@ export function ConversationPane({
     if (!activeConversation || activeConversation.type !== 'contact') return null;
     return contacts.find((candidate) => candidate.public_key === activeConversation.id) ?? null;
   }, [activeConversation, contacts]);
+  const activeContactIsRoom = activeContact?.type === CONTACT_TYPE_ROOM;
+  useEffect(() => {
+    setRoomAuthenticated(false);
+  }, [activeConversation?.id]);
   const isPrefixOnlyActiveContact = activeContact
     ? isPrefixOnlyContact(activeContact.public_key)
     : false;
@@ -158,7 +210,23 @@ export function ConversationPane({
         </h2>
         <div className="flex-1 overflow-hidden">
           <Suspense fallback={<LoadingPane label="Loading map..." />}>
-            <MapView contacts={contacts} focusedKey={activeConversation.mapFocusKey} />
+            <MapView
+              contacts={contacts}
+              focusedKey={activeConversation.mapFocusKey}
+              rawPackets={rawPackets}
+              config={config}
+              onSelectContact={(contact) =>
+                onSelectConversation({
+                  type: 'contact',
+                  id: contact.public_key,
+                  name: getContactDisplayName(
+                    contact.name,
+                    contact.public_key,
+                    contact.last_advert
+                  ),
+                })
+              }
+            />
           </Suspense>
         </div>
       </>
@@ -175,19 +243,21 @@ export function ConversationPane({
 
   if (activeConversation.type === 'raw') {
     return (
-      <>
-        <h2 className="flex justify-between items-center px-4 py-2.5 border-b border-border font-semibold text-base">
-          Raw Packet Feed
-        </h2>
-        <div className="flex-1 overflow-hidden">
-          <RawPacketList packets={rawPackets} />
-        </div>
-      </>
+      <RawPacketFeedView
+        packets={rawPackets}
+        rawPacketStatsSession={rawPacketStatsSession}
+        contacts={contacts}
+        channels={channels}
+      />
     );
   }
 
   if (activeConversation.type === 'search') {
     return null;
+  }
+
+  if (activeConversation.type === 'trace') {
+    return <TracePane contacts={contacts} config={config} onRunTracePath={onRunTracePath} />;
   }
 
   if (activeContactIsRepeater) {
@@ -197,7 +267,6 @@ export function ConversationPane({
           key={activeConversation.id}
           conversation={activeConversation}
           contacts={contacts}
-          favorites={favorites}
           notificationsSupported={notificationsSupported}
           notificationsEnabled={notificationsEnabled}
           notificationsPermission={notificationsPermission}
@@ -205,13 +274,21 @@ export function ConversationPane({
           radioLon={config?.lon ?? null}
           radioName={config?.name ?? null}
           onTrace={onTrace}
+          onPathDiscovery={onPathDiscovery}
           onToggleNotifications={onToggleNotifications}
           onToggleFavorite={onToggleFavorite}
           onDeleteContact={onDeleteContact}
+          onOpenContactInfo={onOpenContactInfo}
+          trackedTelemetryRepeaters={trackedTelemetryRepeaters}
+          onToggleTrackedTelemetry={onToggleTrackedTelemetry}
+          autoLoginAndLoadAll={repeaterAutoLoginKey === activeConversation.id}
+          onAutoLoginConsumed={onClearRepeaterAutoLogin}
         />
       </Suspense>
     );
   }
+
+  const showRoomChat = !activeContactIsRoom || roomAuthenticated;
 
   return (
     <>
@@ -220,14 +297,21 @@ export function ConversationPane({
         contacts={contacts}
         channels={channels}
         config={config}
-        favorites={favorites}
         notificationsSupported={notificationsSupported}
         notificationsEnabled={notificationsEnabled}
         notificationsPermission={notificationsPermission}
+        pushSupported={pushSupported}
+        pushSubscribed={pushSubscribed}
+        pushEnabledForConversation={pushEnabledForConversation}
+        onTogglePush={onTogglePush}
+        onOpenPushSettings={onOpenPushSettings}
         onTrace={onTrace}
+        onPathDiscovery={onPathDiscovery}
         onToggleNotifications={onToggleNotifications}
         onToggleFavorite={onToggleFavorite}
+        onToggleMute={onToggleMute}
         onSetChannelFloodScopeOverride={onSetChannelFloodScopeOverride}
+        onSetChannelPathHashModeOverride={onSetChannelPathHashModeOverride}
         onDeleteChannel={onDeleteChannel}
         onDeleteContact={onDeleteContact}
         onOpenContactInfo={onOpenContactInfo}
@@ -239,35 +323,44 @@ export function ConversationPane({
       {activeConversation.type === 'contact' && isUnknownFullKeyActiveContact && (
         <ContactResolutionBanner variant="unknown-full-key" />
       )}
-      <MessageList
-        key={activeConversation.id}
-        messages={messages}
-        contacts={contacts}
-        loading={messagesLoading}
-        loadingOlder={loadingOlder}
-        hasOlderMessages={hasOlderMessages}
-        unreadMarkerLastReadAt={
-          activeConversation.type === 'channel' ? unreadMarkerLastReadAt : undefined
-        }
-        onDismissUnreadMarker={
-          activeConversation.type === 'channel' ? onDismissUnreadMarker : undefined
-        }
-        onSenderClick={activeConversation.type === 'channel' ? onSenderClick : undefined}
-        onLoadOlder={onLoadOlder}
-        onResendChannelMessage={
-          activeConversation.type === 'channel' ? onResendChannelMessage : undefined
-        }
-        radioName={config?.name}
-        config={config}
-        onOpenContactInfo={onOpenContactInfo}
-        targetMessageId={targetMessageId}
-        onTargetReached={onTargetReached}
-        hasNewerMessages={hasNewerMessages}
-        loadingNewer={loadingNewer}
-        onLoadNewer={onLoadNewer}
-        onJumpToBottom={onJumpToBottom}
-      />
-      {activeConversation.type === 'contact' && isPrefixOnlyActiveContact ? null : (
+      {activeContactIsRoom && activeContact && (
+        <RoomServerPanel contact={activeContact} onAuthenticatedChange={setRoomAuthenticated} />
+      )}
+      {showRoomChat && <div data-toast-anchor="conversation" aria-hidden="true" />}
+      {showRoomChat && (
+        <MessageList
+          key={activeConversation.id}
+          messages={messages}
+          preSorted={preSorted}
+          contacts={contacts}
+          channels={channels}
+          loading={messagesLoading}
+          loadingOlder={loadingOlder}
+          hasOlderMessages={hasOlderMessages}
+          unreadMarkerLastReadAt={
+            activeConversation.type === 'channel' ? unreadMarkerLastReadAt : undefined
+          }
+          onDismissUnreadMarker={
+            activeConversation.type === 'channel' ? onDismissUnreadMarker : undefined
+          }
+          onSenderClick={activeConversation.type === 'channel' ? onSenderClick : undefined}
+          onChannelReferenceClick={onChannelReferenceClick}
+          onLoadOlder={onLoadOlder}
+          onResendChannelMessage={
+            activeConversation.type === 'channel' ? onResendChannelMessage : undefined
+          }
+          radioName={config?.name}
+          config={config}
+          onOpenContactInfo={onOpenContactInfo}
+          targetMessageId={targetMessageId}
+          onTargetReached={onTargetReached}
+          hasNewerMessages={hasNewerMessages}
+          loadingNewer={loadingNewer}
+          onLoadNewer={onLoadNewer}
+          onJumpToBottom={onJumpToBottom}
+        />
+      )}
+      {showRoomChat && !(activeConversation.type === 'contact' && isPrefixOnlyActiveContact) ? (
         <MessageInput
           ref={messageInputRef}
           onSend={onSendMessage}
@@ -280,7 +373,7 @@ export function ConversationPane({
               : `Message ${activeConversation.name}...`
           }
         />
-      )}
+      ) : null}
     </>
   );
 }

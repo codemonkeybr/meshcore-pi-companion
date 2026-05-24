@@ -58,6 +58,28 @@ class DecryptedDirectMessage:
     message: str
     dest_hash: str  # First byte of destination pubkey as hex
     src_hash: str  # First byte of sender pubkey as hex
+    signed_sender_prefix: str | None = None
+
+    @property
+    def txt_type(self) -> int:
+        return self.flags >> 2
+
+    @property
+    def attempt(self) -> int:
+        return self.flags & 0x03
+
+
+@dataclass
+class DecryptedPathPayload:
+    """Result of decrypting a PATH payload."""
+
+    dest_hash: str
+    src_hash: str
+    returned_path: bytes
+    returned_path_len: int
+    returned_path_hash_mode: int
+    extra_type: int
+    extra: bytes
 
 
 @dataclass
@@ -83,6 +105,10 @@ class PacketInfo:
     path: bytes  # The routing path bytes (empty if path_length is 0)
     payload: bytes
     path_hash_size: int = 1  # Bytes per hop: 1, 2, or 3
+
+
+def _is_valid_advert_location(lat: float, lon: float) -> bool:
+    return -90 <= lat <= 90 and -180 <= lon <= 180
 
 
 def extract_payload(raw_packet: bytes) -> bytes | None:
@@ -243,7 +269,9 @@ def get_packet_payload_type(raw_packet: bytes) -> PayloadType | None:
         return None
 
 
-def parse_advertisement(payload: bytes) -> ParsedAdvertisement | None:
+def parse_advertisement(
+    payload: bytes, raw_packet: bytes | None = None
+) -> ParsedAdvertisement | None:
     """
     Parse an advertisement payload.
 
@@ -271,8 +299,11 @@ def parse_advertisement(payload: bytes) -> ParsedAdvertisement | None:
     timestamp = int.from_bytes(payload[32:36], byteorder="little")
     flags = payload[100]
 
-    # Parse flags
+    # Parse flags — clamp device_role to valid range (0-4); corrupted
+    # advertisements can have junk in the lower nibble.
     device_role = flags & 0x0F
+    if device_role > 4:
+        device_role = 0
     has_location = bool(flags & 0x10)
     has_feature1 = bool(flags & 0x20)
     has_feature2 = bool(flags & 0x40)
@@ -299,6 +330,16 @@ def parse_advertisement(payload: bytes) -> ParsedAdvertisement | None:
         lon_raw = int.from_bytes(payload[offset + 4 : offset + 8], byteorder="little", signed=True)
         lat = lat_raw / 1_000_000
         lon = lon_raw / 1_000_000
+        if not _is_valid_advert_location(lat, lon):
+            packet_hex = (raw_packet if raw_packet is not None else payload).hex().upper()
+            logger.warning(
+                "Dropping location data for nonsensical packet -- packet %s implies lat/lon %s/%s. Outta this world!",
+                packet_hex,
+                lat,
+                lon,
+            )
+            lat = None
+            lon = None
         offset += 8
 
     # Skip feature fields if present
@@ -358,30 +399,35 @@ def _clamp_scalar(k: bytes) -> bytes:
 
 def derive_public_key(private_key: bytes, *, from_seed: bool = False) -> bytes:
     """
-    Derive the Ed25519 public key from a MeshCore private key or seed.
+    Derive the Ed25519 public key from a MeshCore private key.
 
-    **MeshCore Key Format (from_seed=False):**
+    **MeshCore Key Format:**
     MeshCore stores a non-standard Ed25519 private key format:
     - First 32 bytes: The scalar (already post-SHA-512 and clamped)
     - Last 32 bytes: The signing prefix (used during signature generation)
-    We use direct scalar × basepoint with noclamp.
 
-    **Seed Format (from_seed=True, 32-byte key):**
-    SPI/pymc_core use a 32-byte Ed25519 seed. Standard Ed25519 expands it via
-    SHA-512. Use nacl SigningKey(seed).verify_key so JWT/LetsMesh verification matches.
+    Standard Ed25519 libraries expect a 32-byte seed and derive the scalar via
+    SHA-512. Using `SigningKey(private_bytes)` will produce the WRONG public key.
+
+    To derive the correct public key, we use direct scalar × basepoint multiplication
+    with the noclamp variant (since the scalar is already clamped).
 
     Args:
-        private_key: 64-byte MeshCore private key, or 32-byte seed when from_seed=True
-        from_seed: If True and private_key is 32 bytes, treat as seed (standard Ed25519)
+        private_key: 64-byte MeshCore private key (or just the first 32 bytes)
+        from_seed: If True, treat private_key as a standard 32-byte Ed25519 seed
+                   (SPI/pymc_core format) and use SHA-512 expansion.
 
     Returns:
         32-byte Ed25519 public key
     """
-    if from_seed and len(private_key) == 32:
-        from nacl.signing import SigningKey
+    if from_seed:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-        return SigningKey(private_key).verify_key.encode()
+        return (
+            Ed25519PrivateKey.from_private_bytes(private_key[:32]).public_key().public_bytes_raw()
+        )
     scalar = private_key[:32]
+    # Use noclamp because MeshCore stores already-clamped scalars
     return nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
 
 
@@ -390,27 +436,29 @@ def derive_shared_secret(our_private_key: bytes, their_public_key: bytes) -> byt
     Derive ECDH shared secret from Ed25519 keys.
 
     MeshCore uses Ed25519 keys, but ECDH requires X25519. This function:
-    1. Derives our X25519 scalar (clamped): from 64-byte MeshCore key use first 32;
-       from 32-byte SPI seed use SHA-512 expansion then clamp (standard Ed25519).
+    1. Clamps our private key scalar for X25519 (idempotent since already clamped)
     2. Converts their Ed25519 public key to X25519
     3. Performs X25519 scalar multiplication to get the shared secret
 
+    **MeshCore Key Format:**
+    MeshCore private keys store the scalar directly (not a seed), so the first
+    32 bytes are already the post-SHA-512 clamped scalar. See `derive_public_key`
+    for details.
+
     Args:
-        our_private_key: 64-byte MeshCore private key or 32-byte SPI seed
+        our_private_key: 64-byte MeshCore private key (only first 32 bytes used)
         their_public_key: Their 32-byte Ed25519 public key
 
     Returns:
         32-byte shared secret
     """
-    if len(our_private_key) == 32:
-        # SPI seed: standard Ed25519 expansion (SHA-512), then clamp for X25519
-        expanded = hashlib.sha512(our_private_key).digest()
-        scalar = expanded[:32]
-        clamped = _clamp_scalar(scalar)
-    else:
-        clamped = _clamp_scalar(our_private_key[:32])
+    # Clamp the first 32 bytes of our private key (idempotent for MeshCore keys)
+    clamped = _clamp_scalar(our_private_key[:32])
 
+    # Convert their Ed25519 public key to X25519
     x25519_pub = nacl.bindings.crypto_sign_ed25519_pk_to_curve25519(their_public_key)
+
+    # Perform X25519 ECDH
     return nacl.bindings.crypto_scalarmult(clamped, x25519_pub)
 
 
@@ -470,6 +518,13 @@ def decrypt_direct_message(payload: bytes, shared_secret: bytes) -> DecryptedDir
 
     # Extract message text (UTF-8, null-padded)
     message_bytes = decrypted[5:]
+    signed_sender_prefix: str | None = None
+    txt_type = flags >> 2
+    if txt_type == 2:
+        if len(message_bytes) < 4:
+            return None
+        signed_sender_prefix = message_bytes[:4].hex()
+        message_bytes = message_bytes[4:]
     try:
         message_text = message_bytes.decode("utf-8")
         # Truncate at first null terminator (consistent with channel message handling)
@@ -485,6 +540,7 @@ def decrypt_direct_message(payload: bytes, shared_secret: bytes) -> DecryptedDir
         message=message_text,
         dest_hash=dest_hash,
         src_hash=src_hash,
+        signed_sender_prefix=signed_sender_prefix,
     )
 
 
@@ -548,3 +604,88 @@ def try_decrypt_dm(
         return None
 
     return decrypt_direct_message(packet_info.payload, shared_secret)
+
+
+def decrypt_path_payload(payload: bytes, shared_secret: bytes) -> DecryptedPathPayload | None:
+    """Decrypt a PATH payload using the ECDH shared secret."""
+    if len(payload) < 4:
+        return None
+
+    dest_hash = format(payload[0], "02x")
+    src_hash = format(payload[1], "02x")
+    mac = payload[2:4]
+    ciphertext = payload[4:]
+
+    if len(ciphertext) == 0 or len(ciphertext) % 16 != 0:
+        return None
+
+    calculated_mac = hmac.new(shared_secret, ciphertext, hashlib.sha256).digest()[:2]
+    if calculated_mac != mac:
+        return None
+
+    try:
+        cipher = AES.new(shared_secret[:16], AES.MODE_ECB)
+        decrypted = cipher.decrypt(ciphertext)
+    except Exception as e:
+        logger.debug("AES decryption failed for PATH payload: %s", e)
+        return None
+
+    if len(decrypted) < 2:
+        return None
+
+    from app.path_utils import decode_path_byte
+
+    packed_len = decrypted[0]
+    try:
+        returned_path_len, hash_size = decode_path_byte(packed_len)
+    except ValueError:
+        return None
+
+    path_byte_len = returned_path_len * hash_size
+    if len(decrypted) < 1 + path_byte_len + 1:
+        return None
+
+    offset = 1
+    returned_path = decrypted[offset : offset + path_byte_len]
+    offset += path_byte_len
+    extra_type = decrypted[offset] & 0x0F
+    offset += 1
+    extra = decrypted[offset:]
+
+    return DecryptedPathPayload(
+        dest_hash=dest_hash,
+        src_hash=src_hash,
+        returned_path=returned_path,
+        returned_path_len=returned_path_len,
+        returned_path_hash_mode=hash_size - 1,
+        extra_type=extra_type,
+        extra=extra,
+    )
+
+
+def try_decrypt_path(
+    raw_packet: bytes,
+    our_private_key: bytes,
+    their_public_key: bytes,
+    our_public_key: bytes,
+) -> DecryptedPathPayload | None:
+    """Try to decrypt a raw packet as a PATH packet."""
+    packet_info = parse_packet(raw_packet)
+    if packet_info is None or packet_info.payload_type != PayloadType.PATH:
+        return None
+
+    if len(packet_info.payload) < 4:
+        return None
+
+    dest_hash = packet_info.payload[0]
+    src_hash = packet_info.payload[1]
+    if dest_hash != our_public_key[0] or src_hash != their_public_key[0]:
+        return None
+
+    try:
+        shared_secret = derive_shared_secret(our_private_key, their_public_key)
+    except Exception as e:
+        logger.debug("Failed to derive shared secret for PATH payload: %s", e)
+        return None
+
+    return decrypt_path_payload(packet_info.payload, shared_secret)

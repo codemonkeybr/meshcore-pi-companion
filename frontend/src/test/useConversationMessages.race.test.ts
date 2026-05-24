@@ -1,19 +1,29 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import * as messageCache from '../messageCache';
-import { useConversationMessages } from '../hooks/useConversationMessages';
+import { api } from '../api';
+import {
+  conversationMessageCache,
+  useConversationMessages,
+} from '../hooks/useConversationMessages';
 import type { Conversation, Message } from '../types';
 
-const mockGetMessages = vi.fn<(...args: unknown[]) => Promise<Message[]>>();
+const mockGetMessages = vi.fn<typeof api.getMessages>();
 const mockGetMessagesAround = vi.fn();
 
 vi.mock('../api', () => ({
   api: {
-    getMessages: (...args: unknown[]) => mockGetMessages(...args),
+    getMessages: (...args: Parameters<typeof api.getMessages>) => mockGetMessages(...args),
     getMessagesAround: (...args: unknown[]) => mockGetMessagesAround(...args),
   },
   isAbortError: (err: unknown) => err instanceof DOMException && err.name === 'AbortError',
+}));
+
+const mockToastError = vi.fn();
+vi.mock('../components/ui/sonner', () => ({
+  toast: {
+    error: (...args: unknown[]) => mockToastError(...args),
+  },
 }));
 
 function createConversation(): Conversation {
@@ -54,7 +64,8 @@ function createDeferred<T>() {
 describe('useConversationMessages ACK ordering', () => {
   beforeEach(() => {
     mockGetMessages.mockReset();
-    messageCache.clear();
+    conversationMessageCache.clear();
+    mockToastError.mockReset();
   });
 
   it('applies buffered ACK when message is added after ACK event', async () => {
@@ -67,11 +78,11 @@ describe('useConversationMessages ACK ordering', () => {
 
     const paths = [{ path: 'A1B2', received_at: 1700000010 }];
     act(() => {
-      result.current.updateMessageAck(42, 2, paths);
+      result.current.receiveMessageAck(42, 2, paths);
     });
 
     act(() => {
-      const added = result.current.addMessageIfNew(
+      const { added } = result.current.observeMessage(
         createMessage({ id: 42, acked: 0, paths: null })
       );
       expect(added).toBe(true);
@@ -91,7 +102,7 @@ describe('useConversationMessages ACK ordering', () => {
 
     const paths = [{ path: 'C3D4', received_at: 1700000011 }];
     act(() => {
-      result.current.updateMessageAck(42, 1, paths);
+      result.current.receiveMessageAck(42, 1, paths);
     });
 
     deferred.resolve([createMessage({ id: 42, acked: 0, paths: null })]);
@@ -109,7 +120,7 @@ describe('useConversationMessages ACK ordering', () => {
     await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(1));
 
     act(() => {
-      const added = result.current.addMessageIfNew(
+      const { added } = result.current.observeMessage(
         createMessage({
           id: 99,
           text: 'ws-arrived',
@@ -144,7 +155,7 @@ describe('useConversationMessages ACK ordering', () => {
     await waitFor(() => expect(result.current.messagesLoading).toBe(false));
 
     act(() => {
-      result.current.addMessageIfNew(createMessage({ id: 42, acked: 0, paths: null }));
+      result.current.observeMessage(createMessage({ id: 42, acked: 0, paths: null }));
     });
 
     const highAckPaths = [
@@ -154,8 +165,8 @@ describe('useConversationMessages ACK ordering', () => {
     const staleAckPaths = [{ path: 'A1B2', received_at: 1700000010 }];
 
     act(() => {
-      result.current.updateMessageAck(42, 3, highAckPaths);
-      result.current.updateMessageAck(42, 2, staleAckPaths);
+      result.current.receiveMessageAck(42, 3, highAckPaths);
+      result.current.receiveMessageAck(42, 2, staleAckPaths);
     });
 
     expect(result.current.messages[0].acked).toBe(3);
@@ -166,7 +177,7 @@ describe('useConversationMessages ACK ordering', () => {
 describe('useConversationMessages conversation switch', () => {
   beforeEach(() => {
     mockGetMessages.mockReset();
-    messageCache.clear();
+    conversationMessageCache.clear();
   });
 
   it('resets loadingOlder when switching conversations mid-fetch', async () => {
@@ -206,7 +217,9 @@ describe('useConversationMessages conversation switch', () => {
 
     // Switch to conv B while older-messages fetch is still pending
     mockGetMessages.mockResolvedValueOnce([createMessage({ id: 999, conversation_key: 'conv_b' })]);
-    rerender({ conv: convB });
+    await act(async () => {
+      rerender({ conv: convB });
+    });
 
     // loadingOlder must reset immediately — no phantom spinner in conv B
     await waitFor(() => expect(result.current.loadingOlder).toBe(false));
@@ -215,14 +228,45 @@ describe('useConversationMessages conversation switch', () => {
     expect(result.current.messages[0].conversation_key).toBe('conv_b');
 
     // Resolve the stale older-messages fetch — should not affect conv B's state
-    olderDeferred.resolve([
-      createMessage({ id: 500, conversation_key: 'conv_a', text: 'stale-old' }),
-    ]);
+    await act(async () => {
+      olderDeferred.resolve([
+        createMessage({ id: 500, conversation_key: 'conv_a', text: 'stale-old' }),
+      ]);
+      await Promise.resolve();
+    });
 
-    // Give the stale response time to be processed (it should be discarded)
-    await new Promise((r) => setTimeout(r, 50));
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.messages[0].conversation_key).toBe('conv_b');
+  });
+
+  it('reloads the active conversation from source when requested', async () => {
+    const conv = createConversation();
+    mockGetMessages
+      .mockResolvedValueOnce([
+        createMessage({ id: 1, text: 'keep me', sender_timestamp: 1700000000, received_at: 1 }),
+        createMessage({
+          id: 2,
+          text: 'blocked later',
+          sender_timestamp: 1700000001,
+          received_at: 2,
+        }),
+      ])
+      .mockResolvedValueOnce([
+        createMessage({ id: 1, text: 'keep me', sender_timestamp: 1700000000, received_at: 1 }),
+      ]);
+
+    const { result } = renderHook(() => useConversationMessages(conv));
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages.map((msg) => msg.text)).toEqual(['keep me', 'blocked later']);
+
+    act(() => {
+      result.current.reloadCurrentConversation();
+    });
+
+    await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.messages.map((msg) => msg.text)).toEqual(['keep me']);
   });
 
   it('aborts in-flight fetch when switching conversations', async () => {
@@ -261,7 +305,7 @@ describe('useConversationMessages conversation switch', () => {
 describe('useConversationMessages background reconcile ordering', () => {
   beforeEach(() => {
     mockGetMessages.mockReset();
-    messageCache.clear();
+    conversationMessageCache.clear();
   });
 
   it('ignores stale reconnect reconcile responses that finish after newer ones', async () => {
@@ -282,8 +326,8 @@ describe('useConversationMessages background reconcile ordering', () => {
       .mockReturnValueOnce(secondReconcile.promise);
 
     act(() => {
-      result.current.triggerReconcile();
-      result.current.triggerReconcile();
+      result.current.reconcileOnReconnect();
+      result.current.reconcileOnReconnect();
     });
 
     secondReconcile.resolve([createMessage({ id: 42, text: 'newer snapshot', acked: 2 })]);
@@ -303,11 +347,8 @@ describe('useConversationMessages background reconcile ordering', () => {
     const conv = createConversation();
     const cachedMessage = createMessage({ id: 42, text: 'cached snapshot' });
 
-    messageCache.set(conv.id, {
+    conversationMessageCache.set(conv.id, {
       messages: [cachedMessage],
-      seenContent: new Set([
-        `PRIV-${cachedMessage.conversation_key}-${cachedMessage.text}-${cachedMessage.sender_timestamp}`,
-      ]),
       hasOlderMessages: true,
     });
 
@@ -326,7 +367,7 @@ describe('useConversationMessages background reconcile ordering', () => {
 describe('useConversationMessages older-page dedup and reentry', () => {
   beforeEach(() => {
     mockGetMessages.mockReset();
-    messageCache.clear();
+    conversationMessageCache.clear();
   });
 
   it('prevents duplicate overlapping older-page fetches in the same tick', async () => {
@@ -417,13 +458,63 @@ describe('useConversationMessages older-page dedup and reentry', () => {
     expect(result.current.messages.filter((msg) => msg.id === 0)).toHaveLength(1);
     expect(result.current.messages).toHaveLength(201);
   });
+
+  it('aborts stale older-page requests on conversation switch without toasting', async () => {
+    const convA: Conversation = { type: 'contact', id: 'conv_a', name: 'Contact A' };
+    const convB: Conversation = { type: 'contact', id: 'conv_b', name: 'Contact B' };
+
+    const fullPage = Array.from({ length: 200 }, (_, i) =>
+      createMessage({
+        id: i + 1,
+        conversation_key: 'conv_a',
+        text: `msg-${i + 1}`,
+        sender_timestamp: 1700000000 + i,
+        received_at: 1700000000 + i,
+      })
+    );
+    mockGetMessages.mockResolvedValueOnce(fullPage);
+
+    const olderDeferred = createDeferred<Message[]>();
+    let olderSignal: AbortSignal | undefined;
+    mockGetMessages.mockImplementationOnce((_, signal?: AbortSignal) => {
+      olderSignal = signal;
+      signal?.addEventListener('abort', () => {
+        olderDeferred.resolve([]);
+      });
+      return new Promise<Message[]>((_, reject) => {
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const { result, rerender } = renderHook(
+      ({ conv }: { conv: Conversation }) => useConversationMessages(conv),
+      { initialProps: { conv: convA } }
+    );
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    act(() => {
+      void result.current.fetchOlderMessages();
+    });
+
+    await waitFor(() => expect(result.current.loadingOlder).toBe(true));
+
+    mockGetMessages.mockResolvedValueOnce([createMessage({ id: 999, conversation_key: 'conv_b' })]);
+    rerender({ conv: convB });
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(olderSignal?.aborted).toBe(true);
+    expect(mockToastError).not.toHaveBeenCalled();
+  });
 });
 
 describe('useConversationMessages forward pagination', () => {
   beforeEach(() => {
     mockGetMessages.mockReset();
     mockGetMessagesAround.mockReset();
-    messageCache.clear();
+    conversationMessageCache.clear();
+    mockToastError.mockReset();
   });
 
   it('fetchNewerMessages loads newer messages and appends them', async () => {
@@ -507,7 +598,7 @@ describe('useConversationMessages forward pagination', () => {
 
     // Simulate WS adding a message with the same content key
     act(() => {
-      result.current.addMessageIfNew(
+      result.current.observeMessage(
         createMessage({
           id: 2,
           conversation_key: 'ch1',
@@ -536,6 +627,70 @@ describe('useConversationMessages forward pagination', () => {
     // Should not have a duplicate
     const dupes = result.current.messages.filter((m) => m.text === 'duplicate-content');
     expect(dupes).toHaveLength(1);
+  });
+
+  it('defers reconnect reconcile until forward pagination reaches the live tail', async () => {
+    const conv: Conversation = { type: 'channel', id: 'ch1', name: 'Channel' };
+
+    mockGetMessagesAround.mockResolvedValueOnce({
+      messages: [
+        createMessage({
+          id: 1,
+          conversation_key: 'ch1',
+          text: 'older-context',
+          sender_timestamp: 1700000000,
+          received_at: 1700000000,
+        }),
+      ],
+      has_older: false,
+      has_newer: true,
+    });
+
+    const { result } = renderHook(
+      ({ conv, target }: { conv: Conversation; target: number | null }) =>
+        useConversationMessages(conv, target),
+      { initialProps: { conv, target: 1 } }
+    );
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(result.current.hasNewerMessages).toBe(true);
+
+    act(() => {
+      result.current.reconcileOnReconnect();
+    });
+
+    expect(mockGetMessages).not.toHaveBeenCalled();
+
+    mockGetMessages
+      .mockResolvedValueOnce([
+        createMessage({
+          id: 2,
+          conversation_key: 'ch1',
+          text: 'newer-page',
+          sender_timestamp: 1700000001,
+          received_at: 1700000001,
+        }),
+      ])
+      .mockResolvedValueOnce([
+        createMessage({
+          id: 2,
+          conversation_key: 'ch1',
+          text: 'newer-page',
+          sender_timestamp: 1700000001,
+          received_at: 1700000001,
+          acked: 3,
+        }),
+      ]);
+
+    await act(async () => {
+      await result.current.fetchNewerMessages();
+    });
+
+    await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(result.current.messages.find((message) => message.id === 2)?.acked).toBe(3)
+    );
+    expect(result.current.hasNewerMessages).toBe(false);
   });
 
   it('jumpToBottom clears hasNewerMessages and refetches latest', async () => {
@@ -586,6 +741,118 @@ describe('useConversationMessages forward pagination', () => {
     expect(result.current.hasNewerMessages).toBe(false);
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.messages[0].text).toBe('latest-msg');
+  });
+
+  it('jumpToBottom clears deferred reconnect reconcile without an extra reconcile fetch', async () => {
+    const conv: Conversation = { type: 'channel', id: 'ch1', name: 'Channel' };
+
+    mockGetMessagesAround.mockResolvedValueOnce({
+      messages: [
+        createMessage({
+          id: 5,
+          conversation_key: 'ch1',
+          text: 'around-msg',
+          sender_timestamp: 1700000005,
+          received_at: 1700000005,
+        }),
+      ],
+      has_older: true,
+      has_newer: true,
+    });
+
+    const { result } = renderHook(
+      ({ conv, target }: { conv: Conversation; target: number | null }) =>
+        useConversationMessages(conv, target),
+      { initialProps: { conv, target: 5 } }
+    );
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+
+    act(() => {
+      result.current.reconcileOnReconnect();
+    });
+
+    mockGetMessages.mockResolvedValueOnce([
+      createMessage({
+        id: 10,
+        conversation_key: 'ch1',
+        text: 'latest-msg',
+        sender_timestamp: 1700000010,
+        received_at: 1700000010,
+      }),
+    ]);
+
+    act(() => {
+      result.current.jumpToBottom();
+    });
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    await waitFor(() => expect(mockGetMessages).toHaveBeenCalledTimes(1));
+    expect(result.current.messages[0].text).toBe('latest-msg');
+    expect(result.current.hasNewerMessages).toBe(false);
+  });
+
+  it('aborts stale newer-page requests on conversation switch without toasting', async () => {
+    const convA: Conversation = { type: 'channel', id: 'ch1', name: 'Channel A' };
+    const convB: Conversation = { type: 'channel', id: 'ch2', name: 'Channel B' };
+
+    mockGetMessagesAround.mockResolvedValueOnce({
+      messages: [
+        createMessage({
+          id: 1,
+          type: 'CHAN',
+          conversation_key: 'ch1',
+          text: 'msg-0',
+          sender_timestamp: 1700000000,
+          received_at: 1700000000,
+        }),
+      ],
+      has_older: false,
+      has_newer: true,
+    });
+
+    let newerSignal: AbortSignal | undefined;
+    mockGetMessages.mockImplementationOnce((_, signal?: AbortSignal) => {
+      newerSignal = signal;
+      return new Promise<Message[]>((_, reject) => {
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const initialProps: { conv: Conversation; target: number | null } = {
+      conv: convA,
+      target: 1,
+    };
+
+    const { result, rerender } = renderHook(
+      ({ conv, target }: { conv: Conversation; target: number | null }) =>
+        useConversationMessages(conv, target),
+      { initialProps }
+    );
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+
+    act(() => {
+      void result.current.fetchNewerMessages();
+    });
+
+    await waitFor(() => expect(result.current.loadingNewer).toBe(true));
+
+    mockGetMessages.mockResolvedValueOnce([
+      createMessage({
+        id: 999,
+        type: 'CHAN',
+        conversation_key: 'ch2',
+        text: 'conv-b',
+      }),
+    ]);
+    rerender({ conv: convB, target: null });
+
+    await waitFor(() => expect(result.current.messagesLoading).toBe(false));
+    expect(newerSignal?.aborted).toBe(true);
+    expect(mockToastError).not.toHaveBeenCalled();
   });
 
   it('preserves around-loaded messages when the jump target is cleared in the same conversation', async () => {

@@ -13,6 +13,8 @@ export function ConsolePane({
 }) {
   const [input, setInput] = useState('');
   const outputRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const prevLoadingRef = useRef(loading);
 
   // Auto-scroll to bottom on new entries
   useEffect(() => {
@@ -20,6 +22,14 @@ export function ConsolePane({
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
   }, [history]);
+
+  // Refocus input after command completes
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading) {
+      inputRef.current?.focus();
+    }
+    prevLoadingRef.current = loading;
+  }, [loading]);
 
   const handleSubmit = useCallback(
     async (e: FormEvent) => {
@@ -59,6 +69,7 @@ export function ConsolePane({
       </div>
       <form onSubmit={handleSubmit} className="flex gap-2 p-2 border-t border-border">
         <Input
+          ref={inputRef}
           type="text"
           autoComplete="off"
           name="console-input"

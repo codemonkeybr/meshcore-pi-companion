@@ -7,7 +7,7 @@ paths (packet_processor + event_handler fallback) don't double-store messages.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -241,8 +241,10 @@ class TestDMEchoDetection:
     """Test echo detection for direct messages."""
 
     @pytest.mark.asyncio
-    async def test_outgoing_dm_echo_increments_ack(self, test_db, captured_broadcasts):
-        """Outgoing DM echo increments ack count."""
+    async def test_outgoing_dm_echo_adds_path_without_incrementing_ack(
+        self, test_db, captured_broadcasts
+    ):
+        """Outgoing DM duplicate keeps path updates but does not count as delivery evidence."""
         from app.packet_processor import create_dm_message_from_decrypted
 
         # Store outgoing DM
@@ -283,8 +285,20 @@ class TestDMEchoDetection:
 
         ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
         assert len(ack_broadcasts) == 1
-        assert ack_broadcasts[0]["data"]["ack_count"] == 1
+        assert ack_broadcasts[0]["data"]["message_id"] == msg_id
+        assert ack_broadcasts[0]["data"]["ack_count"] == 0
         assert any(p["path"] == "aabb" for p in ack_broadcasts[0]["data"]["paths"])
+
+        msg = await MessageRepository.get_by_content(
+            msg_type="PRIV",
+            conversation_key=CONTACT_PUB.lower(),
+            text="Hello friend",
+            sender_timestamp=SENDER_TIMESTAMP,
+        )
+        assert msg is not None
+        assert msg.acked == 0
+        assert msg.paths is not None
+        assert any(p.path == "aabb" for p in msg.paths)
 
     @pytest.mark.asyncio
     async def test_incoming_dm_duplicate_does_not_increment_ack(self, test_db, captured_broadcasts):
@@ -317,12 +331,9 @@ class TestDMEchoDetection:
         assert msg_id is not None
         broadcasts.clear()
 
-        # Duplicate arrives via different path
-        pkt2, _ = await RawPacketRepository.create(b"dm_in_2", SENDER_TIMESTAMP + 1)
-
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
             result = await create_dm_message_from_decrypted(
-                packet_id=pkt2,
+                packet_id=pkt1,
                 decrypted=decrypted,
                 their_public_key=CONTACT_PUB,
                 our_public_key=OUR_PUB,
@@ -374,12 +385,9 @@ class TestDMEchoDetection:
         assert msg_id is not None
         broadcasts.clear()
 
-        # Duplicate arrives, also with no path
-        pkt2, _ = await RawPacketRepository.create(b"dm_np_2", SENDER_TIMESTAMP + 1)
-
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
             result = await create_dm_message_from_decrypted(
-                packet_id=pkt2,
+                packet_id=pkt1,
                 decrypted=decrypted,
                 their_public_key=CONTACT_PUB,
                 our_public_key=OUR_PUB,
@@ -402,7 +410,8 @@ class TestDualPathDedup:
     1. Primary: RX_LOG_DATA → packet_processor (decrypts with private key)
     2. Fallback: CONTACT_MSG_RECV → on_contact_message (MeshCore library decoded)
 
-    The fallback uses INSERT OR IGNORE to avoid double-storage when both fire.
+    The fallback path should reconcile against the packet path instead of creating
+    a second row, and should still add new path observations when available.
     """
 
     @pytest.mark.asyncio
@@ -449,19 +458,7 @@ class TestDualPathDedup:
             "sender_timestamp": SENDER_TIMESTAMP,
         }
 
-        # Mock contact lookup to return a contact with the right key
-        mock_contact = MagicMock()
-        mock_contact.public_key = CONTACT_PUB
-        mock_contact.type = 1  # Client, not repeater
-        mock_contact.name = "TestContact"
-
-        with (
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
-            patch("app.event_handlers.broadcast_event", mock_broadcast),
-        ):
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=mock_contact)
-            mock_contact_repo.update_last_contacted = AsyncMock()
-
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
             await on_contact_message(mock_event)
 
         # No additional message broadcast should have been sent
@@ -530,18 +527,7 @@ class TestDualPathDedup:
             "sender_timestamp": SENDER_TIMESTAMP,
         }
 
-        mock_contact = MagicMock()
-        mock_contact.public_key = upper_key  # Uppercase from DB
-        mock_contact.type = 1
-        mock_contact.name = "TestContact"
-
-        with (
-            patch("app.event_handlers.ContactRepository") as mock_contact_repo,
-            patch("app.event_handlers.broadcast_event", mock_broadcast),
-        ):
-            mock_contact_repo.get_by_key_or_prefix = AsyncMock(return_value=mock_contact)
-            mock_contact_repo.update_last_contacted = AsyncMock()
-
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
             await on_contact_message(mock_event)
 
         # Should NOT create a second message (dedup catches it thanks to .lower())
@@ -555,6 +541,219 @@ class TestDualPathDedup:
             msg_type="PRIV", conversation_key=upper_key.lower(), limit=10
         )
         assert len(messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_event_handler_duplicate_adds_path_to_existing_dm(
+        self, test_db, captured_broadcasts
+    ):
+        """Fallback DM duplicates should reconcile path updates onto the stored message."""
+        from app.event_handlers import on_contact_message
+        from app.packet_processor import create_dm_message_from_decrypted
+
+        await ContactRepository.upsert(
+            {
+                "public_key": CONTACT_PUB.lower(),
+                "name": "TestContact",
+                "type": 1,
+                "last_seen": SENDER_TIMESTAMP,
+                "last_contacted": SENDER_TIMESTAMP,
+                "first_seen": SENDER_TIMESTAMP,
+                "on_radio": False,
+            }
+        )
+
+        pkt_id, _ = await RawPacketRepository.create(b"primary_with_no_path", SENDER_TIMESTAMP)
+        decrypted = DecryptedDirectMessage(
+            timestamp=SENDER_TIMESTAMP,
+            flags=0,
+            message="Dual path with route update",
+            dest_hash="fa",
+            src_hash="a1",
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            msg_id = await create_dm_message_from_decrypted(
+                packet_id=pkt_id,
+                decrypted=decrypted,
+                their_public_key=CONTACT_PUB,
+                our_public_key=OUR_PUB,
+                received_at=SENDER_TIMESTAMP,
+                outgoing=False,
+            )
+
+        assert msg_id is not None
+        broadcasts.clear()
+
+        mock_event = MagicMock()
+        mock_event.payload = {
+            "public_key": CONTACT_PUB,
+            "text": "Dual path with route update",
+            "txt_type": 0,
+            "sender_timestamp": SENDER_TIMESTAMP,
+            "path": "bbcc",
+            "path_len": 2,
+        }
+
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
+            await on_contact_message(mock_event)
+
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert message_broadcasts == []
+
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert len(ack_broadcasts) == 1
+        assert ack_broadcasts[0]["data"]["message_id"] == msg_id
+        assert ack_broadcasts[0]["data"]["ack_count"] == 0
+        assert any(p["path"] == "bbcc" for p in ack_broadcasts[0]["data"]["paths"])
+
+        msg = await MessageRepository.get_by_id(msg_id)
+        assert msg is not None
+        assert msg.paths is not None
+        assert any(p.path == "bbcc" for p in msg.paths)
+
+    @pytest.mark.asyncio
+    async def test_incoming_duplicate_does_not_reconcile_onto_matching_outgoing_dm(
+        self, test_db, captured_broadcasts
+    ):
+        """Incoming DM duplicates must merge onto the incoming row, not a sent row."""
+        from app.event_handlers import on_contact_message
+        from app.packet_processor import create_dm_message_from_decrypted
+
+        await ContactRepository.upsert(
+            {
+                "public_key": CONTACT_PUB.lower(),
+                "name": "TestContact",
+                "type": 1,
+                "last_seen": SENDER_TIMESTAMP,
+                "last_contacted": SENDER_TIMESTAMP,
+                "first_seen": SENDER_TIMESTAMP,
+                "on_radio": False,
+            }
+        )
+
+        outgoing_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Mirror text",
+            conversation_key=CONTACT_PUB.lower(),
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP - 1,
+            outgoing=True,
+        )
+        assert outgoing_id is not None
+
+        pkt_id, _ = await RawPacketRepository.create(b"incoming_primary", SENDER_TIMESTAMP)
+        decrypted = DecryptedDirectMessage(
+            timestamp=SENDER_TIMESTAMP,
+            flags=0,
+            message="Mirror text",
+            dest_hash="fa",
+            src_hash="a1",
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            incoming_id = await create_dm_message_from_decrypted(
+                packet_id=pkt_id,
+                decrypted=decrypted,
+                their_public_key=CONTACT_PUB,
+                our_public_key=OUR_PUB,
+                received_at=SENDER_TIMESTAMP,
+                outgoing=False,
+            )
+
+        assert incoming_id is not None
+        broadcasts.clear()
+
+        mock_event = MagicMock()
+        mock_event.payload = {
+            "public_key": CONTACT_PUB,
+            "text": "Mirror text",
+            "txt_type": 0,
+            "sender_timestamp": SENDER_TIMESTAMP,
+            "path": "bbcc",
+            "path_len": 2,
+        }
+
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
+            await on_contact_message(mock_event)
+
+        incoming_msg = await MessageRepository.get_by_id(incoming_id)
+        outgoing_msg = await MessageRepository.get_by_id(outgoing_id)
+        assert incoming_msg is not None
+        assert outgoing_msg is not None
+        assert incoming_msg.paths is not None
+        assert any(p.path == "bbcc" for p in incoming_msg.paths)
+        assert outgoing_msg.paths is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_path_duplicate_reconciles_path_without_new_row(
+        self, test_db, captured_broadcasts
+    ):
+        """Repeated fallback DMs should keep one row and merge path observations."""
+        from app.event_handlers import on_contact_message
+
+        await ContactRepository.upsert(
+            {
+                "public_key": CONTACT_PUB.lower(),
+                "name": "FallbackOnly",
+                "type": 1,
+                "last_seen": SENDER_TIMESTAMP,
+                "last_contacted": SENDER_TIMESTAMP,
+                "first_seen": SENDER_TIMESTAMP,
+                "on_radio": False,
+            }
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        first_event = MagicMock()
+        first_event.payload = {
+            "public_key": CONTACT_PUB,
+            "text": "Fallback duplicate route test",
+            "txt_type": 0,
+            "sender_timestamp": SENDER_TIMESTAMP,
+        }
+
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
+            await on_contact_message(first_event)
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=CONTACT_PUB.lower(), limit=10
+        )
+        assert len(messages) == 1
+        msg_id = messages[0].id
+
+        broadcasts.clear()
+
+        second_event = MagicMock()
+        second_event.payload = {
+            "public_key": CONTACT_PUB,
+            "text": "Fallback duplicate route test",
+            "txt_type": 0,
+            "sender_timestamp": SENDER_TIMESTAMP,
+            "path": "ddee",
+            "path_len": 2,
+        }
+
+        with patch("app.event_handlers.broadcast_event", mock_broadcast):
+            await on_contact_message(second_event)
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=CONTACT_PUB.lower(), limit=10
+        )
+        assert len(messages) == 1
+
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert message_broadcasts == []
+
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert len(ack_broadcasts) == 1
+        assert ack_broadcasts[0]["data"]["message_id"] == msg_id
+        assert ack_broadcasts[0]["data"]["ack_count"] == 0
+        assert any(p["path"] == "ddee" for p in ack_broadcasts[0]["data"]["paths"])
 
 
 class TestDirectMessageDirectionDetection:
@@ -684,7 +883,7 @@ class TestDirectMessageDirectionDetection:
         message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
         assert len(message_broadcasts) == 1
         assert message_broadcasts[0]["data"]["paths"] == [
-            {"path": "", "received_at": SENDER_TIMESTAMP, "path_len": 0}
+            {"path": "", "received_at": SENDER_TIMESTAMP, "path_len": 0, "rssi": None, "snr": None}
         ]
 
     @pytest.mark.asyncio
@@ -789,6 +988,130 @@ class TestDirectMessageDirectionDetection:
         assert messages[0].outgoing is False  # Defaults to incoming
 
     @pytest.mark.asyncio
+    async def test_ambiguous_direction_resolves_outgoing_echo(self, test_db, captured_broadcasts):
+        """Ambiguous direction resolves to outgoing when a matching sent message exists.
+
+        Uses real colliding keys where both public keys start with 0xAA.
+        Without the fix, the echo would be stored as a second (incoming) row.
+        """
+        from app.packet_processor import _process_direct_message
+
+        our_pub = "AAAA09479CF6FD6733CF052769E7C229CB86CA7F81E82439F9E4EB832CA7F8DC"
+        contact_pub = "AAAA2A563964F9B66E25E81FE6931B0E72AF585AEF79F43C1364DB4F6F882F07"
+        our_pub_bytes = bytes.fromhex(our_pub)
+        first_byte = "aa"
+
+        await ContactRepository.upsert(
+            {"public_key": contact_pub, "name": "CollidingContact", "type": 1}
+        )
+
+        # The send endpoint already stored the outgoing message
+        outgoing_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="Echo collision test",
+            conversation_key=contact_pub.lower(),
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP,
+            outgoing=True,
+        )
+        assert outgoing_id is not None
+
+        packet_info = MagicMock()
+        packet_info.payload = bytes([0xAA, 0xAA, 0x00, 0x00]) + b"\x00" * 20
+        packet_info.path = b"\xbb"
+        packet_info.path_length = 1
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=SENDER_TIMESTAMP,
+            flags=0,
+            message="Echo collision test",
+            dest_hash=first_byte,
+            src_hash=first_byte,
+        )
+
+        pkt_id, _ = await RawPacketRepository.create(b"ambig_echo", SENDER_TIMESTAMP + 1)
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with (
+            patch("app.packet_processor.has_private_key", return_value=True),
+            patch("app.packet_processor.get_private_key", return_value=b"\x00" * 32),
+            patch("app.packet_processor.get_public_key", return_value=our_pub_bytes),
+            patch("app.packet_processor.try_decrypt_dm", return_value=decrypted),
+            patch("app.packet_processor.broadcast_event", mock_broadcast),
+        ):
+            result = await _process_direct_message(
+                b"\x00" * 40, pkt_id, SENDER_TIMESTAMP + 1, packet_info
+            )
+
+        assert result is not None
+
+        # Should have exactly one message — the original outgoing, not a ghost incoming
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=contact_pub.lower(), limit=10
+        )
+        assert len(messages) == 1
+        assert messages[0].outgoing is True
+        assert messages[0].id == outgoing_id
+
+        # Path from the echo should have been added to the outgoing message
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert len(ack_broadcasts) == 1
+        assert ack_broadcasts[0]["data"]["message_id"] == outgoing_id
+        assert any(p["path"] == "bb" for p in ack_broadcasts[0]["data"]["paths"])
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_direction_genuine_incoming_still_stored(
+        self, test_db, captured_broadcasts
+    ):
+        """Ambiguous direction with no matching outgoing message stores as incoming."""
+        from app.packet_processor import _process_direct_message
+
+        our_pub = "AAAA09479CF6FD6733CF052769E7C229CB86CA7F81E82439F9E4EB832CA7F8DC"
+        contact_pub = "AAAA2A563964F9B66E25E81FE6931B0E72AF585AEF79F43C1364DB4F6F882F07"
+        our_pub_bytes = bytes.fromhex(our_pub)
+        first_byte = "aa"
+
+        await ContactRepository.upsert(
+            {"public_key": contact_pub, "name": "CollidingContact", "type": 1}
+        )
+
+        # No outgoing message exists — this is a genuine incoming DM
+        packet_info = MagicMock()
+        packet_info.payload = bytes([0xAA, 0xAA, 0x00, 0x00]) + b"\x00" * 20
+        packet_info.path = b""
+        packet_info.path_length = 0
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=SENDER_TIMESTAMP,
+            flags=0,
+            message="Genuine incoming",
+            dest_hash=first_byte,
+            src_hash=first_byte,
+        )
+
+        pkt_id, _ = await RawPacketRepository.create(b"ambig_genuine", SENDER_TIMESTAMP)
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with (
+            patch("app.packet_processor.has_private_key", return_value=True),
+            patch("app.packet_processor.get_private_key", return_value=b"\x00" * 32),
+            patch("app.packet_processor.get_public_key", return_value=our_pub_bytes),
+            patch("app.packet_processor.try_decrypt_dm", return_value=decrypted),
+            patch("app.packet_processor.broadcast_event", mock_broadcast),
+        ):
+            result = await _process_direct_message(
+                b"\x00" * 40, pkt_id, SENDER_TIMESTAMP, packet_info
+            )
+
+        assert result is not None
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=contact_pub.lower(), limit=10
+        )
+        assert len(messages) == 1
+        assert messages[0].outgoing is False  # Still incoming when no outgoing match
+
+    @pytest.mark.asyncio
     async def test_neither_hash_matches_returns_none(self, test_db, captured_broadcasts):
         """Neither hash byte matches us → not our message → returns None."""
         from app.packet_processor import _process_direct_message
@@ -818,21 +1141,19 @@ class TestDirectMessageDirectionDetection:
 
 
 class TestConcurrentDMDedup:
-    """Test that concurrent DM processing deduplicates via atomic INSERT OR IGNORE.
+    """Test that concurrent DM processing deduplicates by raw-packet identity.
 
-    On a mesh network, the same DM packet can arrive via two RF paths nearly
-    simultaneously, causing two concurrent calls to create_dm_message_from_decrypted.
-    SQLite's INSERT OR IGNORE ensures only one message is stored.
+    On a mesh network, the same DM payload can be observed twice before the first
+    handler finishes. Both arrivals reuse the same raw_packets row and should end
+    up attached to a single message.
     """
 
     @pytest.mark.asyncio
-    async def test_concurrent_identical_dms_only_store_once(self, test_db, captured_broadcasts):
-        """Two concurrent create_dm_message_from_decrypted calls with identical content
-        should result in exactly one stored message."""
+    async def test_concurrent_same_packet_dms_only_store_once(self, test_db, captured_broadcasts):
+        """Two concurrent handlers for the same raw DM packet store one message."""
         from app.packet_processor import create_dm_message_from_decrypted
 
-        pkt1, _ = await RawPacketRepository.create(b"concurrent_dm_1", SENDER_TIMESTAMP)
-        pkt2, _ = await RawPacketRepository.create(b"concurrent_dm_2", SENDER_TIMESTAMP + 1)
+        packet_id, _ = await RawPacketRepository.create(b"concurrent_dm_1", SENDER_TIMESTAMP)
 
         decrypted = DecryptedDirectMessage(
             timestamp=SENDER_TIMESTAMP,
@@ -847,7 +1168,7 @@ class TestConcurrentDMDedup:
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
             results = await asyncio.gather(
                 create_dm_message_from_decrypted(
-                    packet_id=pkt1,
+                    packet_id=packet_id,
                     decrypted=decrypted,
                     their_public_key=CONTACT_PUB,
                     our_public_key=OUR_PUB,
@@ -856,7 +1177,7 @@ class TestConcurrentDMDedup:
                     outgoing=False,
                 ),
                 create_dm_message_from_decrypted(
-                    packet_id=pkt2,
+                    packet_id=packet_id,
                     decrypted=decrypted,
                     their_public_key=CONTACT_PUB,
                     our_public_key=OUR_PUB,
@@ -934,7 +1255,7 @@ class TestMessageAckedBroadcastShape:
     # Frontend MessageAckedEvent keys (from useWebSocket.ts:113-117)
     # The 'paths' key is optional in the TypeScript interface
     REQUIRED_KEYS = {"message_id", "ack_count"}
-    OPTIONAL_KEYS = {"paths"}
+    OPTIONAL_KEYS = {"paths", "packet_id"}
 
     @pytest.mark.asyncio
     async def test_outgoing_echo_broadcast_shape(self, test_db, captured_broadcasts):
@@ -980,6 +1301,7 @@ class TestMessageAckedBroadcastShape:
         assert isinstance(payload["ack_count"], int)
         assert payload["message_id"] == msg_id
         assert payload["ack_count"] == 1
+        assert payload["packet_id"] == pkt_id
 
         # paths should be a list of dicts with path and received_at keys
         assert isinstance(payload["paths"], list)
@@ -1031,6 +1353,7 @@ class TestMessageAckedBroadcastShape:
         assert payload_keys >= self.REQUIRED_KEYS
         assert payload_keys <= (self.REQUIRED_KEYS | self.OPTIONAL_KEYS)
         assert payload["ack_count"] == 0  # Not outgoing, no ack increment
+        assert payload["packet_id"] == pkt1
 
     @pytest.mark.asyncio
     async def test_dm_echo_broadcast_shape(self, test_db, captured_broadcasts):
@@ -1085,4 +1408,111 @@ class TestMessageAckedBroadcastShape:
         assert payload_keys <= (self.REQUIRED_KEYS | self.OPTIONAL_KEYS)
         assert isinstance(payload["message_id"], int)
         assert isinstance(payload["ack_count"], int)
-        assert payload["ack_count"] == 1  # Outgoing DM echo increments ack
+        assert payload["ack_count"] == 0  # Outgoing DM duplicates no longer count as delivery
+        assert payload["packet_id"] == pkt1
+
+
+class TestRoomServerMessageDedup:
+    """Test that room-server posts from different authors are not collapsed.
+
+    Room messages are PRIV type sharing one conversation_key (the room contact's
+    pubkey).  The dedup index includes sender_key so that two different room
+    participants sending identical text in the same clock second are stored as
+    separate messages.
+    """
+
+    ROOM_PUB = "bb" * 32  # Room contact public key
+    SENDER_A_KEY = "aa" * 32
+    SENDER_B_KEY = "cc" * 32
+
+    @pytest.mark.asyncio
+    async def test_distinct_room_authors_same_text_same_second_stored_separately(self, test_db):
+        """Two room users sending identical text in the same second produce two rows."""
+        msg_id_a = await MessageRepository.create(
+            msg_type="PRIV",
+            text="ok",
+            conversation_key=self.ROOM_PUB,
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP,
+            outgoing=False,
+            sender_key=self.SENDER_A_KEY,
+            sender_name="Alice",
+        )
+        assert msg_id_a is not None
+
+        msg_id_b = await MessageRepository.create(
+            msg_type="PRIV",
+            text="ok",
+            conversation_key=self.ROOM_PUB,
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP + 1,
+            outgoing=False,
+            sender_key=self.SENDER_B_KEY,
+            sender_name="Bob",
+        )
+        assert msg_id_b is not None, (
+            "Second room post with different sender_key should not be deduped"
+        )
+        assert msg_id_a != msg_id_b
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=self.ROOM_PUB, limit=10
+        )
+        assert len(messages) == 2
+
+    @pytest.mark.asyncio
+    async def test_same_room_author_same_text_same_second_still_deduped(self, test_db):
+        """True echo from the same room author is still collapsed (same sender_key)."""
+        msg_id_1 = await MessageRepository.create(
+            msg_type="PRIV",
+            text="ok",
+            conversation_key=self.ROOM_PUB,
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP,
+            outgoing=False,
+            sender_key=self.SENDER_A_KEY,
+            sender_name="Alice",
+        )
+        assert msg_id_1 is not None
+
+        msg_id_2 = await MessageRepository.create(
+            msg_type="PRIV",
+            text="ok",
+            conversation_key=self.ROOM_PUB,
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP + 1,
+            outgoing=False,
+            sender_key=self.SENDER_A_KEY,
+            sender_name="Alice",
+        )
+        assert msg_id_2 is None, "Same sender_key should still be deduped"
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=self.ROOM_PUB, limit=10
+        )
+        assert len(messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_null_sender_key_still_dedupes_normally(self, test_db):
+        """Non-room incoming DMs (sender_key=None) still dedupe on content."""
+        msg_id_1 = await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello",
+            conversation_key=CONTACT_PUB.lower(),
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP,
+            outgoing=False,
+            sender_key=None,
+        )
+        assert msg_id_1 is not None
+
+        msg_id_2 = await MessageRepository.create(
+            msg_type="PRIV",
+            text="hello",
+            conversation_key=CONTACT_PUB.lower(),
+            sender_timestamp=SENDER_TIMESTAMP,
+            received_at=SENDER_TIMESTAMP + 1,
+            outgoing=False,
+            sender_key=None,
+        )
+        assert msg_id_2 is None, "Both NULL sender_key should still collide"

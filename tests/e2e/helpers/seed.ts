@@ -6,6 +6,20 @@ const ROOT = path.resolve(__dirname, '..', '..', '..');
 const DEFAULT_E2E_DB = path.join(ROOT, 'tests', 'e2e', '.tmp', 'e2e-test.db');
 const DB_PATH = process.env.MESHCORE_DATABASE_PATH ?? DEFAULT_E2E_DB;
 
+// Pi remote seed support: when E2E_BASE_URL points to a remote host,
+// run the Python injection via SSH instead of locally.
+const E2E_BASE_URL = process.env.E2E_BASE_URL;
+const PI_SSH_HOST = (() => {
+  if (!E2E_BASE_URL) return null;
+  try {
+    return new URL(E2E_BASE_URL).hostname;
+  } catch {
+    return null;
+  }
+})();
+const PI_SSH_USER = process.env.E2E_PI_USER ?? 'tesso';
+const PI_DB_PATH = process.env.E2E_PI_DB_PATH ?? '/opt/remoteterm/data/meshcore.db';
+
 interface SeedOptions {
   channelName: string;
   count: number;
@@ -20,7 +34,11 @@ interface SeedReadStateOptions {
 }
 
 function runPython(payload: object) {
-  const b64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+  // Override db_path for remote Pi runs
+  const enrichedPayload = PI_SSH_HOST
+    ? { ...payload, db_path: PI_DB_PATH }
+    : payload;
+  const b64 = Buffer.from(JSON.stringify(enrichedPayload), 'utf8').toString('base64');
 
 const script = String.raw`python3 - <<'PY'
 import base64, json, os, sqlite3, time
@@ -124,10 +142,25 @@ else:
 conn.close()
 PY`;
 
-  execSync(script, {
-    env: { ...process.env, PAYLOAD: b64 },
-    stdio: 'inherit',
-  });
+  if (PI_SSH_HOST) {
+    // Run injection on the Pi via SSH using sudo so we can write to the DB
+    // which is owned by the remoteterm service user.
+    // Pass the Python script body via stdin to avoid heredoc quoting issues.
+    const pyBody = script
+      .replace(/^python3 - <<'PY'\n/, '')
+      .replace(/\nPY$/, '');
+    const sshCmd = `ssh -o StrictHostKeyChecking=no -o BatchMode=yes ${PI_SSH_USER}@${PI_SSH_HOST} 'PAYLOAD="${b64}" sudo -E python3 -'`;
+    execSync(sshCmd, {
+      input: pyBody,
+      env: { ...process.env },
+      stdio: ['pipe', 'inherit', 'inherit'],
+    });
+  } else {
+    execSync(script, {
+      env: { ...process.env, PAYLOAD: b64 },
+      stdio: 'inherit',
+    });
+  }
 }
 
 function channelKeyFromName(name: string): string {

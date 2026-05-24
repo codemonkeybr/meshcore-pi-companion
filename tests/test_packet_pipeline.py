@@ -12,10 +12,20 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from Crypto.Cipher import AES
 
-from app.decoder import DecryptedDirectMessage, PacketInfo, ParsedAdvertisement, PayloadType
+from app.decoder import (
+    DecryptedDirectMessage,
+    PacketInfo,
+    ParsedAdvertisement,
+    PayloadType,
+    RouteType,
+    derive_public_key,
+    derive_shared_secret,
+)
 from app.repository import (
     ChannelRepository,
+    ContactAdvertPathRepository,
     ContactRepository,
     MessageRepository,
     RawPacketRepository,
@@ -25,6 +35,43 @@ from app.repository import (
 FIXTURES_PATH = Path(__file__).parent / "fixtures" / "websocket_events.json"
 with open(FIXTURES_PATH, encoding="utf-8") as f:
     FIXTURES = json.load(f)
+
+
+PATH_TEST_OUR_PRIV = bytes.fromhex(
+    "58BA1940E97099CBB4357C62CE9C7F4B245C94C90D722E67201B989F9FEACF7B"
+    "77ACADDB84438514022BDB0FC3140C2501859BE1772AC7B8C7E41DC0F40490A1"
+)
+PATH_TEST_CONTACT_PUB = bytes.fromhex(
+    "a1b2c3d3ba9f5fa8705b9845fe11cc6f01d1d49caaf4d122ac7121663c5beec7"
+)
+PATH_TEST_OUR_PUB = derive_public_key(PATH_TEST_OUR_PRIV)
+
+
+def _build_path_packet(
+    *,
+    packed_path_len: int,
+    path_bytes: bytes,
+    extra_type: int,
+    extra: bytes,
+    route_type: RouteType = RouteType.DIRECT,
+) -> bytes:
+    shared_secret = derive_shared_secret(PATH_TEST_OUR_PRIV, PATH_TEST_CONTACT_PUB)
+    plaintext = bytes([packed_path_len]) + path_bytes + bytes([extra_type]) + extra
+    pad_len = (16 - len(plaintext) % 16) % 16
+    if pad_len == 0:
+        pad_len = 16
+    plaintext += bytes(pad_len)
+
+    cipher = AES.new(shared_secret[:16], AES.MODE_ECB)
+    ciphertext = cipher.encrypt(plaintext)
+
+    import hmac
+    from hashlib import sha256
+
+    mac = hmac.new(shared_secret, ciphertext, sha256).digest()[:2]
+    header = bytes([(PayloadType.PATH << 2) | route_type, 0x00])
+    payload = bytes([PATH_TEST_OUR_PUB[0], PATH_TEST_CONTACT_PUB[0]]) + mac + ciphertext
+    return header + payload
 
 
 class TestChannelMessagePipeline:
@@ -133,7 +180,7 @@ class TestChannelMessagePipeline:
         assert result is not None
 
         # Raw packet should be stored
-        raw_packets = await RawPacketRepository.get_all_undecrypted()
+        raw_packets = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         assert len(raw_packets) >= 1
 
         # No message broadcast (only raw_packet broadcast)
@@ -169,10 +216,13 @@ class TestAdvertisementPipeline:
         assert contact.lon is not None
         assert abs(contact.lat - expected["lat"]) < 0.001
         assert abs(contact.lon - expected["lon"]) < 0.001
-        # This advertisement has path_len=6 (6 hops through repeaters)
-        assert contact.last_path_len == 6
-        assert contact.last_path is not None
-        assert len(contact.last_path) == 12  # 6 bytes = 12 hex chars
+        assert contact.direct_path_len == -1
+        assert contact.direct_path in (None, "")
+
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key)
+        assert len(advert_paths) == 1
+        assert advert_paths[0].path_len == 6
+        assert len(advert_paths[0].path) == 12  # 6 bytes = 12 hex chars
 
         # Verify WebSocket broadcast
         contact_broadcasts = [b for b in broadcasts if b["type"] == "contact"]
@@ -182,7 +232,8 @@ class TestAdvertisementPipeline:
         assert broadcast["data"]["public_key"] == expected["public_key"]
         assert broadcast["data"]["name"] == expected["name"]
         assert broadcast["data"]["type"] == expected["type"]
-        assert broadcast["data"]["last_path_len"] == 6
+        assert broadcast["data"]["direct_path_len"] == -1
+        assert "last_path_len" not in broadcast["data"]
 
     @pytest.mark.asyncio
     async def test_advertisement_updates_existing_contact(self, test_db, captured_broadcasts):
@@ -216,10 +267,11 @@ class TestAdvertisementPipeline:
         assert contact.type == expected["type"]  # Type updated
         assert contact.lat is not None  # GPS added
         assert contact.lon is not None
-        # This advertisement has path_len=0 (direct neighbor)
-        assert contact.last_path_len == 0
-        # Empty path stored as None or ""
-        assert contact.last_path in (None, "")
+
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(contact.public_key)
+        assert len(advert_paths) == 1
+        assert advert_paths[0].path_len == 0
+        assert advert_paths[0].path == ""
 
     @pytest.mark.asyncio
     async def test_advertisement_triggers_historical_decrypt_for_new_contact(
@@ -278,41 +330,38 @@ class TestAdvertisementPipeline:
         assert mock_start.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_advertisement_keeps_shorter_path_within_window(
+    async def test_advertisement_records_recent_unique_paths_without_changing_direct_route(
         self, test_db, captured_broadcasts
     ):
-        """When receiving echoed advertisements, keep the shortest path within 60s window."""
+        """Advertisement paths are informational and do not replace the stored direct route."""
         from app.packet_processor import _process_advertisement
 
-        # Create a contact with a longer path (path_len=3)
         test_pubkey = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         await ContactRepository.upsert(
             {
                 "public_key": test_pubkey,
                 "name": "TestNode",
                 "type": 1,
+                "direct_path": "aabbcc",
+                "direct_path_len": 3,
+                "direct_path_hash_mode": 0,
+                "last_advert": 1000,
                 "last_seen": 1000,
-                "last_path_len": 3,
-                "last_path": "aabbcc",  # 3 bytes = 3 hops
             }
         )
 
-        # Simulate receiving a shorter path (path_len=1) within 60s
-        # We'll call _process_advertisement directly with mock packet_info
         from unittest.mock import MagicMock
 
         from app.decoder import ParsedAdvertisement
 
         broadcasts, mock_broadcast = captured_broadcasts
 
-        # Mock packet_info with shorter path
         short_packet_info = MagicMock()
         short_packet_info.path_length = 1
         short_packet_info.path = bytes.fromhex("aa")
         short_packet_info.path_hash_size = 1
-        short_packet_info.payload = b""  # Will be parsed by parse_advertisement
+        short_packet_info.payload = b""
 
-        # Mock parse_advertisement to return our test contact
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
             with patch("app.packet_processor.parse_advertisement") as mock_parse:
                 mock_parse.return_value = ParsedAdvertisement(
@@ -323,18 +372,13 @@ class TestAdvertisementPipeline:
                     lon=None,
                     device_role=1,
                 )
-                # Process at timestamp 1050 (within 60s of last_seen=1000)
                 await _process_advertisement(b"", timestamp=1050, packet_info=short_packet_info)
 
-        # Verify the shorter path was stored
-        contact = await ContactRepository.get_by_key(test_pubkey)
-        assert contact.last_path_len == 1  # Updated to shorter path
-
-        # Now simulate receiving a longer path (path_len=5) - should keep the shorter one
         long_packet_info = MagicMock()
         long_packet_info.path_length = 5
         long_packet_info.path = bytes.fromhex("aabbccddee")
         long_packet_info.path_hash_size = 1
+        long_packet_info.payload = b""
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
             with patch("app.packet_processor.parse_advertisement") as mock_parse:
@@ -346,22 +390,89 @@ class TestAdvertisementPipeline:
                     lon=None,
                     device_role=1,
                 )
-                # Process at timestamp 1055 (within 60s of last update)
                 await _process_advertisement(b"", timestamp=1055, packet_info=long_packet_info)
 
-        # Verify the shorter path was kept
         contact = await ContactRepository.get_by_key(test_pubkey)
-        assert contact.last_path_len == 1  # Still the shorter path
+        assert contact is not None
+        assert contact.direct_path == "aabbcc"
+        assert contact.direct_path_len == 3
+        assert contact.direct_path_hash_mode == 0
+        assert contact.direct_path_updated_at is None
+
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(test_pubkey)
+        assert [(path.path, path.path_len) for path in advert_paths] == [
+            ("aabbccddee", 5),
+            ("aa", 1),
+        ]
 
     @pytest.mark.asyncio
-    async def test_advertisement_default_path_len_treated_as_infinity(
+    async def test_advertisement_path_freshness_uses_receive_time_not_sender_clock(
         self, test_db, captured_broadcasts
     ):
-        """Contact with last_path_len=-1 (unset) is treated as infinite length.
+        """Advert history timestamps use receive time instead of sender clock."""
+        from unittest.mock import MagicMock
 
-        Any new advertisement should replace the default -1 path since
-        the code converts -1 to float('inf') for comparison.
-        """
+        from app.decoder import ParsedAdvertisement
+        from app.packet_processor import _process_advertisement
+
+        test_pubkey = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        await ContactRepository.upsert({"public_key": test_pubkey, "name": "TestNode", "type": 1})
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        longer_packet_info = MagicMock()
+        longer_packet_info.path_length = 3
+        longer_packet_info.path = bytes.fromhex("aabbcc")
+        longer_packet_info.path_hash_size = 1
+        longer_packet_info.payload = b""
+
+        skewed_shorter_packet_info = MagicMock()
+        skewed_shorter_packet_info.path_length = 1
+        skewed_shorter_packet_info.path = bytes.fromhex("aa")
+        skewed_shorter_packet_info.path_hash_size = 1
+        skewed_shorter_packet_info.payload = b""
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+                mock_parse.return_value = ParsedAdvertisement(
+                    public_key=test_pubkey,
+                    name="TestNode",
+                    timestamp=5000,
+                    lat=None,
+                    lon=None,
+                    device_role=1,
+                )
+                await _process_advertisement(
+                    b"", timestamp=1070, packet_info=skewed_shorter_packet_info
+                )
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+                mock_parse.return_value = ParsedAdvertisement(
+                    public_key=test_pubkey,
+                    name="TestNode",
+                    timestamp=5005,
+                    lat=None,
+                    lon=None,
+                    device_role=1,
+                )
+                await _process_advertisement(b"", timestamp=1200, packet_info=longer_packet_info)
+
+        contact = await ContactRepository.get_by_key(test_pubkey)
+        assert contact is not None
+        assert contact.last_advert == 1200
+
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(test_pubkey)
+        assert [(path.path, path.last_seen) for path in advert_paths] == [
+            ("aabbcc", 1200),
+            ("aa", 1070),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_advertisement_records_path_history_when_no_direct_route_exists(
+        self, test_db, captured_broadcasts
+    ):
+        """Advertisement path history is still recorded when no direct route exists."""
         from app.packet_processor import _process_advertisement
 
         test_pubkey = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -371,8 +482,6 @@ class TestAdvertisementPipeline:
                 "name": "TestNode",
                 "type": 1,
                 "last_seen": 1000,
-                "last_path_len": -1,  # Default unset value
-                "last_path": None,
             }
         )
 
@@ -395,23 +504,21 @@ class TestAdvertisementPipeline:
                     lon=None,
                     device_role=1,
                 )
-                # Process within 60s window (last_seen=1000, now=1050)
                 await _process_advertisement(b"", timestamp=1050, packet_info=packet_info)
 
-        # Since -1 is treated as infinity, the new path (len=3) should replace it
         contact = await ContactRepository.get_by_key(test_pubkey)
-        assert contact.last_path_len == 3
-        assert contact.last_path == "aabbcc"
+        assert contact is not None
+        assert contact.direct_path_len == -1
+        assert contact.direct_path in (None, "")
+        assert contact.direct_path_updated_at is None
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(test_pubkey)
+        assert len(advert_paths) == 1
+        assert advert_paths[0].path == "aabbcc"
+        assert advert_paths[0].path_len == 3
 
     @pytest.mark.asyncio
-    async def test_advertisement_replaces_stale_path_outside_window(
-        self, test_db, captured_broadcasts
-    ):
-        """When existing path is stale (>60s), a new longer path should replace it.
-
-        In a mesh network, a stale short path may no longer be valid (node moved, repeater
-        went offline). Accepting the new longer path ensures we have a working route.
-        """
+    async def test_advertisement_adds_new_unique_history_path(self, test_db, captured_broadcasts):
+        """A new advertisement path is added to history even when an older path already exists."""
         from app.packet_processor import _process_advertisement
 
         test_pubkey = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -421,10 +528,9 @@ class TestAdvertisementPipeline:
                 "name": "TestNode",
                 "type": 1,
                 "last_seen": 1000,
-                "last_path_len": 1,  # Short path
-                "last_path": "aa",
             }
         )
+        await ContactAdvertPathRepository.record_observation(test_pubkey, "aa", 1000, hop_count=1)
 
         from unittest.mock import MagicMock
 
@@ -451,10 +557,158 @@ class TestAdvertisementPipeline:
                 )
                 await _process_advertisement(b"", timestamp=1061, packet_info=long_packet_info)
 
-        # Verify the longer path replaced the stale shorter one
         contact = await ContactRepository.get_by_key(test_pubkey)
-        assert contact.last_path_len == 4
-        assert contact.last_path == "aabbccdd"
+        assert contact is not None
+        assert contact.direct_path_len == -1
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(test_pubkey)
+        assert [(path.path, path.path_len) for path in advert_paths] == [
+            ("aabbccdd", 4),
+            ("aa", 1),
+        ]
+
+
+class TestPathPacketPipeline:
+    """Test PATH packet learning and bundled ACK handling."""
+
+    @pytest.mark.asyncio
+    async def test_process_raw_path_packet_updates_direct_route(self, test_db, captured_broadcasts):
+        """A decryptable PATH packet updates the contact's learned direct route."""
+        from app.packet_processor import process_raw_packet
+
+        timestamp = 1700000200
+        raw_packet = _build_path_packet(
+            packed_path_len=0x42,
+            path_bytes=bytes.fromhex("aabbccdd"),
+            extra_type=PayloadType.RESPONSE,
+            extra=b"\x11\x22",
+        )
+
+        await ContactRepository.upsert(
+            {
+                "public_key": PATH_TEST_CONTACT_PUB.hex(),
+                "name": "PathPeer",
+                "type": 1,
+            }
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with (
+            patch("app.packet_processor.broadcast_event", mock_broadcast),
+            patch("app.packet_processor.has_private_key", return_value=True),
+            patch("app.packet_processor.get_private_key", return_value=PATH_TEST_OUR_PRIV),
+            patch("app.packet_processor.get_public_key", return_value=PATH_TEST_OUR_PUB),
+        ):
+            result = await process_raw_packet(raw_packet, timestamp=timestamp)
+
+        assert result["payload_type"] == "PATH"
+        contact = await ContactRepository.get_by_key(PATH_TEST_CONTACT_PUB.hex())
+        assert contact is not None
+        assert contact.direct_path == "aabbccdd"
+        assert contact.direct_path_len == 2
+        assert contact.direct_path_hash_mode == 1
+        assert contact.direct_path_updated_at == timestamp
+
+        contact_broadcasts = [b for b in broadcasts if b["type"] == "contact"]
+        assert len(contact_broadcasts) == 1
+        assert contact_broadcasts[0]["data"]["effective_route_source"] == "direct"
+
+    @pytest.mark.asyncio
+    async def test_bundled_path_ack_marks_message_acked(self, test_db, captured_broadcasts):
+        """Bundled ACKs inside PATH packets satisfy the pending DM ACK tracker."""
+        from app.packet_processor import process_raw_packet
+        from app.services import dm_ack_tracker
+
+        raw_packet = _build_path_packet(
+            packed_path_len=0x00,
+            path_bytes=b"",
+            extra_type=PayloadType.ACK,
+            extra=bytes.fromhex("01020304feedface"),
+        )
+
+        await ContactRepository.upsert(
+            {
+                "public_key": PATH_TEST_CONTACT_PUB.hex(),
+                "name": "AckPeer",
+                "type": 1,
+            }
+        )
+        message_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="waiting for ack",
+            conversation_key=PATH_TEST_CONTACT_PUB.hex(),
+            sender_timestamp=1700000000,
+            received_at=1700000000,
+            outgoing=True,
+        )
+
+        prev_pending = dm_ack_tracker._pending_acks.copy()
+        prev_buffered = dm_ack_tracker._buffered_acks.copy()
+        dm_ack_tracker._pending_acks.clear()
+        dm_ack_tracker._buffered_acks.clear()
+        dm_ack_tracker.track_pending_ack("01020304", message_id, 30000)
+        dm_ack_tracker.track_pending_ack("05060708", message_id, 30000)
+
+        broadcasts, mock_broadcast = captured_broadcasts
+        try:
+            with (
+                patch("app.packet_processor.broadcast_event", mock_broadcast),
+                patch("app.packet_processor.has_private_key", return_value=True),
+                patch("app.packet_processor.get_private_key", return_value=PATH_TEST_OUR_PRIV),
+                patch("app.packet_processor.get_public_key", return_value=PATH_TEST_OUR_PUB),
+            ):
+                await process_raw_packet(raw_packet, timestamp=1700000300)
+        finally:
+            pending_after = dm_ack_tracker._pending_acks.copy()
+            dm_ack_tracker._pending_acks.clear()
+            dm_ack_tracker._pending_acks.update(prev_pending)
+            dm_ack_tracker._buffered_acks.clear()
+            dm_ack_tracker._buffered_acks.update(prev_buffered)
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV",
+            conversation_key=PATH_TEST_CONTACT_PUB.hex(),
+            limit=10,
+        )
+        assert len(messages) == 1
+        assert messages[0].acked == 1
+        assert "01020304" not in pending_after
+        assert "05060708" not in pending_after
+
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert len(ack_broadcasts) == 1
+        assert ack_broadcasts[0]["data"] == {"message_id": message_id, "ack_count": 1}
+
+    @pytest.mark.asyncio
+    async def test_prefix_only_contacts_are_skipped_for_path_decryption(self, test_db):
+        """Prefix-only contacts are not treated as valid ECDH peers for PATH packets."""
+        from app.packet_processor import _process_path_packet
+
+        raw_packet = _build_path_packet(
+            packed_path_len=0x00,
+            path_bytes=b"",
+            extra_type=PayloadType.RESPONSE,
+            extra=b"\x01",
+        )
+
+        await ContactRepository.upsert(
+            {
+                "public_key": PATH_TEST_CONTACT_PUB.hex()[:12],
+                "name": "PrefixOnly",
+                "type": 1,
+            }
+        )
+
+        with (
+            patch("app.packet_processor.has_private_key", return_value=True),
+            patch("app.packet_processor.get_private_key", return_value=PATH_TEST_OUR_PRIV),
+            patch("app.packet_processor.get_public_key", return_value=PATH_TEST_OUR_PUB),
+            patch(
+                "app.packet_processor.try_decrypt_path",
+                side_effect=AssertionError("prefix-only contacts should be skipped"),
+            ),
+        ):
+            await _process_path_packet(raw_packet, 1700000400, None)
 
 
 class TestAckPipeline:
@@ -646,7 +900,7 @@ class TestCreateMessageFromDecrypted:
             )
 
         # Verify packet is marked decrypted (has message_id set)
-        undecrypted = await RawPacketRepository.get_all_undecrypted()
+        undecrypted = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         packet_ids = [p[0] for p in undecrypted]
         assert packet_id not in packet_ids  # Should be marked as decrypted
 
@@ -826,8 +1080,58 @@ class TestCreateDMMessageFromDecrypted:
         assert message_broadcasts[0]["data"]["outgoing"] is True
 
     @pytest.mark.asyncio
-    async def test_returns_none_for_duplicate_dm(self, test_db, captured_broadcasts):
-        """create_dm_message_from_decrypted returns None for duplicate DM."""
+    async def test_returns_none_for_same_raw_packet_duplicate_dm(
+        self, test_db, captured_broadcasts
+    ):
+        """Reprocessing the same raw DM packet reuses the existing message."""
+        from app.decoder import DecryptedDirectMessage
+        from app.packet_processor import create_dm_message_from_decrypted
+
+        packet_id, _ = await RawPacketRepository.create(b"dm_packet_1", 1700000000)
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=1700000000,
+            flags=0,
+            message="Duplicate DM test",
+            dest_hash="fa",
+            src_hash="a1",
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            # First call creates the message
+            msg_id_1 = await create_dm_message_from_decrypted(
+                packet_id=packet_id,
+                decrypted=decrypted,
+                their_public_key=self.A1B2C3_PUB,
+                our_public_key=self.FACE12_PUB,
+                received_at=1700000001,
+                outgoing=False,
+            )
+
+            # Second call for the same packet returns None and does not create a new row
+            msg_id_2 = await create_dm_message_from_decrypted(
+                packet_id=packet_id,
+                decrypted=decrypted,
+                their_public_key=self.A1B2C3_PUB,
+                our_public_key=self.FACE12_PUB,
+                received_at=1700000002,
+                outgoing=False,
+            )
+
+        assert msg_id_1 is not None
+        assert msg_id_2 is None  # Duplicate detected
+
+        # Only one message broadcast
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert len(message_broadcasts) == 1
+
+    @pytest.mark.asyncio
+    async def test_dedupes_same_text_same_second_incoming_dms_from_distinct_packets(
+        self, test_db, captured_broadcasts
+    ):
+        """Distinct incoming DM observations with the same text/timestamp merge."""
         from app.decoder import DecryptedDirectMessage
         from app.packet_processor import create_dm_message_from_decrypted
 
@@ -845,7 +1149,6 @@ class TestCreateDMMessageFromDecrypted:
         broadcasts, mock_broadcast = captured_broadcasts
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            # First call creates the message
             msg_id_1 = await create_dm_message_from_decrypted(
                 packet_id=packet_id_1,
                 decrypted=decrypted,
@@ -854,8 +1157,6 @@ class TestCreateDMMessageFromDecrypted:
                 received_at=1700000001,
                 outgoing=False,
             )
-
-            # Second call with same content returns None
             msg_id_2 = await create_dm_message_from_decrypted(
                 packet_id=packet_id_2,
                 decrypted=decrypted,
@@ -866,9 +1167,13 @@ class TestCreateDMMessageFromDecrypted:
             )
 
         assert msg_id_1 is not None
-        assert msg_id_2 is None  # Duplicate detected
+        assert msg_id_2 is None
 
-        # Only one message broadcast
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=self.A1B2C3_PUB.lower(), limit=10
+        )
+        assert len(messages) == 1
+
         message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
         assert len(message_broadcasts) == 1
 
@@ -901,7 +1206,7 @@ class TestCreateDMMessageFromDecrypted:
             )
 
         # Verify packet is marked decrypted
-        undecrypted = await RawPacketRepository.get_all_undecrypted()
+        undecrypted = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         packet_ids = [p[0] for p in undecrypted]
         assert packet_id not in packet_ids
 
@@ -1009,7 +1314,7 @@ class TestDMDecryptionFunction:
         assert messages[0].outgoing is False
 
         # Verify raw packet is linked
-        undecrypted = await RawPacketRepository.get_all_undecrypted()
+        undecrypted = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         assert packet_id not in [p[0] for p in undecrypted]
 
 
@@ -1080,6 +1385,56 @@ class TestRepeaterMessageFiltering:
         # Should not be in database
         messages = await MessageRepository.get_all(
             msg_type="PRIV", conversation_key=self.REPEATER_PUB.lower(), limit=10
+        )
+        assert len(messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_room_cli_response_not_stored(self, test_db, captured_broadcasts):
+        """Room-server CLI responses should not be stored in chat history."""
+        from app.decoder import DecryptedDirectMessage
+        from app.models import CONTACT_TYPE_ROOM
+        from app.packet_processor import create_dm_message_from_decrypted
+        from app.repository import ContactRepository, MessageRepository, RawPacketRepository
+
+        room_pub = "c3d4e5f6cb0a6fb9816ca956ff22dd7f12e2e5adbbf5e233bd8232774d6cffee"
+
+        await ContactRepository.upsert(
+            {
+                "public_key": room_pub,
+                "name": "Test Room",
+                "type": CONTACT_TYPE_ROOM,
+                "flags": 0,
+                "on_radio": False,
+            }
+        )
+
+        packet_id, _ = await RawPacketRepository.create(b"\x09\x00test", 1700000000)
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=1700000000,
+            flags=(1 << 2),
+            message="> status ok",
+            dest_hash="fa",
+            src_hash="c3",
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            msg_id = await create_dm_message_from_decrypted(
+                packet_id=packet_id,
+                decrypted=decrypted,
+                their_public_key=room_pub,
+                our_public_key=self.OUR_PUB,
+                received_at=1700000001,
+                outgoing=False,
+            )
+
+        assert msg_id is None
+        assert len(broadcasts) == 0
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV", conversation_key=room_pub.lower(), limit=10
         )
         assert len(messages) == 0
 
@@ -1573,8 +1928,12 @@ class TestProcessRawPacketIntegration:
 
         contact = await ContactRepository.get_by_key(test_pubkey)
         assert contact is not None
-        assert contact.last_path_len == 1  # Shorter path won
-        assert contact.last_path == "dd"
+        assert contact.direct_path_len == -1
+        advert_paths = await ContactAdvertPathRepository.get_recent_for_contact(test_pubkey)
+        assert [(path.path, path.path_len) for path in advert_paths] == [
+            ("dd", 1),
+            ("aabbcc", 3),
+        ]
 
     @pytest.mark.asyncio
     async def test_dispatches_text_message(self, test_db, captured_broadcasts):
@@ -1721,7 +2080,7 @@ class TestProcessRawPacketIntegration:
                 result = await process_raw_packet(raw, timestamp=7000)
 
         # Verify packet is in undecrypted list
-        undecrypted = await RawPacketRepository.get_all_undecrypted()
+        undecrypted = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         packet_ids = [p[0] for p in undecrypted]
         assert result["packet_id"] in packet_ids
 
@@ -2231,7 +2590,7 @@ class TestHistoricalChannelDecryptIntegration:
         assert len(message_broadcasts) == 0
 
         # Raw packet is in the undecrypted pool
-        undecrypted = await RawPacketRepository.get_all_undecrypted()
+        undecrypted = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         assert len(undecrypted) == 1
         packet_id = undecrypted[0][0]
 
@@ -2256,7 +2615,7 @@ class TestHistoricalChannelDecryptIntegration:
         assert msg.conversation_key == channel_key_hex
 
         # --- Verify: raw packet is now marked as decrypted ---
-        undecrypted_after = await RawPacketRepository.get_all_undecrypted()
+        undecrypted_after = [p async for p in RawPacketRepository.stream_all_undecrypted()]
         remaining_ids = [p[0] for p in undecrypted_after]
         assert packet_id not in remaining_ids
 
@@ -2280,7 +2639,7 @@ class TestHistoricalChannelDecryptIntegration:
             await process_raw_packet(raw_packet, timestamp=1700000000)
 
         # Packet stored undecrypted
-        assert len(await RawPacketRepository.get_all_undecrypted()) == 1
+        assert len([p async for p in RawPacketRepository.stream_all_undecrypted()]) == 1
 
         # Run historical decrypt with the wrong key
         with patch("app.websocket.ws_manager") as mock_ws:
@@ -2294,7 +2653,7 @@ class TestHistoricalChannelDecryptIntegration:
         assert len(messages) == 0
 
         # Packet still undecrypted
-        assert len(await RawPacketRepository.get_all_undecrypted()) == 1
+        assert len([p async for p in RawPacketRepository.stream_all_undecrypted()]) == 1
 
     @pytest.mark.asyncio
     async def test_historical_decrypt_multiple_packets(self, test_db, captured_broadcasts):
@@ -2321,7 +2680,7 @@ class TestHistoricalChannelDecryptIntegration:
             for pkt in packets:
                 await process_raw_packet(pkt, timestamp=1700000000)
 
-        assert len(await RawPacketRepository.get_all_undecrypted()) == 3
+        assert len([p async for p in RawPacketRepository.stream_all_undecrypted()]) == 3
 
         # Add channel, run historical decrypt
         await ChannelRepository.upsert(key=channel_key_hex, name=channel_name, is_hashtag=True)
@@ -2338,4 +2697,4 @@ class TestHistoricalChannelDecryptIntegration:
         assert texts == ["Alice: First message", "Bob: Second message", "Carol: Third message"]
 
         # All packets now decrypted
-        assert len(await RawPacketRepository.get_all_undecrypted()) == 0
+        assert len([p async for p in RawPacketRepository.stream_all_undecrypted()]) == 0

@@ -4,14 +4,17 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ContactInfoPane } from '../components/ContactInfoPane';
 import type { Contact, ContactAnalytics } from '../types';
 
-const { getContactAnalytics } = vi.hoisted(() => ({
+const { getContactAnalytics, contactTelemetryHistory } = vi.hoisted(() => ({
   getContactAnalytics: vi.fn(),
+  contactTelemetryHistory: vi.fn(),
 }));
 
 vi.mock('../api', () => ({
   api: {
     getContactAnalytics,
+    contactTelemetryHistory,
   },
+  isAbortError: () => false,
 }));
 
 vi.mock('../components/ui/sheet', () => ({
@@ -24,6 +27,13 @@ vi.mock('../components/ui/sheet', () => ({
 
 vi.mock('../components/ContactAvatar', () => ({
   ContactAvatar: () => <div data-testid="contact-avatar" />,
+}));
+
+vi.mock('react-leaflet', () => ({
+  MapContainer: () => null,
+  TileLayer: () => null,
+  CircleMarker: () => null,
+  Popup: () => null,
 }));
 
 vi.mock('../components/ui/sonner', () => ({
@@ -39,14 +49,15 @@ function createContact(overrides: Partial<Contact> = {}): Contact {
     name: 'Alice',
     type: 1,
     flags: 0,
-    last_path: null,
-    last_path_len: 0,
-    out_path_hash_mode: 0,
+    direct_path: null,
+    direct_path_len: 0,
+    direct_path_hash_mode: 0,
     last_advert: null,
     lat: null,
     lon: null,
     last_seen: 1700000000,
     on_radio: false,
+    favorite: false,
     last_contacted: null,
     last_read_at: null,
     first_seen: 1699990000,
@@ -90,7 +101,6 @@ const baseProps = {
   onClose: () => {},
   contacts: [] as Contact[],
   config: null,
-  favorites: [],
   onToggleFavorite: () => {},
   onSearchMessagesByKey: vi.fn(),
   onSearchMessagesByName: vi.fn(),
@@ -99,12 +109,14 @@ const baseProps = {
 describe('ContactInfoPane', () => {
   beforeEach(() => {
     getContactAnalytics.mockReset();
+    contactTelemetryHistory.mockReset();
+    contactTelemetryHistory.mockResolvedValue([]);
     baseProps.onSearchMessagesByKey = vi.fn();
     baseProps.onSearchMessagesByName = vi.fn();
   });
 
   it('shows hop width when contact has a stored path hash mode', async () => {
-    const contact = createContact({ out_path_hash_mode: 1 });
+    const contact = createContact({ direct_path_hash_mode: 1, direct_path_len: 1 });
     getContactAnalytics.mockResolvedValue(createAnalytics(contact));
 
     render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
@@ -117,7 +129,7 @@ describe('ContactInfoPane', () => {
   });
 
   it('does not show hop width for flood-routed contacts', async () => {
-    const contact = createContact({ last_path_len: -1, out_path_hash_mode: -1 });
+    const contact = createContact({ direct_path_len: -1, direct_path_hash_mode: -1 });
     getContactAnalytics.mockResolvedValue(createAnalytics(contact));
 
     render(<ContactInfoPane {...baseProps} contactKey={contact.public_key} />);
@@ -131,8 +143,8 @@ describe('ContactInfoPane', () => {
 
   it('shows forced routing override and learned route separately', async () => {
     const contact = createContact({
-      last_path_len: 1,
-      out_path_hash_mode: 0,
+      direct_path_len: 1,
+      direct_path_hash_mode: 0,
       route_override_path: 'ae92f13e',
       route_override_len: 2,
       route_override_hash_mode: 1,
@@ -150,7 +162,7 @@ describe('ContactInfoPane', () => {
     });
   });
 
-  it('loads name-only channel stats and most active rooms', async () => {
+  it('loads name-only channel stats and most active channels', async () => {
     getContactAnalytics.mockResolvedValue(
       createAnalytics(null, {
         lookup_type: 'name',
@@ -181,14 +193,17 @@ describe('ContactInfoPane', () => {
 
     await screen.findByText('Mystery');
     await waitFor(() => {
-      expect(getContactAnalytics).toHaveBeenCalledWith({ name: 'Mystery' });
+      expect(getContactAnalytics).toHaveBeenCalledWith(
+        { name: 'Mystery' },
+        expect.any(AbortSignal)
+      );
       expect(screen.getByText('Messages')).toBeInTheDocument();
       expect(screen.getByText('Channel Messages')).toBeInTheDocument();
       expect(screen.getByText('4', { selector: 'p' })).toBeInTheDocument();
       expect(screen.getByText('Name First In Use')).toBeInTheDocument();
       expect(screen.getByText('Messages Per Hour')).toBeInTheDocument();
       expect(screen.getByText('Messages Per Week')).toBeInTheDocument();
-      expect(screen.getByText('Most Active Rooms')).toBeInTheDocument();
+      expect(screen.getByText('Most Active Channels')).toBeInTheDocument();
       expect(screen.getByText('#ops')).toBeInTheDocument();
       expect(
         screen.getByText(/Name-only analytics include channel messages only/i)

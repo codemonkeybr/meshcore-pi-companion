@@ -2,9 +2,14 @@ import { useState, useEffect, type ReactNode } from 'react';
 import type {
   AppSettings,
   AppSettingsUpdate,
+  Channel,
+  Contact,
   HealthStatus,
+  RadioAdvertMode,
   RadioConfig,
   RadioConfigUpdate,
+  RadioDiscoveryResponse,
+  RadioDiscoveryTarget,
 } from '../types';
 import type { LocalLabel } from '../utils/localLabel';
 import {
@@ -15,6 +20,7 @@ import {
 
 import { SettingsRadioSection } from './settings/SettingsRadioSection';
 import { SettingsLocalSection } from './settings/SettingsLocalSection';
+import { SettingsRadioAppSection } from './settings/SettingsRadioAppSection';
 import { SettingsFanoutSection } from './settings/SettingsFanoutSection';
 import { SettingsDatabaseSection } from './settings/SettingsDatabaseSection';
 import { SettingsStatisticsSection } from './settings/SettingsStatisticsSection';
@@ -33,8 +39,10 @@ interface SettingsModalBaseProps {
   onReboot: () => Promise<void>;
   onDisconnect: () => Promise<void>;
   onReconnect: () => Promise<void>;
-  onAdvertise: () => Promise<void>;
-  onSyncChannels: () => Promise<void>;
+  onAdvertise: (mode: RadioAdvertMode) => Promise<void>;
+  meshDiscovery: RadioDiscoveryResponse | null;
+  meshDiscoveryLoadingTarget: RadioDiscoveryTarget | null;
+  onDiscoverMesh: (target: RadioDiscoveryTarget) => Promise<void>;
   onHealthRefresh: () => Promise<void>;
   onRefreshAppSettings: () => Promise<void>;
   onLocalLabelChange?: (label: LocalLabel) => void;
@@ -42,6 +50,14 @@ interface SettingsModalBaseProps {
   blockedNames?: string[];
   onToggleBlockedKey?: (key: string) => void;
   onToggleBlockedName?: (name: string) => void;
+  contacts?: Contact[];
+  channels?: Channel[];
+  onBulkDeleteContacts?: (deletedKeys: string[]) => void;
+  trackedTelemetryRepeaters?: string[];
+  onToggleTrackedTelemetry?: (publicKey: string) => Promise<void>;
+  trackedTelemetryContacts?: string[];
+  onToggleTrackedTelemetryContact?: (publicKey: string) => Promise<void>;
+  onSyncChannels: () => Promise<void>;
 }
 
 export type SettingsModalProps = SettingsModalBaseProps &
@@ -65,7 +81,9 @@ export function SettingsModal(props: SettingsModalProps) {
     onDisconnect,
     onReconnect,
     onAdvertise,
-    onSyncChannels,
+    meshDiscovery,
+    meshDiscoveryLoadingTarget,
+    onDiscoverMesh,
     onHealthRefresh,
     onRefreshAppSettings,
     onLocalLabelChange,
@@ -73,6 +91,14 @@ export function SettingsModal(props: SettingsModalProps) {
     blockedNames,
     onToggleBlockedKey,
     onToggleBlockedName,
+    contacts,
+    channels,
+    onBulkDeleteContacts,
+    trackedTelemetryRepeaters,
+    onToggleTrackedTelemetry,
+    trackedTelemetryContacts,
+    onToggleTrackedTelemetryContact,
+    onSyncChannels,
   } = props;
   const externalSidebarNav = props.externalSidebarNav === true;
   const desktopSection = props.externalSidebarNav ? props.desktopSection : undefined;
@@ -87,6 +113,7 @@ export function SettingsModal(props: SettingsModalProps) {
   const [expandedSections, setExpandedSections] = useState<Record<SettingsSection, boolean>>({
     radio: false,
     local: false,
+    'radio-app': false,
     fanout: false,
     database: false,
     statistics: false,
@@ -140,8 +167,8 @@ export function SettingsModal(props: SettingsModalProps) {
     : 'mx-auto w-full max-w-[800px] space-y-4 border-t border-input p-4';
 
   const settingsContainerClass = externalDesktopSidebarMode
-    ? 'w-full h-full overflow-y-auto'
-    : 'w-full h-full overflow-y-auto space-y-3';
+    ? 'w-full h-full min-w-0 overflow-x-hidden overflow-y-auto [contain:layout_paint]'
+    : 'w-full h-full min-w-0 overflow-x-hidden overflow-y-auto space-y-3 [contain:layout_paint]';
 
   const sectionButtonClasses =
     'w-full flex items-center justify-between px-4 py-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset';
@@ -171,31 +198,39 @@ export function SettingsModal(props: SettingsModalProps) {
     return null;
   }
 
-  return !config ? (
-    <div className="py-8 text-center text-muted-foreground">Loading configuration...</div>
-  ) : (
+  return (
     <div className={settingsContainerClass}>
       {shouldRenderSection('radio') && (
         <section className={sectionWrapperClass}>
           {renderSectionHeader('radio')}
-          {isSectionVisible('radio') && appSettings && (
-            <SettingsRadioSection
-              config={config}
-              health={health}
-              appSettings={appSettings}
-              pageMode={pageMode}
-              onSave={onSave}
-              onSaveAppSettings={onSaveAppSettings}
-              onSetPrivateKey={onSetPrivateKey}
-              onReboot={onReboot}
-              onDisconnect={onDisconnect}
-              onReconnect={onReconnect}
-              onAdvertise={onAdvertise}
-              onSyncChannels={onSyncChannels}
-              onClose={onClose}
-              className={sectionContentClass}
-            />
-          )}
+          {isSectionVisible('radio') &&
+            (config && appSettings ? (
+              <SettingsRadioSection
+                config={config}
+                health={health}
+                appSettings={appSettings}
+                pageMode={pageMode}
+                onSave={onSave}
+                onSaveAppSettings={onSaveAppSettings}
+                onSetPrivateKey={onSetPrivateKey}
+                onReboot={onReboot}
+                onDisconnect={onDisconnect}
+                onReconnect={onReconnect}
+                onAdvertise={onAdvertise}
+                meshDiscovery={meshDiscovery}
+                meshDiscoveryLoadingTarget={meshDiscoveryLoadingTarget}
+                onDiscoverMesh={onDiscoverMesh}
+                onSyncChannels={onSyncChannels}
+                onClose={onClose}
+                className={sectionContentClass}
+              />
+            ) : (
+              <div className={sectionContentClass}>
+                <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+                  Radio is not available.
+                </div>
+              </div>
+            ))}
         </section>
       )}
 
@@ -205,28 +240,63 @@ export function SettingsModal(props: SettingsModalProps) {
           {isSectionVisible('local') && (
             <SettingsLocalSection
               onLocalLabelChange={onLocalLabelChange}
+              contacts={contacts}
+              channels={channels}
               className={sectionContentClass}
             />
           )}
         </section>
       )}
 
+      {shouldRenderSection('radio-app') && (
+        <section className={sectionWrapperClass}>
+          {renderSectionHeader('radio-app')}
+          {isSectionVisible('radio-app') &&
+            (appSettings ? (
+              <SettingsRadioAppSection
+                appSettings={appSettings}
+                onSaveAppSettings={onSaveAppSettings}
+                blockedKeys={blockedKeys}
+                blockedNames={blockedNames}
+                onToggleBlockedKey={onToggleBlockedKey}
+                onToggleBlockedName={onToggleBlockedName}
+                contacts={contacts}
+                onBulkDeleteContacts={onBulkDeleteContacts}
+                trackedTelemetryRepeaters={trackedTelemetryRepeaters}
+                onToggleTrackedTelemetry={onToggleTrackedTelemetry}
+                trackedTelemetryContacts={trackedTelemetryContacts}
+                onToggleTrackedTelemetryContact={onToggleTrackedTelemetryContact}
+                className={sectionContentClass}
+              />
+            ) : (
+              <div className={sectionContentClass}>
+                <div className="rounded-md border border-input bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+                  Loading app settings...
+                </div>
+              </div>
+            ))}
+        </section>
+      )}
+
       {shouldRenderSection('database') && (
         <section className={sectionWrapperClass}>
           {renderSectionHeader('database')}
-          {isSectionVisible('database') && appSettings && (
-            <SettingsDatabaseSection
-              appSettings={appSettings}
-              health={health}
-              onSaveAppSettings={onSaveAppSettings}
-              onHealthRefresh={onHealthRefresh}
-              blockedKeys={blockedKeys}
-              blockedNames={blockedNames}
-              onToggleBlockedKey={onToggleBlockedKey}
-              onToggleBlockedName={onToggleBlockedName}
-              className={sectionContentClass}
-            />
-          )}
+          {isSectionVisible('database') &&
+            (appSettings ? (
+              <SettingsDatabaseSection
+                appSettings={appSettings}
+                health={health}
+                onSaveAppSettings={onSaveAppSettings}
+                onHealthRefresh={onHealthRefresh}
+                className={sectionContentClass}
+              />
+            ) : (
+              <div className={sectionContentClass}>
+                <div className="rounded-md border border-input bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+                  Loading app settings...
+                </div>
+              </div>
+            ))}
         </section>
       )}
 
@@ -255,7 +325,9 @@ export function SettingsModal(props: SettingsModalProps) {
       {shouldRenderSection('about') && (
         <section className={sectionWrapperClass}>
           {renderSectionHeader('about')}
-          {isSectionVisible('about') && <SettingsAboutSection className={sectionContentClass} />}
+          {isSectionVisible('about') && (
+            <SettingsAboutSection health={health} className={sectionContentClass} />
+          )}
         </section>
       )}
     </div>

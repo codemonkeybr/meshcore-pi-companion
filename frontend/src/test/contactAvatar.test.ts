@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getContactAvatar } from '../utils/contactAvatar';
-import { CONTACT_TYPE_REPEATER } from '../types';
+import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
 
 describe('getContactAvatar', () => {
   it('returns complete avatar info', () => {
@@ -28,6 +28,13 @@ describe('getContactAvatar', () => {
     expect(avatar1.text).toBe('🛜');
     expect(avatar2.text).toBe('🛜');
     expect(avatar1.background).toBe(avatar2.background);
+  });
+
+  it('returns room avatar for type=3', () => {
+    const avatar = getContactAvatar('Ops Board', 'abc123def456', CONTACT_TYPE_ROOM);
+    expect(avatar.text).toBe('🛖');
+    expect(avatar.background).toBe('#6b4f2a');
+    expect(avatar.textColor).toBe('#ffffff');
   });
 
   it('non-repeater types use normal avatar', () => {

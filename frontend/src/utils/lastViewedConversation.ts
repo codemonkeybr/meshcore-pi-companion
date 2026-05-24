@@ -4,7 +4,14 @@ import { parseHashConversation } from './urlHash';
 export const REOPEN_LAST_CONVERSATION_KEY = 'remoteterm-reopen-last-conversation';
 export const LAST_VIEWED_CONVERSATION_KEY = 'remoteterm-last-viewed-conversation';
 
-const SUPPORTED_TYPES: Conversation['type'][] = ['contact', 'channel', 'raw', 'map', 'visualizer'];
+const SUPPORTED_TYPES: Conversation['type'][] = [
+  'contact',
+  'channel',
+  'raw',
+  'map',
+  'visualizer',
+  'trace',
+];
 
 function isSupportedType(value: unknown): value is Conversation['type'] {
   return typeof value === 'string' && SUPPORTED_TYPES.includes(value as Conversation['type']);
@@ -92,6 +99,10 @@ export function captureLastViewedConversationFromHash(): void {
   }
   if (hashConversation.type === 'visualizer') {
     saveLastViewedConversation({ type: 'visualizer', id: 'visualizer', name: 'Mesh Visualizer' });
+    return;
+  }
+  if (hashConversation.type === 'trace') {
+    saveLastViewedConversation({ type: 'trace', id: 'trace', name: 'Trace' });
     return;
   }
 

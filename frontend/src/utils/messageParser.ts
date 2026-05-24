@@ -2,6 +2,9 @@
  * Parse sender from channel message text.
  * Channel messages have format "sender: message".
  */
+export const HASHTAG_CHANNEL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const HASHTAG_CHANNEL_REFERENCE_PATTERN = /(^|\s)(#[a-z0-9]+(?:-[a-z0-9]+)*)(?=$|[\s.,;:])/g;
+
 export function parseSenderFromText(text: string): { sender: string | null; content: string } {
   const colonIndex = text.indexOf(': ');
   if (colonIndex > 0 && colonIndex < 50) {
@@ -15,6 +18,31 @@ export function parseSenderFromText(text: string): { sender: string | null; cont
     }
   }
   return { sender: null, content: text };
+}
+
+export interface HashtagChannelReference {
+  label: string;
+  start: number;
+  end: number;
+}
+
+export function findLinkedChannelReferences(text: string): HashtagChannelReference[] {
+  const references: HashtagChannelReference[] = [];
+  let match: RegExpExecArray | null;
+
+  HASHTAG_CHANNEL_REFERENCE_PATTERN.lastIndex = 0;
+  while ((match = HASHTAG_CHANNEL_REFERENCE_PATTERN.exec(text)) !== null) {
+    const prefix = match[1];
+    const label = match[2];
+    const start = match.index + prefix.length;
+    references.push({
+      label,
+      start,
+      end: start + label.length,
+    });
+  }
+
+  return references;
 }
 
 /**

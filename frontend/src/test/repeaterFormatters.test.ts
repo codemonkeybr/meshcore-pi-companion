@@ -95,11 +95,18 @@ describe('formatClockDrift', () => {
 
 describe('formatAdvertInterval', () => {
   it('formats repeater advert intervals as minutes', () => {
+    expect(formatAdvertInterval(null, 'minutes')).toBe('—');
+    expect(formatAdvertInterval('0', 'minutes')).toBe('<disabled>');
+    expect(formatAdvertInterval('60', 'minutes')).toBe('1h');
+    expect(formatAdvertInterval('120', 'minutes')).toBe('2h');
+    expect(formatAdvertInterval('75', 'minutes')).toBe('1h15m');
+    expect(formatAdvertInterval('  15  ', 'minutes')).toBe('15m');
+  });
+
+  it('formats repeater advert intervals as hours', () => {
     expect(formatAdvertInterval(null)).toBe('—');
     expect(formatAdvertInterval('0')).toBe('<disabled>');
-    expect(formatAdvertInterval('60')).toBe('1h');
-    expect(formatAdvertInterval('120')).toBe('2h');
-    expect(formatAdvertInterval('75')).toBe('1h15m');
-    expect(formatAdvertInterval('  15  ')).toBe('15m');
+    expect(formatAdvertInterval('1')).toBe('1h');
+    expect(formatAdvertInterval('2')).toBe('2h');
   });
 });

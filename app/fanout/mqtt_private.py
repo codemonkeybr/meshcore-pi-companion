@@ -32,6 +32,7 @@ class MqttPrivateModule(FanoutModule):
     def __init__(self, config_id: str, config: dict, *, name: str = "") -> None:
         super().__init__(config_id, config, name=name)
         self._publisher = MqttPublisher()
+        self._publisher.set_integration_name(name or config_id)
 
     async def start(self) -> None:
         settings = _config_to_settings(self.config)
@@ -58,4 +59,10 @@ class MqttPrivateModule(FanoutModule):
     def status(self) -> str:
         if not self.config.get("broker_host"):
             return "disconnected"
+        if self._publisher.last_error:
+            return "error"
         return "connected" if self._publisher.connected else "disconnected"
+
+    @property
+    def last_error(self) -> str | None:
+        return self._publisher.last_error

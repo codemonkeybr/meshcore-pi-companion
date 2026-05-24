@@ -1,10 +1,12 @@
 """Tests for the channels router endpoints."""
 
 import time
-from unittest.mock import patch
+from hashlib import sha256
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.channel_constants import PUBLIC_CHANNEL_KEY, PUBLIC_CHANNEL_NAME
 from app.repository import ChannelRepository, MessageRepository
 
 
@@ -75,6 +77,104 @@ class TestCreateChannel:
         channel = await ChannelRepository.get_by_key(key)
         assert channel is not None
         assert channel.flood_scope_override is None
+
+    @pytest.mark.asyncio
+    async def test_bulk_hashtag_create_adds_only_new_rooms(self, test_db, client):
+        ops_key = sha256(b"#ops").digest()[:16].hex().upper()
+        await ChannelRepository.upsert(key=ops_key, name="#ops", is_hashtag=True)
+
+        response = await client.post(
+            "/api/channels/bulk-hashtag",
+            json={
+                "channel_names": ["#ops", "mesh-room", "bad_room", "mesh-room", "another-room"],
+                "try_historical": False,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [channel["name"] for channel in data["created_channels"]] == [
+            "#mesh-room",
+            "#another-room",
+        ]
+        assert data["existing_count"] == 2
+        assert data["invalid_names"] == ["bad_room"]
+        assert data["decrypt_started"] is False
+
+    @pytest.mark.asyncio
+    async def test_bulk_hashtag_create_can_start_one_decrypt_job(self, test_db, client):
+        with (
+            patch(
+                "app.routers.channels.RawPacketRepository.get_undecrypted_count",
+                new=AsyncMock(return_value=7),
+            ),
+            patch(
+                "app.routers.channels._run_historical_channel_decryption_for_channels",
+                new=AsyncMock(),
+            ) as mock_decrypt,
+        ):
+            response = await client.post(
+                "/api/channels/bulk-hashtag",
+                json={
+                    "channel_names": ["ops", "mesh-room"],
+                    "try_historical": True,
+                },
+            )
+
+        assert response.status_code == 202
+        data = response.json()
+        assert data["decrypt_started"] is True
+        assert data["decrypt_total_packets"] == 7
+        mock_decrypt.assert_awaited_once()
+
+
+class TestPublicChannelProtection:
+    @pytest.mark.asyncio
+    async def test_create_public_uses_canonical_key(self, test_db):
+        from app.routers.channels import CreateChannelRequest, create_channel
+
+        result = await create_channel(CreateChannelRequest(name="Public"))
+
+        assert result.key == PUBLIC_CHANNEL_KEY
+        assert result.name == PUBLIC_CHANNEL_NAME
+        assert result.is_hashtag is False
+
+    @pytest.mark.asyncio
+    async def test_create_public_rejects_conflicting_key(self, test_db, client):
+        response = await client.post(
+            "/api/channels",
+            json={"name": "Public", "key": "AA" * 16},
+        )
+
+        assert response.status_code == 400
+        assert "canonical Public key" in response.json()["detail"]
+        assert await ChannelRepository.get_by_key("AA" * 16) is None
+
+    @pytest.mark.asyncio
+    async def test_create_non_public_rejects_public_key(self, test_db, client):
+        response = await client.post(
+            "/api/channels",
+            json={"name": "Ops", "key": PUBLIC_CHANNEL_KEY},
+        )
+
+        assert response.status_code == 400
+        assert PUBLIC_CHANNEL_NAME in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_delete_public_channel_is_rejected(self, test_db, client):
+        await ChannelRepository.upsert(
+            key=PUBLIC_CHANNEL_KEY,
+            name=PUBLIC_CHANNEL_NAME,
+            is_hashtag=False,
+            on_radio=False,
+        )
+
+        response = await client.delete(f"/api/channels/{PUBLIC_CHANNEL_KEY}")
+
+        assert response.status_code == 400
+        assert "cannot be deleted" in response.json()["detail"]
+        channel = await ChannelRepository.get_by_key(PUBLIC_CHANNEL_KEY)
+        assert channel is not None
 
 
 class TestChannelDetail:

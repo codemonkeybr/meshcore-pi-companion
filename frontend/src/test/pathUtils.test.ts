@@ -7,6 +7,7 @@ import {
   formatRouteLabel,
   formatRoutingOverrideInput,
   getEffectiveContactRoute,
+  isValidLocation,
   resolvePath,
   formatDistance,
   formatHopCounts,
@@ -21,18 +22,19 @@ function createContact(overrides: Partial<Contact> = {}): Contact {
     name: 'Test Contact',
     type: CONTACT_TYPE_REPEATER,
     flags: 0,
-    last_path: null,
-    last_path_len: -1,
+    direct_path: null,
+    direct_path_len: -1,
+    direct_path_hash_mode: -1,
     last_advert: null,
     lat: null,
     lon: null,
     last_seen: null,
     on_radio: false,
+    favorite: false,
     last_contacted: null,
     last_read_at: null,
     first_seen: null,
     ...overrides,
-    out_path_hash_mode: overrides.out_path_hash_mode ?? 0,
   };
 }
 
@@ -138,9 +140,9 @@ describe('contact routing helpers', () => {
   it('prefers routing override over learned route', () => {
     const effective = getEffectiveContactRoute(
       createContact({
-        last_path: 'AABB',
-        last_path_len: 1,
-        out_path_hash_mode: 0,
+        direct_path: 'AABB',
+        direct_path_len: 1,
+        direct_path_hash_mode: 0,
         route_override_path: 'AE92F13E',
         route_override_len: 2,
         route_override_hash_mode: 1,
@@ -665,23 +667,58 @@ describe('resolvePath', () => {
   });
 });
 
+describe('isValidLocation', () => {
+  it('rejects null and unset coordinates', () => {
+    expect(isValidLocation(null, -122.3)).toBe(false);
+    expect(isValidLocation(47.6, null)).toBe(false);
+    expect(isValidLocation(0, 0)).toBe(false);
+  });
+
+  it('rejects out-of-range coordinates', () => {
+    expect(isValidLocation(-593.497573, -1659.939204)).toBe(false);
+    expect(isValidLocation(91, 0)).toBe(false);
+    expect(isValidLocation(0, 181)).toBe(false);
+  });
+
+  it('accepts sane coordinates', () => {
+    expect(isValidLocation(47.6062, -122.3321)).toBe(true);
+  });
+});
+
 describe('formatDistance', () => {
-  it('formats distances under 1km in meters', () => {
-    expect(formatDistance(0.5)).toBe('500m');
-    expect(formatDistance(0.123)).toBe('123m');
-    expect(formatDistance(0.9999)).toBe('1000m');
+  const formatInteger = (value: number) => value.toLocaleString();
+  const formatOneDecimal = (value: number) =>
+    value.toLocaleString(undefined, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    });
+
+  it('defaults to imperial formatting', () => {
+    expect(formatDistance(0.01)).toBe(`${formatInteger(33)}ft`);
+    expect(formatDistance(0.5)).toBe(`${formatOneDecimal(0.5 * 0.621371)}mi`);
+    expect(formatDistance(1)).toBe(`${formatOneDecimal(0.621371)}mi`);
   });
 
-  it('formats distances at or above 1km with one decimal', () => {
-    expect(formatDistance(1)).toBe('1.0km');
-    expect(formatDistance(1.5)).toBe('1.5km');
-    expect(formatDistance(12.34)).toBe('12.3km');
-    expect(formatDistance(100)).toBe('100.0km');
+  it('formats metric distances in meters and kilometers', () => {
+    expect(formatDistance(0.5, 'metric')).toBe(`${formatInteger(500)}m`);
+    expect(formatDistance(0.123, 'metric')).toBe(`${formatInteger(123)}m`);
+    expect(formatDistance(0.9999, 'metric')).toBe(`${formatInteger(1000)}m`);
+    expect(formatDistance(1, 'metric')).toBe(`${formatOneDecimal(1)}km`);
+    expect(formatDistance(12.34, 'metric')).toBe(`${formatOneDecimal(12.34)}km`);
   });
 
-  it('rounds meters to nearest integer', () => {
-    expect(formatDistance(0.4567)).toBe('457m');
-    expect(formatDistance(0.001)).toBe('1m');
+  it('formats smoot distances using 1.7018 meters per smoot', () => {
+    expect(formatDistance(0.0017018, 'smoots')).toBe(`${formatOneDecimal(1)} smoot`);
+    expect(formatDistance(0.001, 'smoots')).toBe(`${formatOneDecimal(0.6)} smoots`);
+    expect(formatDistance(1, 'smoots')).toBe(`${formatInteger(588)} smoots`);
+  });
+
+  it('applies locale separators to large values', () => {
+    expect(formatDistance(1.234, 'metric')).toBe(`${formatOneDecimal(1.234)}km`);
+    expect(formatDistance(1234, 'metric')).toBe(`${formatOneDecimal(1234)}km`);
+    expect(formatDistance(2.1, 'smoots')).toContain(
+      formatInteger(Math.round((2.1 * 1000) / 1.7018))
+    );
   });
 });
 

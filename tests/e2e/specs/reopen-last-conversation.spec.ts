@@ -36,9 +36,9 @@ test.describe('Reopen last conversation (device-local)', () => {
       page.getByPlaceholder(new RegExp(`message\\s+${escapeRegex(channelName)}`, 'i'))
     ).toBeVisible();
 
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('button', { name: /Local Configuration/i }).click();
-    await page.getByLabel('Reopen to last viewed channel/conversation').check();
+    await page.getByLabel('Reopen Last Conversation').check();
     await page.getByRole('button', { name: 'Back to Chat' }).click();
 
     // Fresh launch path without hash should restore the saved conversation.
@@ -58,10 +58,10 @@ test.describe('Reopen last conversation (device-local)', () => {
       page.getByPlaceholder(new RegExp(`message\\s+${escapeRegex(channelName)}`, 'i'))
     ).toBeVisible();
 
-    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('button', { name: /Local Configuration/i }).click();
 
-    const reopenToggle = page.getByLabel('Reopen to last viewed channel/conversation');
+    const reopenToggle = page.getByLabel('Reopen Last Conversation');
     await reopenToggle.check();
     await reopenToggle.uncheck();
 

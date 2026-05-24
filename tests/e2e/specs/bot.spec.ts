@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
 import {
   ensureFlightlessChannel,
-  createFanoutConfig,
   deleteFanoutConfig,
+  getFanoutConfigs,
 } from '../helpers/api';
+import { openFanoutSettings, startIntegrationDraft } from '../helpers/fanout';
 
 const BOT_CODE = `def bot(sender_name, sender_key, message_text, is_dm, channel_key, channel_name, sender_timestamp, path):
     if channel_name == "#flightless" and "!e2etest" in message_text.lower():
@@ -28,32 +29,35 @@ test.describe('Bot functionality', () => {
     }
   });
 
-  test('create a bot via API, verify it in UI, trigger it, and verify response', async ({
+  test('create a bot via UI, trigger it, and verify response', async ({
     page,
   }) => {
-    // --- Step 1: Create and enable bot via fanout API ---
-    const bot = await createFanoutConfig({
-      type: 'bot',
-      name: 'E2E Test Bot',
-      config: { code: BOT_CODE },
-      enabled: true,
-    });
-    createdBotId = bot.id;
-
-    // --- Step 2: Verify bot appears in settings UI ---
-    await page.goto('/');
+    await openFanoutSettings(page);
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    await page.getByText('Settings').click();
-    await page.getByRole('button', { name: /MQTT.*Automation/ }).click();
+    await startIntegrationDraft(page, 'Python Bot');
+    await expect(page.locator('#fanout-edit-name')).toHaveValue(/Python Bot #\d+/);
 
-    // The bot name should be visible in the integration list
+    await page.locator('#fanout-edit-name').fill('E2E Test Bot');
+
+    const codeEditor = page.locator('[aria-label="Bot code editor"] [contenteditable]');
+    await codeEditor.click();
+    await codeEditor.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await codeEditor.fill(BOT_CODE);
+
+    await page.getByRole('button', { name: /Save as Enabled/i }).click();
+    await expect(page.getByText('Integration saved and enabled')).toBeVisible();
+
     await expect(page.getByText('E2E Test Bot')).toBeVisible();
 
-    // Exit settings page mode
+    const configs = await getFanoutConfigs();
+    const createdBot = configs.find((config) => config.name === 'E2E Test Bot');
+    if (createdBot) {
+      createdBotId = createdBot.id;
+    }
+
     await page.getByRole('button', { name: /Back to Chat/i }).click();
 
-    // --- Step 3: Trigger the bot ---
     await page.getByText('#flightless', { exact: true }).first().click();
 
     const triggerMessage = `!e2etest ${Date.now()}`;
@@ -61,8 +65,6 @@ test.describe('Bot functionality', () => {
     await input.fill(triggerMessage);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
 
-    // --- Step 4: Verify bot response appears ---
-    // Bot has ~2s delay before responding, plus radio send time
     await expect(page.getByText('[BOT] e2e-ok')).toBeVisible({ timeout: 30_000 });
   });
 });

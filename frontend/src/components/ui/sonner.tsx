@@ -19,6 +19,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
             'group-[.toaster]:bg-toast-error group-[.toaster]:text-toast-error-foreground group-[.toaster]:border-toast-error-border [&_[data-description]]:text-toast-error-foreground',
         },
       }}
+      closeButton
       {...props}
     />
   );

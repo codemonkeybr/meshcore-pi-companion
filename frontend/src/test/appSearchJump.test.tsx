@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
     getUndecryptedPacketCount: vi.fn(),
     getChannels: vi.fn(),
     getContacts: vi.fn(),
-    migratePreferences: vi.fn(),
   },
   useConversationMessagesCalls: vi.fn(),
 }));
@@ -37,14 +36,16 @@ vi.mock('../hooks', async (importOriginal) => {
         hasOlderMessages: false,
         hasNewerMessages: false,
         loadingNewer: false,
-        hasNewerMessagesRef: { current: false },
-        setMessages: vi.fn(),
         fetchOlderMessages: vi.fn(async () => {}),
         fetchNewerMessages: vi.fn(async () => {}),
         jumpToBottom: vi.fn(),
-        addMessageIfNew: vi.fn(),
-        updateMessageAck: vi.fn(),
-        triggerReconcile: vi.fn(),
+        reloadCurrentConversation: vi.fn(),
+        observeMessage: vi.fn(() => ({ added: false, activeConversation: false })),
+        receiveMessageAck: vi.fn(),
+        reconcileOnReconnect: vi.fn(),
+        renameConversationMessages: vi.fn(),
+        removeConversationMessages: vi.fn(),
+        clearConversationMessages: vi.fn(),
       };
     },
     useUnreadCounts: () => ({
@@ -52,21 +53,13 @@ vi.mock('../hooks', async (importOriginal) => {
       mentions: {},
       lastMessageTimes: {},
       unreadLastReadAts: {},
-      incrementUnread: vi.fn(),
+      recordMessageEvent: vi.fn(),
       renameConversationState: vi.fn(),
       markAllRead: vi.fn(),
-      trackNewMessage: vi.fn(),
       refreshUnreads: vi.fn(),
     }),
-    getMessageContentKey: () => 'content-key',
   };
 });
-
-vi.mock('../messageCache', () => ({
-  addMessage: vi.fn(),
-  updateAck: vi.fn(),
-  remove: vi.fn(),
-}));
 
 vi.mock('../components/StatusBar', () => ({
   StatusBar: () => <div data-testid="status-bar" />,
@@ -222,11 +215,9 @@ describe('App search jump target handling', () => {
     });
     mocks.api.getSettings.mockResolvedValue({
       max_radio_contacts: 200,
-      favorites: [],
       auto_decrypt_dm_on_advert: false,
-      sidebar_sort_order: 'recent',
       last_message_times: {},
-      preferences_migrated: true,
+
       advert_interval: 0,
       last_advert_time: 0,
     });
@@ -238,6 +229,7 @@ describe('App search jump target handling', () => {
         is_hashtag: false,
         on_radio: false,
         last_read_at: null,
+        favorite: false,
       },
     ]);
     mocks.api.getContacts.mockResolvedValue([]);

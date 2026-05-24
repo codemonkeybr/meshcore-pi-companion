@@ -6,8 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from app.backends.client_backend import ClientBackend
+from serial.serialutil import SerialException
 
 
 class TestRadioManagerConnect:
@@ -163,7 +162,7 @@ class TestRadioManagerConnect:
             mock_meshcore.create_tcp = AsyncMock(return_value=new_mc)
 
             rm = RadioManager()
-            rm._backend = ClientBackend(old_mc)
+            rm._meshcore = old_mc
 
             await rm.connect()
 
@@ -182,9 +181,8 @@ class TestConnectionMonitor:
         rm = RadioManager()
         rm._connection_info = "Serial: /dev/ttyUSB0"
         rm._last_connected = True
-        _mock0 = MagicMock()
-        _mock0.is_connected = False
-        rm._backend = ClientBackend(_mock0)
+        rm._meshcore = MagicMock()
+        rm._meshcore.is_connected = False
 
         reconnect_calls = 0
 
@@ -192,9 +190,8 @@ class TestConnectionMonitor:
             nonlocal reconnect_calls
             reconnect_calls += 1
             if reconnect_calls == 1:
-                _mock1 = MagicMock()
-                _mock1.is_connected = True
-                rm._backend = ClientBackend(_mock1)
+                rm._meshcore = MagicMock()
+                rm._meshcore.is_connected = True
                 return True
             return False
 
@@ -237,7 +234,7 @@ class TestConnectionMonitor:
         # but setup failed so _setup_complete=False.
         mock_mc = MagicMock()
         mock_mc.is_connected = True
-        rm._backend = ClientBackend(mock_mc)
+        rm._meshcore = mock_mc
         rm._last_connected = True
         rm._setup_complete = False
 
@@ -285,7 +282,7 @@ class TestConnectionMonitor:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.is_connected = True
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
         rm._connection_info = "TCP: test:4000"
         rm._last_connected = True
         rm._setup_complete = False
@@ -337,7 +334,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._backend = None
+        rm._meshcore = None
 
         connect_count = 0
 
@@ -348,7 +345,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._backend = ClientBackend(mock_mc) if mock_mc else None
+            rm._meshcore = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -373,7 +370,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._backend = None
+        rm._meshcore = None
 
         call_order: list[str] = []
 
@@ -382,7 +379,7 @@ class TestReconnectLock:
             await asyncio.sleep(0.05)
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._backend = ClientBackend(mock_mc) if mock_mc else None
+            rm._meshcore = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -405,7 +402,7 @@ class TestReconnectLock:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._backend = None
+        rm._meshcore = None
 
         attempt = 0
 
@@ -418,7 +415,7 @@ class TestReconnectLock:
             # Second attempt succeeds
             mock_mc = MagicMock()
             mock_mc.is_connected = True
-            rm._backend = ClientBackend(mock_mc) if mock_mc else None
+            rm._meshcore = mock_mc
             rm._connection_info = "TCP: test:4000"
 
         rm.connect = AsyncMock(side_effect=mock_connect)
@@ -453,6 +450,97 @@ class TestReconnectLock:
         assert result is False
         rm.connect.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_reconnect_broadcasts_only_first_three_failures(self):
+        """Frontend only sees the first few reconnect failures before suppression kicks in."""
+        from app.radio import MAX_FRONTEND_RECONNECT_ERROR_BROADCASTS, RadioManager
+
+        rm = RadioManager()
+        rm.connect = AsyncMock(side_effect=RuntimeError("radio unavailable"))
+
+        with (
+            patch("app.websocket.broadcast_health"),
+            patch("app.websocket.broadcast_error") as mock_broadcast_error,
+        ):
+            for _ in range(MAX_FRONTEND_RECONNECT_ERROR_BROADCASTS + 2):
+                result = await rm.reconnect(broadcast_on_success=False)
+                assert result is False
+
+        assert mock_broadcast_error.call_count == MAX_FRONTEND_RECONNECT_ERROR_BROADCASTS
+        assert mock_broadcast_error.call_args_list[0].args == (
+            "Reconnection failed",
+            "radio unavailable",
+        )
+        assert mock_broadcast_error.call_args_list[-1].args == (
+            "Reconnection failed",
+            "radio unavailable Further reconnect failures will be logged only until a connection succeeds.",
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconnect_success_resets_error_broadcast_suppression(self):
+        """A successful reconnect re-enables frontend error broadcasts for later failures."""
+        from app.radio import RadioManager
+
+        rm = RadioManager()
+        attempts = 0
+
+        async def mock_connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts in (1, 2, 4):
+                raise RuntimeError("radio unavailable")
+            mock_mc = MagicMock()
+            mock_mc.is_connected = True
+            rm._meshcore = mock_mc
+            rm._connection_info = "TCP: test:4000"
+
+        rm.connect = AsyncMock(side_effect=mock_connect)
+
+        with (
+            patch("app.websocket.broadcast_health"),
+            patch("app.websocket.broadcast_error") as mock_broadcast_error,
+        ):
+            assert await rm.reconnect(broadcast_on_success=False) is False
+            assert await rm.reconnect(broadcast_on_success=False) is False
+            assert await rm.reconnect(broadcast_on_success=False) is True
+            rm._meshcore = None
+            assert await rm.reconnect(broadcast_on_success=False) is False
+
+        assert mock_broadcast_error.call_count == 3
+        for call in mock_broadcast_error.call_args_list:
+            assert call.args == ("Reconnection failed", "radio unavailable")
+
+    @pytest.mark.asyncio
+    async def test_reconnect_serial_missing_port_logs_clean_message_without_traceback(self):
+        """Missing serial ports should log a concise operator-facing warning."""
+        from app.radio import RadioManager
+
+        rm = RadioManager()
+        rm.connect = AsyncMock(
+            side_effect=SerialException(
+                2,
+                "could not open port /dev/serial/by-id/test-radio: "
+                "[Errno 2] No such file or directory: '/dev/serial/by-id/test-radio'",
+            )
+        )
+
+        with (
+            patch("app.radio.settings") as mock_settings,
+            patch("app.websocket.broadcast_health"),
+            patch("app.websocket.broadcast_error") as mock_broadcast_error,
+        ):
+            mock_settings.connection_type = "serial"
+            mock_settings.serial_port = "/dev/serial/by-id/test-radio"
+
+            result = await rm.reconnect(broadcast_on_success=False)
+
+        assert result is False
+        assert mock_broadcast_error.call_args.args == (
+            "Reconnection failed",
+            "Could not connect to serial port /dev/serial/by-id/test-radio. "
+            "Did the radio get disconnected or change serial ports?",
+        )
+
 
 class TestManualDisconnectCleanup:
     """Tests for manual disconnect teardown behavior."""
@@ -460,6 +548,7 @@ class TestManualDisconnectCleanup:
     @pytest.mark.asyncio
     async def test_disconnect_disables_library_auto_reconnect(self):
         """Manual disconnect should suppress meshcore_py reconnect behavior."""
+        from app.keystore import get_private_key, set_private_key
         from app.radio import RadioManager
 
         rm = RadioManager()
@@ -477,42 +566,97 @@ class TestManualDisconnectCleanup:
         mock_mc = MagicMock()
         mock_mc.disconnect = AsyncMock(side_effect=_disconnect)
         mock_mc.connection_manager = connection_manager
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
         rm._setup_complete = True
+        rm.device_info_loaded = True
+        rm.max_contacts = 350
+        rm.device_model = "T-Echo"
+        rm.firmware_build = "2025-02-01"
+        rm.firmware_version = "1.2.3"
         rm.max_channels = 8
         rm.path_hash_mode = 2
         rm.path_hash_mode_supported = True
         rm.note_channel_slot_loaded("AA" * 16, 0)
+        set_private_key(b"\x01" * 64)
 
         await rm.disconnect()
 
         mock_mc.disconnect.assert_awaited_once()
+        assert get_private_key() is None
         assert connection_manager.auto_reconnect is False
         assert connection_manager._reconnect_task is None
         assert reconnect_task is not None and reconnect_task.cancelled()
         assert rm.meshcore is None
         assert rm.is_setup_complete is False
+        assert rm.device_info_loaded is False
+        assert rm.max_contacts is None
+        assert rm.device_model is None
+        assert rm.firmware_build is None
+        assert rm.firmware_version is None
         assert rm.max_channels == 40
         assert rm.path_hash_mode == 0
         assert rm.path_hash_mode_supported is False
         assert rm.get_cached_channel_slot("AA" * 16) is None
 
     @pytest.mark.asyncio
+    async def test_disconnect_waits_for_inflight_radio_operation_cleanup(self):
+        """Manual disconnect should wait for the shared radio-operation lock."""
+        from app.radio import RadioManager
+
+        rm = RadioManager()
+        mc = MagicMock()
+        mc.disconnect = AsyncMock()
+        rm._meshcore = mc
+
+        holder_entered = asyncio.Event()
+        allow_release = asyncio.Event()
+        disconnect_started = asyncio.Event()
+
+        async def holder():
+            async with rm.radio_operation("holder"):
+                holder_entered.set()
+                await allow_release.wait()
+
+        async def trigger_disconnect():
+            disconnect_started.set()
+            await rm.disconnect()
+
+        holder_task = asyncio.create_task(holder())
+        await holder_entered.wait()
+
+        disconnect_task = asyncio.create_task(trigger_disconnect())
+        await disconnect_started.wait()
+        await asyncio.sleep(0.02)
+
+        mc.disconnect.assert_not_awaited()
+        assert rm.meshcore is mc
+
+        allow_release.set()
+        await holder_task
+        await disconnect_task
+
+        mc.disconnect.assert_awaited_once()
+        assert rm.meshcore is None
+
+    @pytest.mark.asyncio
     async def test_pause_connection_marks_connection_undesired(self):
         """Pausing should flip connection_desired off and tear down transport."""
+        from app.keystore import get_private_key, set_private_key
         from app.radio import RadioManager
 
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.disconnect = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
         rm._connection_desired = True
         rm._last_connected = True
+        set_private_key(b"\x02" * 64)
 
         await rm.pause_connection()
 
         assert rm.connection_desired is False
         assert rm._last_connected is False
+        assert get_private_key() is None
         mock_mc.disconnect.assert_awaited_once()
 
 
@@ -636,7 +780,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         call_order = []
 
@@ -685,7 +829,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         observed_during = None
 
@@ -727,7 +871,7 @@ class TestPostConnectSetupOrdering:
         rm = RadioManager()
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -749,7 +893,7 @@ class TestPostConnectSetupOrdering:
         from app.radio import RadioManager
 
         rm = RadioManager()
-        rm._backend = None
+        rm._meshcore = None
 
         # Should not raise or call any functions
         await rm.post_connect_setup()
@@ -765,7 +909,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         mock_settings = AppSettings(flood_scope="#TestRegion")
 
@@ -799,7 +943,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         mock_settings = AppSettings(flood_scope="TestRegion")
 
@@ -833,7 +977,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         mock_settings = AppSettings(flood_scope="")
 
@@ -867,7 +1011,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -899,7 +1043,7 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
-        rm._backend = ClientBackend(mock_mc) if mock_mc else None
+        rm._meshcore = mock_mc
 
         with (
             patch("app.event_handlers.register_event_handlers"),
@@ -929,12 +1073,9 @@ class TestPostConnectSetupOrdering:
 
         rm = RadioManager()
         rm._connection_info = "Serial: /dev/ttyUSB0"
-        rm.post_connect_setup = AsyncMock(
-            side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError()]
-        )
+        rm.post_connect_setup = AsyncMock(side_effect=[TimeoutError(), TimeoutError()])
 
         with (
-            patch("app.services.radio_lifecycle.logger") as mock_logger,
             patch("app.websocket.broadcast_error") as mock_broadcast_error,
             patch("app.websocket.broadcast_health") as mock_broadcast_health,
         ):
@@ -942,8 +1083,6 @@ class TestPostConnectSetupOrdering:
                 await prepare_connected_radio(rm, broadcast_on_success=True)
 
         assert rm.post_connect_setup.await_count == 2
-        mock_logger.warning.assert_called_once()
-        mock_logger.error.assert_called_once()
         mock_broadcast_error.assert_called_once_with(
             "Radio startup appears stuck",
             "Initial radio offload took too long. Reboot the radio and restart the server.",
@@ -958,10 +1097,9 @@ class TestPostConnectSetupOrdering:
 
         rm = RadioManager()
         rm._connection_info = "Serial: /dev/ttyUSB0"
-        rm.post_connect_setup = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
+        rm.post_connect_setup = AsyncMock(side_effect=[TimeoutError(), None])
 
         with (
-            patch("app.services.radio_lifecycle.logger") as mock_logger,
             patch("app.websocket.broadcast_error") as mock_broadcast_error,
             patch("app.websocket.broadcast_health") as mock_broadcast_health,
         ):
@@ -969,7 +1107,5 @@ class TestPostConnectSetupOrdering:
 
         assert rm.post_connect_setup.await_count == 2
         assert rm._last_connected is True
-        mock_logger.warning.assert_called_once()
-        mock_logger.error.assert_not_called()
         mock_broadcast_error.assert_not_called()
         mock_broadcast_health.assert_called_once_with(True, "Serial: /dev/ttyUSB0")

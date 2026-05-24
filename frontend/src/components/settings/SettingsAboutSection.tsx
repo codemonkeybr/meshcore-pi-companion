@@ -1,10 +1,17 @@
+import type { HealthStatus } from '../../types';
 import { Separator } from '../ui/separator';
 
 const GITHUB_URL = 'https://github.com/jkingsman/Remote-Terminal-for-MeshCore';
 
-export function SettingsAboutSection({ className }: { className?: string }) {
-  const version = __APP_VERSION__;
-  const commit = __COMMIT_HASH__;
+export function SettingsAboutSection({
+  health,
+  className,
+}: {
+  health?: HealthStatus | null;
+  className?: string;
+}) {
+  const version = health?.app_info?.version ?? 'unknown';
+  const commit = health?.app_info?.commit_hash;
 
   return (
     <div className={className}>
@@ -14,8 +21,14 @@ export function SettingsAboutSection({ className }: { className?: string }) {
           <h3 className="text-lg font-semibold">RemoteTerm for MeshCore</h3>
           <div className="text-sm text-muted-foreground">
             v{version}
-            <span className="mx-1.5">·</span>
-            <span className="font-mono text-xs">{commit}</span>
+            {commit ? (
+              <>
+                <span className="mx-1.5">·</span>
+                <span className="font-mono text-xs" title={commit}>
+                  {commit}
+                </span>
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -118,7 +131,7 @@ export function SettingsAboutSection({ className }: { className?: string }) {
 
         <div className="text-center">
           <a
-            href="/api/debug"
+            href="./api/debug"
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-muted-foreground hover:text-primary hover:underline"

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
+  BellOff,
+  Cable,
+  ChartNetwork,
   CheckCheck,
   ChevronDown,
   ChevronRight,
@@ -9,21 +12,30 @@ import {
   Map,
   Search as SearchIcon,
   SquarePen,
-  Waypoints,
   X,
 } from 'lucide-react';
 import {
+  CONTACT_TYPE_ROOM,
   CONTACT_TYPE_REPEATER,
   type Contact,
   type Channel,
   type Conversation,
-  type Favorite,
 } from '../types';
-import { getStateKey, type ConversationTimes, type SortOrder } from '../utils/conversationState';
+import {
+  buildSidebarSectionSortOrders,
+  getStateKey,
+  loadLegacyLocalStorageSortOrder,
+  loadLocalStorageSidebarSectionSortOrders,
+  saveLocalStorageSidebarSectionSortOrders,
+  type ConversationTimes,
+  type SidebarSectionSortOrders,
+  type SidebarSortableSection,
+  type SortOrder,
+} from '../utils/conversationState';
+import { isPublicChannelKey } from '../utils/publicChannel';
 import { getContactDisplayName } from '../utils/pubkey';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { ContactAvatar } from './ContactAvatar';
-import { isFavorite } from '../utils/favorites';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
@@ -38,6 +50,7 @@ type ConversationRow = {
   unreadCount: number;
   isMention: boolean;
   notificationsEnabled: boolean;
+  muted?: boolean;
   contact?: Contact;
 };
 
@@ -46,6 +59,7 @@ type CollapseState = {
   favorites: boolean;
   channels: boolean;
   contacts: boolean;
+  rooms: boolean;
   repeaters: boolean;
 };
 
@@ -56,6 +70,7 @@ const DEFAULT_COLLAPSE_STATE: CollapseState = {
   favorites: false,
   channels: false,
   contacts: false,
+  rooms: false,
   repeaters: false,
 };
 
@@ -69,6 +84,7 @@ function loadCollapsedState(): CollapseState {
       favorites: parsed.favorites ?? DEFAULT_COLLAPSE_STATE.favorites,
       channels: parsed.channels ?? DEFAULT_COLLAPSE_STATE.channels,
       contacts: parsed.contacts ?? DEFAULT_COLLAPSE_STATE.contacts,
+      rooms: parsed.rooms ?? DEFAULT_COLLAPSE_STATE.rooms,
       repeaters: parsed.repeaters ?? DEFAULT_COLLAPSE_STATE.repeaters,
     };
   } catch {
@@ -81,7 +97,7 @@ interface SidebarProps {
   channels: Channel[];
   activeConversation: Conversation | null;
   onSelectConversation: (conversation: Conversation) => void;
-  onNewMessage: () => void;
+  onNewMessage: (event?: React.MouseEvent<HTMLButtonElement>) => void;
   lastMessageTimes: ConversationTimes;
   unreadCounts: Record<string, number>;
   /** Tracks which conversations have unread messages that mention the user */
@@ -90,12 +106,19 @@ interface SidebarProps {
   crackerRunning: boolean;
   onToggleCracker: () => void;
   onMarkAllRead: () => void;
-  favorites: Favorite[];
-  /** Sort order from server settings */
-  sortOrder?: SortOrder;
-  /** Callback when sort order changes */
-  onSortOrderChange?: (order: SortOrder) => void;
   isConversationNotificationsEnabled?: (type: 'channel' | 'contact', id: string) => boolean;
+  blockedKeys?: string[];
+  blockedNames?: string[];
+}
+
+function loadInitialSectionSortOrders(): SidebarSectionSortOrders {
+  const storedOrders = loadLocalStorageSidebarSectionSortOrders();
+  if (storedOrders) return storedOrders;
+
+  const legacyOrder = loadLegacyLocalStorageSortOrder();
+  const orders = buildSidebarSectionSortOrders(legacyOrder ?? undefined);
+  saveLocalStorageSidebarSectionSortOrders(orders);
+  return orders;
 }
 
 export function Sidebar({
@@ -111,24 +134,36 @@ export function Sidebar({
   crackerRunning,
   onToggleCracker,
   onMarkAllRead,
-  favorites,
-  sortOrder: sortOrderProp = 'recent',
-  onSortOrderChange,
   isConversationNotificationsEnabled,
+  blockedKeys = [],
+  blockedNames = [],
 }: SidebarProps) {
-  const sortOrder = sortOrderProp;
+  const isContactBlocked = useCallback(
+    (c: Contact) =>
+      blockedKeys.includes(c.public_key.toLowerCase()) ||
+      (c.name != null && blockedNames.includes(c.name)),
+    [blockedKeys, blockedNames]
+  );
+
   const [searchQuery, setSearchQuery] = useState('');
+  const initialSectionSortOrders = useMemo(loadInitialSectionSortOrders, []);
+  const [sectionSortOrders, setSectionSortOrders] = useState(initialSectionSortOrders);
   const initialCollapsedState = useMemo(loadCollapsedState, []);
   const [toolsCollapsed, setToolsCollapsed] = useState(initialCollapsedState.tools);
   const [favoritesCollapsed, setFavoritesCollapsed] = useState(initialCollapsedState.favorites);
   const [channelsCollapsed, setChannelsCollapsed] = useState(initialCollapsedState.channels);
   const [contactsCollapsed, setContactsCollapsed] = useState(initialCollapsedState.contacts);
+  const [roomsCollapsed, setRoomsCollapsed] = useState(initialCollapsedState.rooms);
   const [repeatersCollapsed, setRepeatersCollapsed] = useState(initialCollapsedState.repeaters);
   const collapseSnapshotRef = useRef<CollapseState | null>(null);
 
-  const handleSortToggle = () => {
-    const newOrder = sortOrder === 'alpha' ? 'recent' : 'alpha';
-    onSortOrderChange?.(newOrder);
+  const handleSortToggle = (section: SidebarSortableSection) => {
+    setSectionSortOrders((prev) => {
+      const nextOrder = prev[section] === 'alpha' ? 'recent' : 'alpha';
+      const updated = { ...prev, [section]: nextOrder };
+      saveLocalStorageSidebarSectionSortOrders(updated);
+      return updated;
+    });
   };
 
   const handleSelectConversation = (conversation: Conversation) => {
@@ -137,7 +172,7 @@ export function Sidebar({
   };
 
   const isActive = (
-    type: 'contact' | 'channel' | 'raw' | 'map' | 'visualizer' | 'search',
+    type: 'contact' | 'channel' | 'raw' | 'map' | 'visualizer' | 'search' | 'trace',
     id: string
   ) => activeConversation?.type === type && activeConversation?.id === id;
 
@@ -159,6 +194,20 @@ export function Sidebar({
       return lastMessageTimes[key] || 0;
     },
     [lastMessageTimes]
+  );
+
+  const getContactHeardTime = useCallback((contact: Contact): number => {
+    return Math.max(contact.last_seen ?? 0, contact.last_advert ?? 0);
+  }, []);
+
+  const getContactRecentTime = useCallback(
+    (contact: Contact): number => {
+      if (contact.type === CONTACT_TYPE_REPEATER) {
+        return getContactHeardTime(contact);
+      }
+      return getLastMessageTime('contact', contact.public_key) || getContactHeardTime(contact);
+    },
+    [getContactHeardTime, getLastMessageTime]
   );
 
   // Deduplicate channels by key only.
@@ -200,10 +249,14 @@ export function Sidebar({
     () =>
       [...uniqueChannels].sort((a, b) => {
         // Public channel always sorts to the top
-        if (a.name === 'Public') return -1;
-        if (b.name === 'Public') return 1;
+        if (isPublicChannelKey(a.key)) return -1;
+        if (isPublicChannelKey(b.key)) return 1;
 
-        if (sortOrder === 'recent') {
+        // Muted channels always sort to the bottom
+        if (a.muted && !b.muted) return 1;
+        if (!a.muted && b.muted) return -1;
+
+        if (sectionSortOrders.channels === 'recent') {
           const timeA = getLastMessageTime('channel', a.key);
           const timeB = getLastMessageTime('channel', b.key);
           if (timeA && timeB) return timeB - timeA;
@@ -212,33 +265,107 @@ export function Sidebar({
         }
         return a.name.localeCompare(b.name);
       }),
-    [uniqueChannels, sortOrder, getLastMessageTime]
+    [uniqueChannels, sectionSortOrders.channels, getLastMessageTime]
   );
 
   const sortContactsByOrder = useCallback(
-    (items: Contact[]) =>
+    (items: Contact[], order: SortOrder) =>
       [...items].sort((a, b) => {
-        if (sortOrder === 'recent') {
-          const timeA = getLastMessageTime('contact', a.public_key);
-          const timeB = getLastMessageTime('contact', b.public_key);
+        // Unread DM contacts always float to the top
+        const unreadA = unreadCounts[getStateKey('contact', a.public_key)] || 0;
+        const unreadB = unreadCounts[getStateKey('contact', b.public_key)] || 0;
+        if (unreadA > 0 && unreadB === 0) return -1;
+        if (unreadA === 0 && unreadB > 0) return 1;
+
+        if (order === 'recent') {
+          const timeA = getContactRecentTime(a);
+          const timeB = getContactRecentTime(b);
           if (timeA && timeB) return timeB - timeA;
           if (timeA && !timeB) return -1;
           if (!timeA && timeB) return 1;
         }
         return (a.name || a.public_key).localeCompare(b.name || b.public_key);
       }),
-    [sortOrder, getLastMessageTime]
+    [getContactRecentTime, unreadCounts]
+  );
+
+  const sortRepeatersByOrder = useCallback(
+    (items: Contact[], order: SortOrder) =>
+      [...items].sort((a, b) => {
+        if (order === 'recent') {
+          const timeA = getContactHeardTime(a);
+          const timeB = getContactHeardTime(b);
+          if (timeA && timeB) return timeB - timeA;
+          if (timeA && !timeB) return -1;
+          if (!timeA && timeB) return 1;
+        }
+        return (a.name || a.public_key).localeCompare(b.name || b.public_key);
+      }),
+    [getContactHeardTime]
+  );
+
+  const getFavoriteItemName = useCallback(
+    (item: FavoriteItem) =>
+      item.type === 'channel'
+        ? item.channel.name
+        : getContactDisplayName(
+            item.contact.name,
+            item.contact.public_key,
+            item.contact.last_advert
+          ),
+    []
+  );
+
+  const sortFavoriteItemsByOrder = useCallback(
+    (items: FavoriteItem[], order: SortOrder) =>
+      [...items].sort((a, b) => {
+        if (order === 'recent') {
+          const timeA =
+            a.type === 'channel'
+              ? getLastMessageTime('channel', a.channel.key)
+              : getContactRecentTime(a.contact);
+          const timeB =
+            b.type === 'channel'
+              ? getLastMessageTime('channel', b.channel.key)
+              : getContactRecentTime(b.contact);
+          if (timeA && timeB) return timeB - timeA;
+          if (timeA && !timeB) return -1;
+          if (!timeA && timeB) return 1;
+        }
+
+        return getFavoriteItemName(a).localeCompare(getFavoriteItemName(b));
+      }),
+    [getContactRecentTime, getFavoriteItemName, getLastMessageTime]
   );
 
   // Split non-repeater contacts and repeater contacts into separate sorted lists
   const sortedNonRepeaterContacts = useMemo(
-    () => sortContactsByOrder(uniqueContacts.filter((c) => c.type !== CONTACT_TYPE_REPEATER)),
-    [uniqueContacts, sortContactsByOrder]
+    () =>
+      sortContactsByOrder(
+        uniqueContacts.filter(
+          (c) => c.type !== CONTACT_TYPE_REPEATER && c.type !== CONTACT_TYPE_ROOM
+        ),
+        sectionSortOrders.contacts
+      ),
+    [uniqueContacts, sectionSortOrders.contacts, sortContactsByOrder]
+  );
+
+  const sortedRooms = useMemo(
+    () =>
+      sortContactsByOrder(
+        uniqueContacts.filter((c) => c.type === CONTACT_TYPE_ROOM),
+        sectionSortOrders.rooms
+      ),
+    [uniqueContacts, sectionSortOrders.rooms, sortContactsByOrder]
   );
 
   const sortedRepeaters = useMemo(
-    () => sortContactsByOrder(uniqueContacts.filter((c) => c.type === CONTACT_TYPE_REPEATER)),
-    [uniqueContacts, sortContactsByOrder]
+    () =>
+      sortRepeatersByOrder(
+        uniqueContacts.filter((c) => c.type === CONTACT_TYPE_REPEATER),
+        sectionSortOrders.repeaters
+      ),
+    [uniqueContacts, sectionSortOrders.repeaters, sortRepeatersByOrder]
   );
 
   // Filter by search query
@@ -249,33 +376,41 @@ export function Sidebar({
     () =>
       query
         ? sortedChannels.filter(
-            (c) => c.name.toLowerCase().includes(query) || c.key.toLowerCase().includes(query)
+            (c) => c.name.toLowerCase().includes(query) || c.key.toLowerCase().startsWith(query)
           )
         : sortedChannels,
     [sortedChannels, query]
   );
 
-  const filteredNonRepeaterContacts = useMemo(
-    () =>
-      query
-        ? sortedNonRepeaterContacts.filter(
-            (c) =>
-              c.name?.toLowerCase().includes(query) || c.public_key.toLowerCase().includes(query)
-          )
-        : sortedNonRepeaterContacts,
-    [sortedNonRepeaterContacts, query]
-  );
+  const filteredNonRepeaterContacts = useMemo(() => {
+    const visible = sortedNonRepeaterContacts.filter((c) => !isContactBlocked(c));
+    return query
+      ? visible.filter(
+          (c) =>
+            c.name?.toLowerCase().includes(query) || c.public_key.toLowerCase().startsWith(query)
+        )
+      : visible;
+  }, [sortedNonRepeaterContacts, query, isContactBlocked]);
 
-  const filteredRepeaters = useMemo(
-    () =>
-      query
-        ? sortedRepeaters.filter(
-            (c) =>
-              c.name?.toLowerCase().includes(query) || c.public_key.toLowerCase().includes(query)
-          )
-        : sortedRepeaters,
-    [sortedRepeaters, query]
-  );
+  const filteredRooms = useMemo(() => {
+    const visible = sortedRooms.filter((c) => !isContactBlocked(c));
+    return query
+      ? visible.filter(
+          (c) =>
+            c.name?.toLowerCase().includes(query) || c.public_key.toLowerCase().startsWith(query)
+        )
+      : visible;
+  }, [sortedRooms, query, isContactBlocked]);
+
+  const filteredRepeaters = useMemo(() => {
+    const visible = sortedRepeaters.filter((c) => !isContactBlocked(c));
+    return query
+      ? visible.filter(
+          (c) =>
+            c.name?.toLowerCase().includes(query) || c.public_key.toLowerCase().startsWith(query)
+        )
+      : visible;
+  }, [sortedRepeaters, query, isContactBlocked]);
 
   // Expand sections while searching; restore prior collapse state when search ends.
   useEffect(() => {
@@ -286,6 +421,7 @@ export function Sidebar({
           favorites: favoritesCollapsed,
           channels: channelsCollapsed,
           contacts: contactsCollapsed,
+          rooms: roomsCollapsed,
           repeaters: repeatersCollapsed,
         };
       }
@@ -295,12 +431,14 @@ export function Sidebar({
         favoritesCollapsed ||
         channelsCollapsed ||
         contactsCollapsed ||
+        roomsCollapsed ||
         repeatersCollapsed
       ) {
         setToolsCollapsed(false);
         setFavoritesCollapsed(false);
         setChannelsCollapsed(false);
         setContactsCollapsed(false);
+        setRoomsCollapsed(false);
         setRepeatersCollapsed(false);
       }
       return;
@@ -313,6 +451,7 @@ export function Sidebar({
       setFavoritesCollapsed(prev.favorites);
       setChannelsCollapsed(prev.channels);
       setContactsCollapsed(prev.contacts);
+      setRoomsCollapsed(prev.rooms);
       setRepeatersCollapsed(prev.repeaters);
     }
   }, [
@@ -321,6 +460,7 @@ export function Sidebar({
     favoritesCollapsed,
     channelsCollapsed,
     contactsCollapsed,
+    roomsCollapsed,
     repeatersCollapsed,
   ]);
 
@@ -332,6 +472,7 @@ export function Sidebar({
       favorites: favoritesCollapsed,
       channels: channelsCollapsed,
       contacts: contactsCollapsed,
+      rooms: roomsCollapsed,
       repeaters: repeatersCollapsed,
     };
 
@@ -346,70 +487,59 @@ export function Sidebar({
     favoritesCollapsed,
     channelsCollapsed,
     contactsCollapsed,
+    roomsCollapsed,
     repeatersCollapsed,
   ]);
 
   // Separate favorites from regular items, and build combined favorites list
-  const { favoriteItems, nonFavoriteChannels, nonFavoriteContacts, nonFavoriteRepeaters } =
-    useMemo(() => {
-      const favChannels = filteredChannels.filter((c) => isFavorite(favorites, 'channel', c.key));
-      const favContacts = [...filteredNonRepeaterContacts, ...filteredRepeaters].filter((c) =>
-        isFavorite(favorites, 'contact', c.public_key)
-      );
-      const nonFavChannels = filteredChannels.filter(
-        (c) => !isFavorite(favorites, 'channel', c.key)
-      );
-      const nonFavContacts = filteredNonRepeaterContacts.filter(
-        (c) => !isFavorite(favorites, 'contact', c.public_key)
-      );
-      const nonFavRepeaters = filteredRepeaters.filter(
-        (c) => !isFavorite(favorites, 'contact', c.public_key)
-      );
+  const {
+    favoriteItems,
+    nonFavoriteChannels,
+    nonFavoriteContacts,
+    nonFavoriteRooms,
+    nonFavoriteRepeaters,
+  } = useMemo(() => {
+    const favChannels = filteredChannels.filter((c) => c.favorite);
+    const favContacts = [
+      ...filteredNonRepeaterContacts,
+      ...filteredRooms,
+      ...filteredRepeaters,
+    ].filter((c) => c.favorite);
+    const nonFavChannels = filteredChannels.filter((c) => !c.favorite);
+    const nonFavContacts = filteredNonRepeaterContacts.filter((c) => !c.favorite);
+    const nonFavRooms = filteredRooms.filter((c) => !c.favorite);
+    const nonFavRepeaters = filteredRepeaters.filter((c) => !c.favorite);
 
-      const items: FavoriteItem[] = [
-        ...favChannels.map((channel) => ({ type: 'channel' as const, channel })),
-        ...favContacts.map((contact) => ({ type: 'contact' as const, contact })),
-      ].sort((a, b) => {
-        const timeA =
-          a.type === 'channel'
-            ? getLastMessageTime('channel', a.channel.key)
-            : getLastMessageTime('contact', a.contact.public_key);
-        const timeB =
-          b.type === 'channel'
-            ? getLastMessageTime('channel', b.channel.key)
-            : getLastMessageTime('contact', b.contact.public_key);
-        if (timeA && timeB) return timeB - timeA;
-        if (timeA && !timeB) return -1;
-        if (!timeA && timeB) return 1;
-        const nameA =
-          a.type === 'channel' ? a.channel.name : a.contact.name || a.contact.public_key;
-        const nameB =
-          b.type === 'channel' ? b.channel.name : b.contact.name || b.contact.public_key;
-        return nameA.localeCompare(nameB);
-      });
+    const items: FavoriteItem[] = [
+      ...favChannels.map((channel) => ({ type: 'channel' as const, channel })),
+      ...favContacts.map((contact) => ({ type: 'contact' as const, contact })),
+    ];
 
-      return {
-        favoriteItems: items,
-        nonFavoriteChannels: nonFavChannels,
-        nonFavoriteContacts: nonFavContacts,
-        nonFavoriteRepeaters: nonFavRepeaters,
-      };
-    }, [
-      filteredChannels,
-      filteredNonRepeaterContacts,
-      filteredRepeaters,
-      favorites,
-      getLastMessageTime,
-    ]);
+    return {
+      favoriteItems: sortFavoriteItemsByOrder(items, sectionSortOrders.favorites),
+      nonFavoriteChannels: nonFavChannels,
+      nonFavoriteContacts: nonFavContacts,
+      nonFavoriteRooms: nonFavRooms,
+      nonFavoriteRepeaters: nonFavRepeaters,
+    };
+  }, [
+    filteredChannels,
+    filteredNonRepeaterContacts,
+    filteredRooms,
+    filteredRepeaters,
+    sectionSortOrders.favorites,
+    sortFavoriteItemsByOrder,
+  ]);
 
   const buildChannelRow = (channel: Channel, keyPrefix: string): ConversationRow => ({
     key: `${keyPrefix}-${channel.key}`,
     type: 'channel',
     id: channel.key,
     name: channel.name,
-    unreadCount: getUnreadCount('channel', channel.key),
-    isMention: hasMention('channel', channel.key),
+    unreadCount: channel.muted ? 0 : getUnreadCount('channel', channel.key),
+    isMention: channel.muted ? false : hasMention('channel', channel.key),
     notificationsEnabled: isConversationNotificationsEnabled?.('channel', channel.key) ?? false,
+    muted: channel.muted,
   });
 
   const buildContactRow = (contact: Contact, keyPrefix: string): ConversationRow => ({
@@ -424,57 +554,73 @@ export function Sidebar({
     contact,
   });
 
-  const renderConversationRow = (row: ConversationRow) => (
-    <div
-      key={row.key}
-      className={cn(
-        'px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        isActive(row.type, row.id) && 'bg-accent border-l-primary',
-        row.unreadCount > 0 && '[&_.name]:font-semibold [&_.name]:text-foreground'
-      )}
-      role="button"
-      tabIndex={0}
-      aria-current={isActive(row.type, row.id) ? 'page' : undefined}
-      onKeyDown={handleKeyboardActivate}
-      onClick={() =>
-        handleSelectConversation({
-          type: row.type,
-          id: row.id,
-          name: row.name,
-        })
-      }
-    >
-      {row.type === 'contact' && row.contact && (
-        <ContactAvatar
-          name={row.contact.name}
-          publicKey={row.contact.public_key}
-          size={24}
-          contactType={row.contact.type}
-        />
-      )}
-      <span className="name flex-1 truncate text-[13px]">{row.name}</span>
-      <span className="ml-auto flex items-center gap-1">
-        {row.notificationsEnabled && (
-          <span aria-label="Notifications enabled" title="Notifications enabled">
-            <Bell className="h-3.5 w-3.5 text-muted-foreground" />
-          </span>
+  const renderConversationRow = (row: ConversationRow) => {
+    const highlightUnread =
+      row.isMention ||
+      (row.type === 'contact' &&
+        row.contact?.type !== CONTACT_TYPE_REPEATER &&
+        row.unreadCount > 0);
+
+    return (
+      <div
+        key={row.key}
+        className={cn(
+          'px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          isActive(row.type, row.id) && 'bg-accent border-l-primary',
+          row.unreadCount > 0 && '[&_.name]:font-semibold [&_.name]:text-foreground'
         )}
-        {row.unreadCount > 0 && (
-          <span
-            className={cn(
-              'text-[10px] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center',
-              row.isMention
-                ? 'bg-badge-mention text-badge-mention-foreground'
-                : 'bg-badge-unread/90 text-badge-unread-foreground'
-            )}
-            aria-label={`${row.unreadCount} unread message${row.unreadCount !== 1 ? 's' : ''}`}
-          >
-            {row.unreadCount}
-          </span>
+        role="button"
+        tabIndex={0}
+        aria-current={isActive(row.type, row.id) ? 'page' : undefined}
+        onKeyDown={handleKeyboardActivate}
+        onClick={() =>
+          handleSelectConversation({
+            type: row.type,
+            id: row.id,
+            name: row.name,
+          })
+        }
+      >
+        {row.type === 'contact' && row.contact && (
+          <ContactAvatar
+            name={row.contact.name}
+            publicKey={row.contact.public_key}
+            size={24}
+            contactType={row.contact.type}
+          />
         )}
-      </span>
-    </div>
-  );
+        <span className="name flex-1 truncate text-[0.8125rem]">{row.name}</span>
+        <span className="ml-auto flex items-center gap-1">
+          {row.muted ? (
+            <span aria-label="Channel muted" title="Channel muted">
+              <BellOff className="h-3.5 w-3.5 text-muted-foreground" />
+            </span>
+          ) : (
+            <>
+              {row.notificationsEnabled && (
+                <span aria-label="Notifications enabled" title="Notifications enabled">
+                  <Bell className="h-3.5 w-3.5 text-muted-foreground" />
+                </span>
+              )}
+              {row.unreadCount > 0 && (
+                <span
+                  className={cn(
+                    'text-[0.625rem] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center',
+                    highlightUnread
+                      ? 'bg-badge-mention text-badge-mention-foreground'
+                      : 'bg-badge-unread/90 text-badge-unread-foreground'
+                  )}
+                  aria-label={`${row.unreadCount} unread message${row.unreadCount !== 1 ? 's' : ''}`}
+                >
+                  {row.unreadCount}
+                </span>
+              )}
+            </>
+          )}
+        </span>
+      </div>
+    );
+  };
 
   const renderSidebarActionRow = ({
     key,
@@ -491,8 +637,9 @@ export function Sidebar({
   }) => (
     <div
       key={key}
+      data-active={active ? 'true' : undefined}
       className={cn(
-        'px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        'sidebar-action-row px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors text-[0.8125rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
         active && 'bg-accent border-l-primary'
       )}
       role="button"
@@ -501,10 +648,10 @@ export function Sidebar({
       onKeyDown={handleKeyboardActivate}
       onClick={onClick}
     >
-      <span className="sidebar-tool-icon text-muted-foreground" aria-hidden="true">
+      <span className="sidebar-tool-icon" aria-hidden="true">
         {icon}
       </span>
-      <span className="sidebar-tool-label flex-1 truncate text-muted-foreground">{label}</span>
+      <span className="sidebar-tool-label flex-1 truncate">{label}</span>
     </div>
   );
 
@@ -520,11 +667,13 @@ export function Sidebar({
   );
   const channelRows = nonFavoriteChannels.map((channel) => buildChannelRow(channel, 'chan'));
   const contactRows = nonFavoriteContacts.map((contact) => buildContactRow(contact, 'contact'));
+  const roomRows = nonFavoriteRooms.map((contact) => buildContactRow(contact, 'room'));
   const repeaterRows = nonFavoriteRepeaters.map((contact) => buildContactRow(contact, 'repeater'));
 
   const favoritesUnreadCount = getSectionUnreadCount(favoriteRows);
   const channelsUnreadCount = getSectionUnreadCount(channelRows);
   const contactsUnreadCount = getSectionUnreadCount(contactRows);
+  const roomsUnreadCount = getSectionUnreadCount(roomRows);
   const repeatersUnreadCount = getSectionUnreadCount(repeaterRows);
   const favoritesHasMention = sectionHasMention(favoriteRows);
   const channelsHasMention = sectionHasMention(channelRows);
@@ -557,13 +706,25 @@ export function Sidebar({
         renderSidebarActionRow({
           key: 'tool-visualizer',
           active: isActive('visualizer', 'visualizer'),
-          icon: <Waypoints className="h-4 w-4" />,
+          icon: <ChartNetwork className="h-4 w-4" />,
           label: 'Mesh Visualizer',
           onClick: () =>
             handleSelectConversation({
               type: 'visualizer',
               id: 'visualizer',
               name: 'Mesh Visualizer',
+            }),
+        }),
+        renderSidebarActionRow({
+          key: 'tool-trace',
+          active: isActive('trace', 'trace'),
+          icon: <Cable className="h-4 w-4" />,
+          label: 'Trace',
+          onClick: () =>
+            handleSelectConversation({
+              type: 'trace',
+              id: 'trace',
+              name: 'Trace',
             }),
         }),
         renderSidebarActionRow({
@@ -584,10 +745,10 @@ export function Sidebar({
           icon: <LockOpen className="h-4 w-4" />,
           label: (
             <>
-              {showCracker ? 'Hide' : 'Show'} Room Finder
+              {showCracker ? 'Hide' : 'Show'} Channel Finder
               <span
                 className={cn(
-                  'ml-1 text-[11px]',
+                  'ml-1 text-[0.6875rem]',
                   crackerRunning ? 'text-primary' : 'text-muted-foreground'
                 )}
               >
@@ -604,17 +765,18 @@ export function Sidebar({
     title: string,
     collapsed: boolean,
     onToggle: () => void,
-    showSortToggle = false,
+    sortSection: SidebarSortableSection | null = null,
     unreadCount = 0,
     highlightUnread = false
   ) => {
     const effectiveCollapsed = isSearching ? false : collapsed;
+    const sectionSortOrder = sortSection ? sectionSortOrders[sortSection] : null;
 
     return (
       <div className="flex justify-between items-center px-3 py-2 pt-3.5">
         <button
           className={cn(
-            'flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded',
+            'flex items-center gap-1.5 text-[0.625rem] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded',
             isSearching && 'cursor-default'
           )}
           aria-expanded={!effectiveCollapsed}
@@ -630,22 +792,30 @@ export function Sidebar({
           )}
           <span>{title}</span>
         </button>
-        {(showSortToggle || unreadCount > 0) && (
+        {(sortSection || unreadCount > 0) && (
           <div className="ml-auto flex items-center gap-1.5">
-            {showSortToggle && (
+            {sortSection && sectionSortOrder && (
               <button
-                className="bg-transparent text-muted-foreground/60 px-1 py-0.5 text-[10px] rounded hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={handleSortToggle}
-                aria-label={sortOrder === 'alpha' ? 'Sort by recent' : 'Sort alphabetically'}
-                title={sortOrder === 'alpha' ? 'Sort by recent' : 'Sort alphabetically'}
+                className="bg-transparent text-muted-foreground/60 px-1 py-0.5 text-[0.625rem] rounded hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => handleSortToggle(sortSection)}
+                aria-label={
+                  sectionSortOrder === 'alpha'
+                    ? `Sort ${title} by recent`
+                    : `Sort ${title} alphabetically`
+                }
+                title={
+                  sectionSortOrder === 'alpha'
+                    ? `Sort ${title} by recent`
+                    : `Sort ${title} alphabetically`
+                }
               >
-                {sortOrder === 'alpha' ? 'A-Z' : '⏱'}
+                {sectionSortOrder === 'alpha' ? 'A-Z' : '⏱'}
               </button>
             )}
             {unreadCount > 0 && (
               <span
                 className={cn(
-                  'text-[10px] font-medium px-1.5 py-0.5 rounded-full',
+                  'text-[0.625rem] font-medium px-1.5 py-0.5 rounded-full',
                   highlightUnread
                     ? 'bg-badge-mention text-badge-mention-foreground'
                     : 'bg-secondary text-muted-foreground'
@@ -667,41 +837,45 @@ export function Sidebar({
       aria-label="Conversations"
     >
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-        <div className="relative min-w-0 flex-1">
-          <Input
-            type="text"
-            placeholder="Search rooms/contacts..."
-            aria-label="Search conversations"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className={cn('h-7 text-[13px] bg-background/50', searchQuery ? 'pr-8' : 'pr-3')}
-          />
-          {searchQuery && (
-            <button
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
-              onClick={() => setSearchQuery('')}
-              title="Clear search"
-              aria-label="Clear search"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
-        </div>
+      <div className="px-3 py-2 border-b border-border">
         <Button
-          variant="ghost"
+          variant="outline"
           size="sm"
           onClick={onNewMessage}
-          title="New Message"
-          aria-label="New message"
-          className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground transition-colors"
+          title="Add channel or contact"
+          aria-label="Add channel or contact"
+          className="h-8 w-full justify-start gap-2 border-primary/20 bg-primary/5 px-3 text-[0.8125rem] text-primary hover:bg-primary/10 hover:text-primary"
         >
           <SquarePen className="h-4 w-4" />
+          <span>Add Channel/Contact</span>
         </Button>
       </div>
 
       {/* List */}
       <div className="flex-1 min-h-0 overflow-y-auto [contain:layout_paint]">
+        <div className="px-3 py-2 border-b border-border/60">
+          <div className="relative min-w-0">
+            <Input
+              type="text"
+              placeholder="Search channels/contacts..."
+              aria-label="Search conversations"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className={cn('h-7 text-[0.8125rem] bg-background/50', searchQuery ? 'pr-8' : 'pr-3')}
+            />
+            {searchQuery && (
+              <button
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-lg leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+                onClick={() => setSearchQuery('')}
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Tools */}
         {toolRows.length > 0 && (
           <>
@@ -713,7 +887,7 @@ export function Sidebar({
         {/* Mark All Read */}
         {!query && Object.values(unreadCounts).some((c) => c > 0) && (
           <div
-            className="px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="px-3 py-2 cursor-pointer flex items-center gap-2 border-l-2 border-transparent hover:bg-accent transition-colors text-[0.8125rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             role="button"
             tabIndex={0}
             onKeyDown={handleKeyboardActivate}
@@ -731,7 +905,7 @@ export function Sidebar({
               'Favorites',
               favoritesCollapsed,
               () => setFavoritesCollapsed((prev) => !prev),
-              false,
+              'favorites',
               favoritesUnreadCount,
               favoritesHasMention
             )}
@@ -747,7 +921,7 @@ export function Sidebar({
               'Channels',
               channelsCollapsed,
               () => setChannelsCollapsed((prev) => !prev),
-              true,
+              'channels',
               channelsUnreadCount,
               channelsHasMention
             )}
@@ -763,7 +937,7 @@ export function Sidebar({
               'Contacts',
               contactsCollapsed,
               () => setContactsCollapsed((prev) => !prev),
-              true,
+              'contacts',
               contactsUnreadCount,
               contactsUnreadCount > 0
             )}
@@ -779,7 +953,7 @@ export function Sidebar({
               'Repeaters',
               repeatersCollapsed,
               () => setRepeatersCollapsed((prev) => !prev),
-              true,
+              'repeaters',
               repeatersUnreadCount
             )}
             {(isSearching || !repeatersCollapsed) &&
@@ -787,8 +961,24 @@ export function Sidebar({
           </>
         )}
 
+        {/* Room Servers */}
+        {nonFavoriteRooms.length > 0 && (
+          <>
+            {renderSectionHeader(
+              'Room Servers',
+              roomsCollapsed,
+              () => setRoomsCollapsed((prev) => !prev),
+              'rooms',
+              roomsUnreadCount,
+              roomsUnreadCount > 0
+            )}
+            {(isSearching || !roomsCollapsed) && roomRows.map((row) => renderConversationRow(row))}
+          </>
+        )}
+
         {/* Empty state */}
         {nonFavoriteContacts.length === 0 &&
+          nonFavoriteRooms.length === 0 &&
           nonFavoriteChannels.length === 0 &&
           nonFavoriteRepeaters.length === 0 &&
           favoriteItems.length === 0 && (

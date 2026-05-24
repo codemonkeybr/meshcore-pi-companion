@@ -1,6 +1,6 @@
 # Fanout Bus Architecture
 
-The fanout bus is a unified system for dispatching mesh radio events (decoded messages and raw packets) to external integrations. It replaces the previous scattered singleton MQTT publishers with a modular, configurable framework.
+The fanout bus is a unified system for dispatching mesh radio events to external integrations. It replaces the previous scattered singleton MQTT publishers with a modular, configurable framework.
 
 ## Core Concepts
 
@@ -8,9 +8,14 @@ The fanout bus is a unified system for dispatching mesh radio events (decoded me
 Base class that all integration modules extend:
 - `__init__(config_id, config, *, name="")` — constructor; receives the config UUID, the type-specific config dict, and the user-assigned name
 - `start()` / `stop()` — async lifecycle (e.g. open/close connections)
-- `on_message(data)` — receive decoded messages (DM/channel)
-- `on_raw(data)` — receive raw RF packets
+- `on_message(data)` — receive decoded messages (scope-gated)
+- `on_raw(data)` — receive raw RF packets (scope-gated)
+- `on_contact(data)` — receive contact upserts; dispatched to all modules
+- `on_telemetry(data)` — receive repeater telemetry snapshots; dispatched to all modules
+- `on_health(data)` — receive periodic radio health snapshots; dispatched to all modules
 - `status` property (**must override**) — return `"connected"`, `"disconnected"`, or `"error"`
+
+All five event hooks are no-ops by default; modules override only the ones they care about.
 
 ### FanoutManager (manager.py)
 Singleton that owns all active modules and dispatches events:
@@ -19,6 +24,9 @@ Singleton that owns all active modules and dispatches events:
 - `remove_config(id)` — delete: stop and remove
 - `broadcast_message(data)` — scope-check + dispatch `on_message`
 - `broadcast_raw(data)` — scope-check + dispatch `on_raw`
+- `broadcast_contact(data)` — dispatch `on_contact` to all modules
+- `broadcast_telemetry(data)` — dispatch `on_telemetry` to all modules
+- `broadcast_health_fanout(data)` — dispatch `on_health` to all modules
 - `stop_all()` — shutdown
 - `get_statuses()` — health endpoint data
 
@@ -33,18 +41,64 @@ Each config has a `scope` JSON blob controlling what events reach it:
 ```
 Community MQTT always enforces `{"messages": "none", "raw_packets": "all"}`.
 
+Scope only gates `on_message` and `on_raw`. The `on_contact`, `on_telemetry`, and `on_health` hooks are dispatched to all modules unconditionally — modules that care about specific contacts or repeaters filter internally based on their own config.
+
 ## Event Flow
 
 ```
 Radio Event -> packet_processor / event_handler
-  -> broadcast_event("message"|"raw_packet", data, realtime=True)
+  -> broadcast_event("message"|"raw_packet"|"contact", data, realtime=True)
     -> WebSocket broadcast (always)
-    -> FanoutManager.broadcast_message/raw (only if realtime=True)
-      -> scope check per module
-      -> module.on_message / on_raw
+    -> FanoutManager.broadcast_message/raw/contact (only if realtime=True)
+      -> scope check per module (message/raw only)
+      -> module.on_message / on_raw / on_contact
+
+Telemetry collect (radio_sync.py / routers/repeaters.py)
+  -> RepeaterTelemetryRepository.record(...)
+  -> FanoutManager.broadcast_telemetry(data)
+    -> module.on_telemetry (all modules, unconditional)
+
+Health fanout (radio_stats.py, piggybacks on 60s stats sampling loop)
+  -> FanoutManager.broadcast_health_fanout(data)
+    -> module.on_health (all modules, unconditional)
 ```
 
 Setting `realtime=False` (used during historical decryption) skips fanout dispatch entirely.
+
+## Event Payloads
+
+### on_message(data)
+`Message.model_dump()` — the full Pydantic message model. Key fields:
+- `type` (`"PRIV"` | `"CHAN"`), `conversation_key`, `text`, `sender_name`, `sender_key`
+- `outgoing`, `acked`, `paths`, `sender_timestamp`, `received_at`
+
+### on_raw(data)
+Raw packet dict from `packet_processor.py`. Key fields:
+- `id` (storage row ID), `observation_id` (per-arrival), `raw` (hex), `timestamp`
+- `decrypted_info` (optional: `channel_key`, `contact_key`, `text`)
+
+### on_contact(data)
+`Contact.model_dump()` — the full Pydantic contact model. Key fields:
+- `public_key`, `name`, `type` (0=unknown, 1=client, 2=repeater, 3=room, 4=sensor)
+- `lat`, `lon`, `last_seen`, `first_seen`, `on_radio`
+
+### on_telemetry(data)
+Repeater telemetry snapshot, broadcast after successful `RepeaterTelemetryRepository.record()`.
+Identical shape from both auto-collect (`radio_sync.py`) and manual fetch (`routers/repeaters.py`):
+- `public_key`, `name`, `timestamp`
+- `battery_volts`, `noise_floor_dbm`, `last_rssi_dbm`, `last_snr_db`
+- `packets_received`, `packets_sent`, `airtime_seconds`, `rx_airtime_seconds`
+- `uptime_seconds`, `sent_flood`, `sent_direct`, `recv_flood`, `recv_direct`
+- `flood_dups`, `direct_dups`, `full_events`, `tx_queue_len`
+
+### on_health(data)
+Radio health + stats snapshot, broadcast every 60s by the stats sampling loop in `radio_stats.py`:
+- `connected` (bool), `connection_info` (str | None)
+- `public_key` (str | None), `name` (str | None)
+- `noise_floor_dbm`, `battery_mv`, `uptime_secs` (int | None)
+- `last_rssi` (int | None), `last_snr` (float | None)
+- `tx_air_secs`, `rx_air_secs` (int | None)
+- `packets_recv`, `packets_sent`, `flood_tx`, `direct_tx`, `flood_rx`, `direct_rx` (int | None)
 
 ## Current Module Types
 
@@ -65,6 +119,7 @@ Wraps bot code execution via `app/fanout/bot_exec.py`. Config blob:
 - `code` — Python bot function source code
 - Executes in a thread pool with timeout and semaphore concurrency control
 - Rate-limits outgoing messages for repeater compatibility
+- Channel `message_text` passed to bot code is normalized for human readability by stripping a leading `"{sender_name}: "` prefix when it matches the payload sender.
 
 ### webhook (webhook.py)
 HTTP webhook delivery. Config blob:
@@ -78,6 +133,7 @@ Push notifications via Apprise library. Config blob:
 - `urls` — newline-separated Apprise notification service URLs
 - `preserve_identity` — suppress Discord webhook name/avatar override
 - `include_path` — include routing path in notification body
+- Channel notifications normalize stored message text by stripping a leading `"{sender_name}: "` prefix when it matches the payload sender so alerts do not duplicate the name.
 
 ### sqs (sqs.py)
 Amazon SQS delivery. Config blob:
@@ -86,6 +142,19 @@ Amazon SQS delivery. Config blob:
 - `access_key_id`, `secret_access_key`, `session_token` (all optional; blank uses the normal AWS credential chain)
 - Publishes a JSON envelope of the form `{"event_type":"message"|"raw_packet","data":...}`
 - Supports both decoded messages and raw packets via normal scope selection
+
+### map_upload (map_upload.py)
+Uploads heard repeater and room-server advertisements to map.meshcore.io. Config blob:
+- `api_url` (optional, default `""`) — upload endpoint; empty falls back to the public map.meshcore.io API
+- `dry_run` (bool, default `true`) — when true, logs the payload at INFO level without sending
+- `geofence_enabled` (bool, default `false`) — when true, only uploads nodes within `geofence_radius_km` of the radio's own configured lat/lon
+- `geofence_radius_km` (float, default `0`) — filter radius in kilometres
+
+Geofence notes:
+- The reference center is always the radio's own `adv_lat`/`adv_lon` from `radio_runtime.meshcore.self_info`, read **live at upload time** — no lat/lon is stored in the fanout config itself.
+- If the radio's lat/lon is `(0, 0)` or the radio is not connected, the geofence check is silently skipped so uploads continue normally until coordinates are configured.
+- Requires the radio to have `ENABLE_PRIVATE_KEY_EXPORT=1` firmware to sign uploads.
+- Scope is always `{"messages": "none", "raw_packets": "all"}` — only raw RF packets are processed.
 
 ## Adding a New Integration Type
 
@@ -289,6 +358,7 @@ Migrations:
 - `app/fanout/webhook.py` — Webhook fanout module
 - `app/fanout/apprise_mod.py` — Apprise fanout module
 - `app/fanout/sqs.py` — Amazon SQS fanout module
+- `app/fanout/map_upload.py` — Map Upload fanout module
 - `app/repository/fanout.py` — Database CRUD
 - `app/routers/fanout.py` — REST API
 - `app/websocket.py` — `broadcast_event()` dispatches to fanout

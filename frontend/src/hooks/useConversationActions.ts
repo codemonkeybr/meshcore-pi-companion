@@ -1,19 +1,16 @@
 import { useCallback, type MutableRefObject, type RefObject } from 'react';
 import { api } from '../api';
-import * as messageCache from '../messageCache';
 import { toast } from '../components/ui/sonner';
 import type { MessageInputHandle } from '../components/MessageInput';
-import type { Channel, Conversation, Message } from '../types';
+import type { Channel, Contact, Conversation, Message, PathDiscoveryResponse } from '../types';
+import { mergeContactIntoList } from '../utils/contactMerge';
 
 interface UseConversationActionsArgs {
   activeConversation: Conversation | null;
   activeConversationRef: MutableRefObject<Conversation | null>;
-  channels: Channel[];
+  setContacts: React.Dispatch<React.SetStateAction<Contact[]>>;
   setChannels: React.Dispatch<React.SetStateAction<Channel[]>>;
-  addMessageIfNew: (msg: Message) => boolean;
-  jumpToBottom: () => void;
-  handleToggleBlockedKey: (key: string) => Promise<void>;
-  handleToggleBlockedName: (name: string) => Promise<void>;
+  observeMessage: (msg: Message) => { added: boolean; activeConversation: boolean };
   messageInputRef: RefObject<MessageInputHandle | null>;
 }
 
@@ -24,21 +21,21 @@ interface UseConversationActionsResult {
     channelKey: string,
     floodScopeOverride: string
   ) => Promise<void>;
+  handleSetChannelPathHashModeOverride: (
+    channelKey: string,
+    pathHashModeOverride: number | null
+  ) => Promise<void>;
   handleSenderClick: (sender: string) => void;
   handleTrace: () => Promise<void>;
-  handleBlockKey: (key: string) => Promise<void>;
-  handleBlockName: (name: string) => Promise<void>;
+  handlePathDiscovery: (publicKey: string) => Promise<PathDiscoveryResponse>;
 }
 
 export function useConversationActions({
   activeConversation,
   activeConversationRef,
-  channels,
+  setContacts,
   setChannels,
-  addMessageIfNew,
-  jumpToBottom,
-  handleToggleBlockedKey,
-  handleToggleBlockedName,
+  observeMessage,
   messageInputRef,
 }: UseConversationActionsArgs): UseConversationActionsResult {
   const mergeChannelIntoList = useCallback(
@@ -60,13 +57,6 @@ export function useConversationActions({
     async (text: string) => {
       if (!activeConversation) return;
 
-      if (activeConversation.type === 'channel') {
-        const channel = channels.find((c) => c.key === activeConversation.id);
-        if (channel && !channel.on_radio) {
-          throw new Error('Channel is not on the radio. Sync channels first.');
-        }
-      }
-
       const conversationId = activeConversation.id;
       const sent =
         activeConversation.type === 'channel'
@@ -74,16 +64,25 @@ export function useConversationActions({
           : await api.sendDirectMessage(activeConversation.id, text);
 
       if (activeConversationRef.current?.id === conversationId) {
-        addMessageIfNew(sent);
+        observeMessage(sent);
       }
     },
-    [activeConversation, activeConversationRef, channels, addMessageIfNew]
+    [activeConversation, activeConversationRef, observeMessage]
   );
 
   const handleResendChannelMessage = useCallback(
     async (messageId: number, newTimestamp?: boolean) => {
       try {
-        await api.resendChannelMessage(messageId, newTimestamp);
+        const resent = await api.resendChannelMessage(messageId, newTimestamp);
+        const resentMessage = resent.message;
+        if (
+          newTimestamp &&
+          resentMessage &&
+          activeConversationRef.current?.type === 'channel' &&
+          activeConversationRef.current.id === resentMessage.conversation_key
+        ) {
+          observeMessage(resentMessage);
+        }
         toast.success(newTimestamp ? 'Message resent with new timestamp' : 'Message resent');
       } catch (err) {
         toast.error('Failed to resend', {
@@ -91,7 +90,7 @@ export function useConversationActions({
         });
       }
     },
-    []
+    [activeConversationRef, observeMessage]
   );
 
   const handleSetChannelFloodScopeOverride = useCallback(
@@ -104,6 +103,25 @@ export function useConversationActions({
         );
       } catch (err) {
         toast.error('Failed to update regional override', {
+          description: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    },
+    [mergeChannelIntoList]
+  );
+
+  const handleSetChannelPathHashModeOverride = useCallback(
+    async (channelKey: string, pathHashModeOverride: number | null) => {
+      try {
+        const updated = await api.setChannelPathHashModeOverride(channelKey, pathHashModeOverride);
+        mergeChannelIntoList(updated);
+        toast.success(
+          updated.path_hash_mode_override != null
+            ? 'Path hop width override saved'
+            : 'Path hop width override cleared'
+        );
+      } catch (err) {
+        toast.error('Failed to update path hop width override', {
           description: err instanceof Error ? err.message : 'Unknown error',
         });
       }
@@ -135,31 +153,22 @@ export function useConversationActions({
     }
   }, [activeConversation]);
 
-  const handleBlockKey = useCallback(
-    async (key: string) => {
-      await handleToggleBlockedKey(key);
-      messageCache.clear();
-      jumpToBottom();
+  const handlePathDiscovery = useCallback(
+    async (publicKey: string) => {
+      const result = await api.requestPathDiscovery(publicKey);
+      setContacts((prev) => mergeContactIntoList(prev, result.contact));
+      return result;
     },
-    [handleToggleBlockedKey, jumpToBottom]
-  );
-
-  const handleBlockName = useCallback(
-    async (name: string) => {
-      await handleToggleBlockedName(name);
-      messageCache.clear();
-      jumpToBottom();
-    },
-    [handleToggleBlockedName, jumpToBottom]
+    [setContacts]
   );
 
   return {
     handleSendMessage,
     handleResendChannelMessage,
     handleSetChannelFloodScopeOverride,
+    handleSetChannelPathHashModeOverride,
     handleSenderClick,
     handleTrace,
-    handleBlockKey,
-    handleBlockName,
+    handlePathDiscovery,
   };
 }

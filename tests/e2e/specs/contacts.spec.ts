@@ -6,9 +6,9 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Find a named non-repeater contact (type 2 = repeater). */
+/** Find a named normal chat contact (exclude repeaters and room servers). */
 function findChatContact(contacts: Contact[]): Contact | undefined {
-  return contacts.find((c) => c.name && c.name.trim().length > 0 && c.type !== 2);
+  return contacts.find((c) => c.name && c.name.trim().length > 0 && c.type !== 2 && c.type !== 3);
 }
 
 test.describe('Contacts sidebar & info pane', () => {

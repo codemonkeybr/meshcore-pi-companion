@@ -94,10 +94,13 @@ class ClientBackend(RadioBackend):
         msg: str,
         *,
         timestamp: int | None = None,
+        attempt: int | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {"dst": dst, "msg": msg}
         if timestamp is not None:
             kwargs["timestamp"] = timestamp
+        if attempt is not None:
+            kwargs["attempt"] = attempt
         return await self._mc.commands.send_msg(**kwargs)
 
     async def send_cmd(self, dst: Any, cmd: str) -> Any:
@@ -219,8 +222,17 @@ class ClientBackend(RadioBackend):
             public_key, timeout=timeout, min_timeout=min_timeout
         )
 
-    async def send_trace(self, *, path: str, tag: int) -> Any:
-        return await self._mc.commands.send_trace(path=path, tag=tag)
+    async def reset_path(self, public_key: str) -> Any:
+        return await self._mc.commands.reset_path(public_key)
+
+    async def send_path_discovery(self, public_key: str) -> Any:
+        return await self._mc.commands.send_path_discovery(public_key)
+
+    async def send_trace(self, *, path: str, tag: int, flags: int | None = None) -> Any:
+        kwargs: dict[str, Any] = {"path": path, "tag": tag}
+        if flags is not None:
+            kwargs["flags"] = flags
+        return await self._mc.commands.send_trace(**kwargs)
 
     async def wait_for_event(
         self,

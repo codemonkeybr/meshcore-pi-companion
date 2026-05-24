@@ -16,6 +16,10 @@ export interface RadioConfig {
   path_hash_mode: number;
   path_hash_mode_supported: boolean;
   advert_location_source?: 'off' | 'current';
+  multi_acks_enabled?: boolean;
+  telemetry_mode_base?: number;
+  telemetry_mode_loc?: number;
+  telemetry_mode_env?: number;
 }
 
 export interface RadioConfigUpdate {
@@ -26,12 +30,61 @@ export interface RadioConfigUpdate {
   radio?: RadioSettings;
   path_hash_mode?: number;
   advert_location_source?: 'off' | 'current';
+  multi_acks_enabled?: boolean;
+  telemetry_mode_base?: number;
+  telemetry_mode_loc?: number;
+  telemetry_mode_env?: number;
 }
+
+export type RadioDiscoveryTarget = 'repeaters' | 'sensors' | 'all';
+
+export interface RadioDiscoveryResult {
+  public_key: string;
+  name: string | null;
+  node_type: 'repeater' | 'sensor';
+  heard_count: number;
+  local_snr: number | null;
+  local_rssi: number | null;
+  remote_snr: number | null;
+}
+
+export interface RadioDiscoveryResponse {
+  target: RadioDiscoveryTarget;
+  duration_seconds: number;
+  results: RadioDiscoveryResult[];
+}
+
+export type RadioAdvertMode = 'flood' | 'zero_hop';
 
 export interface FanoutStatusEntry {
   name: string;
   type: string;
   status: string;
+  last_error?: string | null;
+}
+
+export interface AppInfo {
+  version: string;
+  commit_hash: string | null;
+}
+
+export interface RadioStatsSnapshot {
+  timestamp: number | null;
+  battery_mv: number | null;
+  uptime_secs: number | null;
+  queue_len: number | null;
+  errors: number | null;
+  noise_floor: number | null;
+  last_rssi: number | null;
+  last_snr: number | null;
+  tx_air_secs: number | null;
+  rx_air_secs: number | null;
+  packets_recv: number | null;
+  packets_sent: number | null;
+  flood_tx: number | null;
+  direct_tx: number | null;
+  flood_rx: number | null;
+  direct_rx: number | null;
 }
 
 export interface HealthStatus {
@@ -40,10 +93,21 @@ export interface HealthStatus {
   radio_initializing: boolean;
   radio_state?: 'connected' | 'initializing' | 'connecting' | 'disconnected' | 'paused';
   connection_info: string | null;
+  app_info?: AppInfo | null;
+  radio_device_info?: {
+    model: string | null;
+    firmware_build: string | null;
+    firmware_version: string | null;
+    max_contacts: number | null;
+    max_channels: number | null;
+  } | null;
+  radio_stats?: RadioStatsSnapshot | null;
   database_size_mb: number;
   oldest_undecrypted_timestamp: number | null;
   fanout_statuses: Record<string, FanoutStatusEntry>;
   bots_disabled: boolean;
+  bots_disabled_source?: 'env' | 'until_restart' | null;
+  basic_auth_enabled?: boolean;
 }
 
 export interface FanoutConfig {
@@ -67,20 +131,32 @@ export interface Contact {
   name: string | null;
   type: number;
   flags: number;
-  last_path: string | null;
-  last_path_len: number;
-  out_path_hash_mode: number;
+  direct_path: string | null;
+  direct_path_len: number;
+  direct_path_hash_mode: number;
+  direct_path_updated_at?: number | null;
   route_override_path?: string | null;
   route_override_len?: number | null;
   route_override_hash_mode?: number | null;
+  effective_route?: ContactRoute | null;
+  effective_route_source?: 'override' | 'direct' | 'flood';
+  direct_route?: ContactRoute | null;
+  route_override?: ContactRoute | null;
   last_advert: number | null;
   lat: number | null;
   lon: number | null;
   last_seen: number | null;
   on_radio: boolean;
+  favorite: boolean;
   last_contacted: number | null;
   last_read_at: number | null;
   first_seen: number | null;
+}
+
+export interface ContactRoute {
+  path: string;
+  path_len: number;
+  path_hash_mode: number;
 }
 
 export interface ContactAdvertPath {
@@ -115,23 +191,6 @@ export interface NearestRepeater {
   path_len: number;
   last_seen: number;
   heard_count: number;
-}
-
-export interface ContactDetail {
-  contact: Contact;
-  name_history: ContactNameHistory[];
-  dm_message_count: number;
-  channel_message_count: number;
-  most_active_rooms: ContactActiveRoom[];
-  advert_paths: ContactAdvertPath[];
-  advert_frequency: number | null;
-  nearest_repeaters: NearestRepeater[];
-}
-
-export interface NameOnlyContactDetail {
-  name: string;
-  channel_message_count: number;
-  most_active_rooms: ContactActiveRoom[];
 }
 
 export interface ContactAnalyticsHourlyBucket {
@@ -169,7 +228,10 @@ export interface Channel {
   is_hashtag: boolean;
   on_radio: boolean;
   flood_scope_override?: string | null;
+  path_hash_mode_override?: number | null;
   last_read_at: number | null;
+  favorite: boolean;
+  muted: boolean;
 }
 
 export interface ChannelMessageCounts {
@@ -186,12 +248,32 @@ export interface ChannelTopSender {
   message_count: number;
 }
 
+export interface BulkCreateHashtagChannelsResult {
+  created_channels: Channel[];
+  existing_count: number;
+  invalid_names: string[];
+  decrypt_started: boolean;
+  decrypt_total_packets: number;
+  message: string;
+}
+
+export interface PathHashWidthStats {
+  total_packets: number;
+  single_byte: number;
+  double_byte: number;
+  triple_byte: number;
+  single_byte_pct: number;
+  double_byte_pct: number;
+  triple_byte_pct: number;
+}
+
 export interface ChannelDetail {
   channel: Channel;
   message_counts: ChannelMessageCounts;
   first_message_at: number | null;
   unique_sender_count: number;
   top_senders_24h: ChannelTopSender[];
+  path_hash_width_24h: PathHashWidthStats;
 }
 
 /** A single path that a message took to reach us */
@@ -202,6 +284,10 @@ export interface MessagePath {
   received_at: number;
   /** Hop count (number of intermediate nodes). Null for legacy data (infer as len(path)/2). */
   path_len?: number | null;
+  /** Last-hop RSSI in dBm (null if not available, e.g. older data) */
+  rssi?: number | null;
+  /** Last-hop SNR in dB (null if not available, e.g. older data) */
+  snr?: number | null;
 }
 
 export interface Message {
@@ -222,6 +308,7 @@ export interface Message {
   acked: number;
   sender_name: string | null;
   channel_name?: string | null;
+  packet_id?: number | null;
 }
 
 export interface MessagesAroundResponse {
@@ -230,7 +317,13 @@ export interface MessagesAroundResponse {
   has_newer: boolean;
 }
 
-type ConversationType = 'contact' | 'channel' | 'raw' | 'map' | 'visualizer' | 'search';
+export interface ResendChannelMessageResponse {
+  status: string;
+  message_id: number;
+  message?: Message;
+}
+
+type ConversationType = 'contact' | 'channel' | 'raw' | 'map' | 'visualizer' | 'search' | 'trace';
 
 export interface Conversation {
   type: ConversationType;
@@ -256,51 +349,61 @@ export interface RawPacket {
     sender: string | null;
     channel_key: string | null;
     contact_key: string | null;
+    sender_timestamp: number | null;
+    message: string | null;
   } | null;
-}
-
-export interface Favorite {
-  type: 'channel' | 'contact';
-  id: string; // channel key or contact public key
 }
 
 export interface AppSettings {
   max_radio_contacts: number;
-  favorites: Favorite[];
   auto_decrypt_dm_on_advert: boolean;
-  sidebar_sort_order: 'recent' | 'alpha';
   last_message_times: Record<string, number>;
-  preferences_migrated: boolean;
   advert_interval: number;
   last_advert_time: number;
   flood_scope: string;
   blocked_keys: string[];
   blocked_names: string[];
+  discovery_blocked_types: number[];
+  tracked_telemetry_repeaters: string[];
+  tracked_telemetry_contacts: string[];
+  auto_resend_channel: boolean;
+  telemetry_interval_hours: number;
+  telemetry_routed_hourly: boolean;
 }
 
 export interface AppSettingsUpdate {
   max_radio_contacts?: number;
   auto_decrypt_dm_on_advert?: boolean;
-  sidebar_sort_order?: 'recent' | 'alpha';
   advert_interval?: number;
+  auto_resend_channel?: boolean;
   flood_scope?: string;
   blocked_keys?: string[];
   blocked_names?: string[];
+  discovery_blocked_types?: number[];
+  telemetry_interval_hours?: number;
+  telemetry_routed_hourly?: boolean;
 }
 
-export interface MigratePreferencesRequest {
-  favorites: Favorite[];
-  sort_order: string;
-  last_message_times: Record<string, number>;
+export interface TelemetrySchedule {
+  preferred_hours: number;
+  effective_hours: number;
+  options: number[];
+  tracked_count: number;
+  max_tracked: number;
+  next_run_at: number | null;
+  routed_hourly: boolean;
+  next_routed_run_at: number | null;
 }
 
-export interface MigratePreferencesResponse {
-  migrated: boolean;
-  settings: AppSettings;
+export interface TrackedTelemetryResponse {
+  tracked_telemetry_repeaters: string[];
+  names: Record<string, string>;
+  schedule: TelemetrySchedule;
 }
 
 /** Contact type constants */
 export const CONTACT_TYPE_REPEATER = 2;
+export const CONTACT_TYPE_ROOM = 3;
 
 export interface NeighborInfo {
   pubkey_prefix: string;
@@ -326,6 +429,8 @@ export interface CommandResponse {
 
 export interface RepeaterLoginResponse {
   status: string;
+  authenticated: boolean;
+  message: string | null;
 }
 
 export interface RepeaterStatusResponse {
@@ -346,6 +451,8 @@ export interface RepeaterStatusResponse {
   flood_dups: number;
   direct_dups: number;
   full_events: number;
+  recv_errors: number | null;
+  telemetry_history: TelemetryHistoryEntry[];
 }
 
 export interface RepeaterNeighborsResponse {
@@ -392,6 +499,18 @@ export interface RepeaterLppTelemetryResponse {
   sensors: LppSensor[];
 }
 
+export interface ContactTelemetryResponse {
+  sensors: LppSensor[];
+  fetched_at: number;
+  telemetry_history: TelemetryHistoryEntry[];
+}
+
+export interface TrackedTelemetryContactsResponse {
+  tracked_telemetry_contacts: string[];
+  names: Record<string, string>;
+  schedule: TelemetrySchedule;
+}
+
 export type PaneName =
   | 'status'
   | 'nodeInfo'
@@ -409,10 +528,63 @@ export interface PaneState {
   fetched_at?: number | null;
 }
 
+export interface TelemetryLppSensor {
+  channel: number;
+  type_name: string;
+  value: number;
+}
+
+export interface TelemetryHistoryEntry {
+  timestamp: number;
+  data: Record<string, number> & { lpp_sensors?: TelemetryLppSensor[] };
+}
+
+export interface PushSubscriptionInfo {
+  id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  label: string;
+  created_at: number;
+  last_success_at: number | null;
+  failure_count: number;
+}
+
 export interface TraceResponse {
   remote_snr: number | null;
   local_snr: number | null;
   path_len: number;
+}
+
+export interface RadioTraceNode {
+  role: 'repeater' | 'custom' | 'local';
+  public_key: string | null;
+  name: string | null;
+  observed_hash: string | null;
+  snr: number | null;
+}
+
+export interface RadioTraceHopRequest {
+  public_key?: string | null;
+  hop_hex?: string | null;
+}
+
+export interface RadioTraceResponse {
+  path_len: number;
+  timeout_seconds: number;
+  nodes: RadioTraceNode[];
+}
+
+export interface PathDiscoveryRoute {
+  path: string;
+  path_len: number;
+  path_hash_mode: number;
+}
+
+export interface PathDiscoveryResponse {
+  contact: Contact;
+  forward_path: PathDiscoveryRoute;
+  return_path: PathDiscoveryRoute;
 }
 
 export interface UnreadCounts {
@@ -434,6 +606,24 @@ interface ContactActivityCounts {
   last_week: number;
 }
 
+export interface NoiseFloorSample {
+  timestamp: number;
+  noise_floor_dbm: number;
+}
+
+export interface NoiseFloorHistoryStats {
+  sample_interval_seconds: number;
+  coverage_seconds: number;
+  latest_noise_floor_dbm: number | null;
+  latest_timestamp: number | null;
+  samples: NoiseFloorSample[];
+}
+
+interface PacketsPerHourBucket {
+  timestamp: number;
+  count: number;
+}
+
 export interface StatisticsResponse {
   busiest_channels_24h: BusyChannel[];
   contact_count: number;
@@ -447,6 +637,7 @@ export interface StatisticsResponse {
   total_outgoing: number;
   contacts_heard: ContactActivityCounts;
   repeaters_heard: ContactActivityCounts;
+  known_channels_active: ContactActivityCounts;
   path_hash_width_24h: {
     total_packets: number;
     single_byte: number;
@@ -456,4 +647,6 @@ export interface StatisticsResponse {
     double_byte_pct: number;
     triple_byte_pct: number;
   };
+  packets_per_hour_72h: PacketsPerHourBucket[];
+  noise_floor_24h: NoiseFloorHistoryStats;
 }

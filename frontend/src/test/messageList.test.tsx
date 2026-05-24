@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageList } from '../components/MessageList';
-import type { Message } from '../types';
+import { CONTACT_TYPE_ROOM, type Contact, type Message } from '../types';
 
 const scrollIntoViewMock = vi.fn();
 const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
@@ -81,6 +81,47 @@ describe('MessageList channel sender rendering', () => {
     expect(screen.getByText('A')).toBeInTheDocument();
   });
 
+  it('renders room-server DM messages using stored sender attribution instead of the room contact', () => {
+    const roomContact: Contact = {
+      public_key: 'ab'.repeat(32),
+      name: 'Ops Board',
+      type: CONTACT_TYPE_ROOM,
+      flags: 0,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: -1,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            type: 'PRIV',
+            conversation_key: roomContact.public_key,
+            text: 'status update: ready',
+            sender_name: 'Alice',
+            sender_key: '12'.repeat(32),
+          }),
+        ]}
+        contacts={[roomContact]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('Alice')).toBeInTheDocument();
+    expect(screen.queryByText('Ops Board')).not.toBeInTheDocument();
+    expect(screen.getByText('status update: ready')).toBeInTheDocument();
+  });
+
   it('gives clickable sender avatars an accessible label', () => {
     render(
       <MessageList
@@ -98,6 +139,103 @@ describe('MessageList channel sender rendering', () => {
     );
 
     expect(screen.getByRole('button', { name: 'View info for Alice' })).toBeInTheDocument();
+  });
+
+  it('renders valid channel references as clickable links and ignores invalid ones', async () => {
+    const user = userEvent.setup();
+    const onChannelReferenceClick = vi.fn();
+
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            text: 'Alice: Join #mesh-room now skip #bad--room and visit https://example.com/#also-skip',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+        onChannelReferenceClick={onChannelReferenceClick}
+      />
+    );
+
+    const linkedChannel = screen.getByRole('button', { name: '#mesh-room' });
+    expect(linkedChannel).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '#bad--room' })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'https://example.com/#also-skip' })
+    ).toBeInTheDocument();
+
+    await user.click(linkedChannel);
+
+    expect(onChannelReferenceClick).toHaveBeenCalledWith('#mesh-room');
+  });
+
+  it('links valid channel references when followed by clause punctuation', async () => {
+    const user = userEvent.setup();
+    const onChannelReferenceClick = vi.fn();
+
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            text: 'Alice: Check #mesh-room, then #ops-room; then #alpha-room.',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+        onChannelReferenceClick={onChannelReferenceClick}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '#mesh-room' }));
+    await user.click(screen.getByRole('button', { name: '#ops-room' }));
+    await user.click(screen.getByRole('button', { name: '#alpha-room' }));
+
+    expect(onChannelReferenceClick).toHaveBeenNthCalledWith(1, '#mesh-room');
+    expect(onChannelReferenceClick).toHaveBeenNthCalledWith(2, '#ops-room');
+    expect(onChannelReferenceClick).toHaveBeenNthCalledWith(3, '#alpha-room');
+  });
+
+  it('links valid channel references in direct messages too', async () => {
+    const user = userEvent.setup();
+    const onChannelReferenceClick = vi.fn();
+
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            type: 'PRIV',
+            text: 'check #ops-room',
+            conversation_key: 'ab'.repeat(32),
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+        onChannelReferenceClick={onChannelReferenceClick}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '#ops-room' }));
+
+    expect(onChannelReferenceClick).toHaveBeenCalledWith('#ops-room');
+  });
+
+  it('does not strip colon-prefixed text in direct messages (issue #198)', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            type: 'PRIV',
+            conversation_key: 'ab'.repeat(32),
+            text: 'TEST1: TEST2',
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('TEST1: TEST2')).toBeInTheDocument();
   });
 
   it('renders and dismisses an unread marker at the first unread message boundary', async () => {

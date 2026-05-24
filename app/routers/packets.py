@@ -3,13 +3,14 @@ from hashlib import sha256
 from sqlite3 import OperationalError
 
 import aiosqlite
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.database import db
 from app.decoder import parse_packet, try_decrypt_packet_with_channel_key
+from app.models import RawPacketDecryptedInfo, RawPacketDetail
 from app.packet_processor import create_message_from_decrypted, run_historical_dm_decryption
-from app.repository import ChannelRepository, RawPacketRepository
+from app.repository import ChannelRepository, MessageRepository, RawPacketRepository
 from app.websocket import broadcast_success
 
 logger = logging.getLogger(__name__)
@@ -40,12 +41,15 @@ class DecryptResult(BaseModel):
     message: str
 
 
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
 async def _run_historical_channel_decryption(
     channel_key_bytes: bytes, channel_key_hex: str, display_name: str | None = None
 ) -> None:
     """Background task to decrypt historical packets with a channel key."""
-    packets = await RawPacketRepository.get_all_undecrypted()
-    total = len(packets)
+    total = await RawPacketRepository.get_undecrypted_count()
     decrypted_count = 0
 
     if total == 0:
@@ -54,7 +58,11 @@ async def _run_historical_channel_decryption(
 
     logger.info("Starting historical channel decryption of %d packets", total)
 
-    for packet_id, packet_data, packet_timestamp in packets:
+    async for (
+        packet_id,
+        packet_data,
+        packet_timestamp,
+    ) in RawPacketRepository.stream_all_undecrypted():
         result = try_decrypt_packet_with_channel_key(packet_data, channel_key_bytes)
 
         if result is not None:
@@ -98,9 +106,52 @@ async def get_undecrypted_count() -> dict:
     return {"count": count}
 
 
+@router.get("/{packet_id}", response_model=RawPacketDetail)
+async def get_raw_packet(packet_id: int) -> RawPacketDetail:
+    """Fetch one stored raw packet by row ID for on-demand inspection."""
+    packet_row = await RawPacketRepository.get_by_id(packet_id)
+    if packet_row is None:
+        raise HTTPException(status_code=404, detail="Raw packet not found")
+
+    stored_packet_id, packet_data, packet_timestamp, message_id = packet_row
+    packet_info = parse_packet(packet_data)
+    payload_type_name = packet_info.payload_type.name if packet_info else "Unknown"
+
+    decrypted_info: RawPacketDecryptedInfo | None = None
+    if message_id is not None:
+        message = await MessageRepository.get_by_id(message_id)
+        if message is not None:
+            if message.type == "CHAN":
+                channel = await ChannelRepository.get_by_key(message.conversation_key)
+                decrypted_info = RawPacketDecryptedInfo(
+                    channel_name=channel.name if channel else None,
+                    sender=message.sender_name,
+                    channel_key=message.conversation_key,
+                    contact_key=message.sender_key,
+                    sender_timestamp=message.sender_timestamp,
+                    message=message.text,
+                )
+            else:
+                decrypted_info = RawPacketDecryptedInfo(
+                    sender=message.sender_name,
+                    contact_key=message.conversation_key,
+                    sender_timestamp=message.sender_timestamp,
+                    message=message.text,
+                )
+
+    return RawPacketDetail(
+        id=stored_packet_id,
+        timestamp=packet_timestamp,
+        data=packet_data.hex(),
+        payload_type=payload_type_name,
+        decrypted=message_id is not None,
+        decrypted_info=decrypted_info,
+    )
+
+
 @router.post("/decrypt/historical", response_model=DecryptResult)
 async def decrypt_historical_packets(
-    request: DecryptRequest, background_tasks: BackgroundTasks
+    request: DecryptRequest, background_tasks: BackgroundTasks, response: Response
 ) -> DecryptResult:
     """
     Attempt to decrypt historical packets with the provided key.
@@ -112,27 +163,15 @@ async def decrypt_historical_packets(
             try:
                 channel_key_bytes = bytes.fromhex(request.channel_key)
                 if len(channel_key_bytes) != 16:
-                    return DecryptResult(
-                        started=False,
-                        total_packets=0,
-                        message="Channel key must be 16 bytes (32 hex chars)",
-                    )
+                    raise _bad_request("Channel key must be 16 bytes (32 hex chars)")
                 channel_key_hex = request.channel_key.upper()
             except ValueError:
-                return DecryptResult(
-                    started=False,
-                    total_packets=0,
-                    message="Invalid hex string for channel key",
-                )
+                raise _bad_request("Invalid hex string for channel key") from None
         elif request.channel_name:
             channel_key_bytes = sha256(request.channel_name.encode("utf-8")).digest()[:16]
             channel_key_hex = channel_key_bytes.hex().upper()
         else:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="Must provide channel_key or channel_name",
-            )
+            raise _bad_request("Must provide channel_key or channel_name")
 
         # Get count and lookup channel name for display
         count = await RawPacketRepository.get_undecrypted_count()
@@ -148,6 +187,7 @@ async def decrypt_historical_packets(
         background_tasks.add_task(
             _run_historical_channel_decryption, channel_key_bytes, channel_key_hex, display_name
         )
+        response.status_code = status.HTTP_202_ACCEPTED
 
         return DecryptResult(
             started=True,
@@ -158,51 +198,26 @@ async def decrypt_historical_packets(
     elif request.key_type == "contact":
         # DM decryption
         if not request.private_key:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="Must provide private_key for contact decryption",
-            )
+            raise _bad_request("Must provide private_key for contact decryption")
         if not request.contact_public_key:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="Must provide contact_public_key for contact decryption",
-            )
+            raise _bad_request("Must provide contact_public_key for contact decryption")
 
         try:
             private_key_bytes = bytes.fromhex(request.private_key)
             if len(private_key_bytes) != 64:
-                return DecryptResult(
-                    started=False,
-                    total_packets=0,
-                    message="Private key must be 64 bytes (128 hex chars)",
-                )
+                raise _bad_request("Private key must be 64 bytes (128 hex chars)")
         except ValueError:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="Invalid hex string for private key",
-            )
+            raise _bad_request("Invalid hex string for private key") from None
 
         try:
             contact_public_key_bytes = bytes.fromhex(request.contact_public_key)
             if len(contact_public_key_bytes) != 32:
-                return DecryptResult(
-                    started=False,
-                    total_packets=0,
-                    message="Contact public key must be 32 bytes (64 hex chars)",
-                )
+                raise _bad_request("Contact public key must be 32 bytes (64 hex chars)")
             contact_public_key_hex = request.contact_public_key.lower()
         except ValueError:
-            return DecryptResult(
-                started=False,
-                total_packets=0,
-                message="Invalid hex string for contact public key",
-            )
+            raise _bad_request("Invalid hex string for contact public key") from None
 
-        packets = await RawPacketRepository.get_undecrypted_text_messages()
-        count = len(packets)
+        count = await RawPacketRepository.count_undecrypted_text_messages()
         if count == 0:
             return DecryptResult(
                 started=False,
@@ -223,6 +238,7 @@ async def decrypt_historical_packets(
             contact_public_key_hex,
             display_name,
         )
+        response.status_code = status.HTTP_202_ACCEPTED
 
         return DecryptResult(
             started=True,
@@ -230,11 +246,7 @@ async def decrypt_historical_packets(
             message=f"Started DM decryption of {count} TEXT_MESSAGE packets in background",
         )
 
-    return DecryptResult(
-        started=False,
-        total_packets=0,
-        message="key_type must be 'channel' or 'contact'",
-    )
+    raise _bad_request("key_type must be 'channel' or 'contact'")
 
 
 class MaintenanceRequest(BaseModel):

@@ -101,6 +101,9 @@ class StubModule(FanoutModule):
         super().__init__("stub", {})
         self.message_calls: list[dict] = []
         self.raw_calls: list[dict] = []
+        self.contact_calls: list[dict] = []
+        self.telemetry_calls: list[dict] = []
+        self.health_calls: list[dict] = []
         self._status = "connected"
 
     async def start(self) -> None:
@@ -114,6 +117,15 @@ class StubModule(FanoutModule):
 
     async def on_raw(self, data: dict) -> None:
         self.raw_calls.append(data)
+
+    async def on_contact(self, data: dict) -> None:
+        self.contact_calls.append(data)
+
+    async def on_telemetry(self, data: dict) -> None:
+        self.telemetry_calls.append(data)
+
+    async def on_health(self, data: dict) -> None:
+        self.health_calls.append(data)
 
     @property
     def status(self) -> str:
@@ -270,6 +282,142 @@ class TestFanoutManagerDispatch:
         assert statuses["test-id"]["status"] == "connected"
         assert statuses["test-id"]["name"] == "Test"
         assert statuses["test-id"]["type"] == "mqtt_private"
+
+    def test_get_statuses_includes_last_error(self):
+        manager = FanoutManager()
+        mod = StubModule()
+        mod._status = "error"
+        mod._last_error = "HTTP 500"
+        manager._modules["test-id"] = (mod, {})
+
+        with patch(
+            "app.repository.fanout._configs_cache",
+            {"test-id": {"name": "Test", "type": "webhook", "enabled": True}},
+        ):
+            statuses = manager.get_statuses()
+
+        assert statuses["test-id"]["status"] == "error"
+        assert statuses["test-id"]["last_error"] == "HTTP 500"
+
+    def test_get_statuses_includes_start_failure_error(self):
+        manager = FanoutManager()
+        manager._module_errors["test-id"] = "ConnectionError: broker down"
+
+        with patch(
+            "app.repository.fanout._configs_cache",
+            {"test-id": {"name": "Test", "type": "mqtt_private", "enabled": True}},
+        ):
+            statuses = manager.get_statuses()
+
+        assert statuses["test-id"]["status"] == "error"
+        assert statuses["test-id"]["last_error"] == "ConnectionError: broker down"
+
+
+# ---------------------------------------------------------------------------
+# New event dispatch (contact, telemetry, health)
+# ---------------------------------------------------------------------------
+
+
+class TestFanoutManagerNewEventDispatch:
+    @pytest.mark.asyncio
+    async def test_broadcast_contact_dispatches_to_all_modules(self):
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {})
+
+        await manager.broadcast_contact({"public_key": "aabb", "name": "Alice"})
+
+        assert len(mod.contact_calls) == 1
+        assert mod.contact_calls[0]["public_key"] == "aabb"
+
+    @pytest.mark.asyncio
+    async def test_broadcast_contact_ignores_scope(self):
+        """Contact dispatch is unconditional — scope doesn't affect it."""
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {"messages": "none", "raw_packets": "none"})
+
+        await manager.broadcast_contact({"public_key": "aabb"})
+
+        assert len(mod.contact_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_broadcast_telemetry_dispatches_to_all_modules(self):
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {})
+
+        await manager.broadcast_telemetry(
+            {"public_key": "ccdd", "battery_volts": 4.1, "timestamp": 1000}
+        )
+
+        assert len(mod.telemetry_calls) == 1
+        assert mod.telemetry_calls[0]["battery_volts"] == 4.1
+
+    @pytest.mark.asyncio
+    async def test_broadcast_health_fanout_dispatches_to_all_modules(self):
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {})
+
+        await manager.broadcast_health_fanout({"connected": True, "noise_floor_dbm": -112})
+
+        assert len(mod.health_calls) == 1
+        assert mod.health_calls[0]["connected"] is True
+
+    @pytest.mark.asyncio
+    async def test_new_events_do_not_affect_message_or_raw(self):
+        """Verify new dispatch paths are independent of message/raw."""
+        manager = FanoutManager()
+        mod = StubModule()
+        manager._modules["test-id"] = (mod, {"messages": "all", "raw_packets": "all"})
+
+        await manager.broadcast_contact({"public_key": "aabb"})
+        await manager.broadcast_telemetry({"public_key": "ccdd", "battery_volts": 3.8})
+        await manager.broadcast_health_fanout({"connected": False})
+
+        assert len(mod.message_calls) == 0
+        assert len(mod.raw_calls) == 0
+        assert len(mod.contact_calls) == 1
+        assert len(mod.telemetry_calls) == 1
+        assert len(mod.health_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_base_module_no_ops_do_not_raise(self):
+        """Default FanoutModule no-ops accept data without error."""
+        manager = FanoutManager()
+
+        class MinimalModule(FanoutModule):
+            @property
+            def status(self) -> str:
+                return "connected"
+
+        mod = MinimalModule("test", {})
+        manager._modules["test-id"] = (mod, {})
+
+        # Should not raise — base class no-ops silently accept
+        await manager.broadcast_contact({"public_key": "aabb"})
+        await manager.broadcast_telemetry({"public_key": "ccdd"})
+        await manager.broadcast_health_fanout({"connected": True})
+
+    @pytest.mark.asyncio
+    async def test_error_in_one_module_does_not_block_others(self):
+        manager = FanoutManager()
+
+        bad_mod = StubModule()
+
+        async def fail(data):
+            raise RuntimeError("boom")
+
+        bad_mod.on_contact = fail
+
+        good_mod = StubModule()
+        manager._modules["bad"] = (bad_mod, {})
+        manager._modules["good"] = (good_mod, {})
+
+        await manager.broadcast_contact({"public_key": "aabb"})
+
+        assert len(good_mod.contact_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +594,47 @@ class TestBroadcastEventRealtime:
 
             mock_ws.broadcast.assert_called_once()
             mock_fm.broadcast_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_contact_event_dispatches_to_fanout(self):
+        """broadcast_event for 'contact' should trigger fanout contact dispatch."""
+        from app.websocket import broadcast_event
+
+        with (
+            patch("app.websocket.ws_manager") as mock_ws,
+            patch("app.fanout.manager.fanout_manager") as mock_fm,
+        ):
+            mock_ws.broadcast = AsyncMock()
+            mock_fm.broadcast_contact = AsyncMock()
+
+            broadcast_event("contact", {"public_key": "aabb"}, realtime=True)
+
+            import asyncio
+
+            await asyncio.sleep(0)
+
+            mock_ws.broadcast.assert_called_once()
+            mock_fm.broadcast_contact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_contact_event_skipped_when_not_realtime(self):
+        """broadcast_event('contact', ..., realtime=False) should skip fanout."""
+        from app.websocket import broadcast_event
+
+        with (
+            patch("app.websocket.ws_manager") as mock_ws,
+            patch("app.fanout.manager.fanout_manager") as mock_fm,
+        ):
+            mock_ws.broadcast = AsyncMock()
+
+            broadcast_event("contact", {"public_key": "aabb"}, realtime=False)
+
+            import asyncio
+
+            await asyncio.sleep(0)
+
+            mock_ws.broadcast.assert_called_once()
+            mock_fm.broadcast_contact.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +896,98 @@ class TestSqsValidation:
             {"queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/mesh-events"}
         )
 
+
+class TestMapUploadValidation:
+    def test_rejects_bad_api_url_scheme(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_map_upload_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_map_upload_config({"api_url": "ftp://example.com"})
+        assert exc_info.value.status_code == 400
+        assert "api_url" in exc_info.value.detail
+
+    def test_accepts_empty_api_url(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"api_url": ""}
+        _validate_map_upload_config(config)
+        assert config["api_url"] == ""
+
+    def test_accepts_valid_api_url(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"api_url": "https://custom.example.com/upload"}
+        _validate_map_upload_config(config)
+        assert config["api_url"] == "https://custom.example.com/upload"
+
+    def test_normalizes_dry_run_to_bool(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"dry_run": 1}
+        _validate_map_upload_config(config)
+        assert config["dry_run"] is True
+
+    def test_normalizes_geofence_enabled_to_bool(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"geofence_enabled": 1}
+        _validate_map_upload_config(config)
+        assert config["geofence_enabled"] is True
+
+    def test_normalizes_geofence_radius_to_float(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"geofence_radius_km": 100}
+        _validate_map_upload_config(config)
+        assert config["geofence_radius_km"] == 100.0
+        assert isinstance(config["geofence_radius_km"], float)
+
+    def test_rejects_negative_geofence_radius(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_map_upload_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_map_upload_config({"geofence_radius_km": -1})
+        assert exc_info.value.status_code == 400
+        assert "geofence_radius_km" in exc_info.value.detail
+
+    def test_rejects_non_numeric_geofence_radius(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_map_upload_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_map_upload_config({"geofence_radius_km": "bad"})
+        assert exc_info.value.status_code == 400
+        assert "geofence_radius_km" in exc_info.value.detail
+
+    def test_accepts_zero_geofence_radius(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {"geofence_radius_km": 0}
+        _validate_map_upload_config(config)
+        assert config["geofence_radius_km"] == 0.0
+
+    def test_defaults_applied_when_keys_absent(self):
+        from app.routers.fanout import _validate_map_upload_config
+
+        config = {}
+        _validate_map_upload_config(config)
+        assert config["api_url"] == ""
+        assert config["dry_run"] is True
+        assert config["geofence_enabled"] is False
+        assert config["geofence_radius_km"] == 0.0
+
+    def test_enforce_scope_map_upload_forces_raw_only(self):
+        """map_upload scope is always fixed regardless of what the caller passes."""
+        from app.routers.fanout import _enforce_scope
+
+        scope = _enforce_scope("map_upload", {"messages": "all", "raw_packets": "none"})
+        assert scope == {"messages": "none", "raw_packets": "all"}
+
     def test_enforce_scope_sqs_preserves_raw_packets_setting(self):
         from app.routers.fanout import _enforce_scope
 
@@ -768,7 +1049,8 @@ class TestAppriseFormatBody:
         from app.fanout.apprise_mod import _format_body
 
         body = _format_body(
-            {"type": "PRIV", "text": "hi", "sender_name": "Alice"}, include_path=False
+            {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
+            body_format_dm="**DM:** {sender_name}: {text}",
         )
         assert body == "**DM:** Alice: hi"
 
@@ -777,7 +1059,21 @@ class TestAppriseFormatBody:
 
         body = _format_body(
             {"type": "CHAN", "text": "hi", "sender_name": "Bob", "channel_name": "#general"},
-            include_path=False,
+            body_format_channel="**{channel_name}:** {sender_name}: {text}",
+        )
+        assert body == "**#general:** Bob: hi"
+
+    def test_channel_format_strips_stored_sender_prefix(self):
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {
+                "type": "CHAN",
+                "text": "Bob: hi",
+                "sender_name": "Bob",
+                "channel_name": "#general",
+            },
+            body_format_channel="**{channel_name}:** {sender_name}: {text}",
         )
         assert body == "**#general:** Bob: hi"
 
@@ -791,7 +1087,7 @@ class TestAppriseFormatBody:
                 "sender_name": "Alice",
                 "paths": [{"path": "2027"}],
             },
-            include_path=True,
+            body_format_dm="**DM:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "**via:**" in body
         assert "`20`" in body
@@ -802,7 +1098,7 @@ class TestAppriseFormatBody:
 
         body = _format_body(
             {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
-            include_path=True,
+            body_format_dm="**DM:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "`direct`" in body
 
@@ -817,7 +1113,7 @@ class TestAppriseFormatBody:
                 "sender_name": "Alice",
                 "paths": [{"path": "aabbccdd", "path_len": 2}],
             },
-            include_path=True,
+            body_format_dm="**DM:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "**via:**" in body
         assert "`aabb`" in body
@@ -834,7 +1130,7 @@ class TestAppriseFormatBody:
                 "sender_name": "Alice",
                 "paths": [{"path": "aabbccddeeff", "path_len": 2}],
             },
-            include_path=True,
+            body_format_dm="**DM:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "**via:**" in body
         assert "`aabbcc`" in body
@@ -852,7 +1148,7 @@ class TestAppriseFormatBody:
                 "channel_name": "#general",
                 "paths": [{"path": "aabbccdd", "path_len": 2}],
             },
-            include_path=True,
+            body_format_channel="**{channel_name}:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "**#general:**" in body
         assert "`aabb`" in body
@@ -869,11 +1165,117 @@ class TestAppriseFormatBody:
                 "sender_name": "Alice",
                 "paths": [{"path": "aabb"}],
             },
-            include_path=True,
+            body_format_dm="**DM:** {sender_name}: {text} **via:** [{hops_backticked}]",
         )
         assert "**via:**" in body
         assert "`aa`" in body
         assert "`bb`" in body
+
+    def test_default_format_strings(self):
+        """Default format strings produce expected output."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {
+                "type": "PRIV",
+                "text": "hi",
+                "sender_name": "Alice",
+                "paths": [{"path": "2a3b"}],
+            },
+        )
+        assert body == "**DM:** Alice: hi **via:** [`2a`, `3b`]"
+
+    def test_custom_format_with_rssi(self):
+        """Custom format string can include rssi/snr."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {
+                "type": "PRIV",
+                "text": "hi",
+                "sender_name": "Alice",
+                "paths": [{"path": "2a", "rssi": -95, "snr": 6.5}],
+            },
+            body_format_dm="From {sender_name}: {text} (rssi: {rssi}, snr: {snr})",
+        )
+        assert body == "From Alice: hi (rssi: -95, snr: 6.5)"
+
+    def test_unknown_placeholder_left_as_is(self):
+        """Unknown {placeholders} pass through unchanged."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
+            body_format_dm="{sender_name}: {text} {unknown_var}",
+        )
+        assert body == "Alice: hi {unknown_var}"
+
+    def test_none_fields_render_empty(self):
+        """None optional fields render as empty string, not 'None'."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
+            body_format_dm="{sender_name}: {text} rssi={rssi}",
+        )
+        assert body == "Alice: hi rssi="
+        assert "None" not in body
+
+    def test_hops_direct_when_no_paths(self):
+        """hops is 'direct' when no path data exists."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "CHAN", "text": "hi", "sender_name": "Bob", "channel_name": "#gen"},
+            body_format_channel="{channel_name} {hops}",
+        )
+        assert body == "#gen direct"
+
+    def test_hops_direct_when_empty_path(self):
+        """hops is 'direct' when path string is empty."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {
+                "type": "PRIV",
+                "text": "hi",
+                "sender_name": "Alice",
+                "paths": [{"path": ""}],
+            },
+            body_format_dm="{hops}",
+        )
+        assert body == "direct"
+
+    def test_no_re_expansion_of_substituted_values(self):
+        """Placeholders in message text must not be expanded by later passes."""
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "PRIV", "text": "hello {sender_name}", "sender_name": "Alice"},
+            body_format_dm="{sender_name}: {text}",
+        )
+        assert body == "Alice: hello {sender_name}"
+
+    @pytest.mark.asyncio
+    async def test_empty_format_string_uses_default(self):
+        """Empty format strings in config should produce default output, not blank."""
+        from unittest.mock import patch as _patch
+
+        from app.fanout.apprise_mod import AppriseModule
+
+        mod = AppriseModule(
+            "test",
+            {"urls": "json://localhost", "body_format_dm": "", "body_format_channel": "  "},
+        )
+        with _patch("app.fanout.apprise_mod._send_sync", return_value=True) as mock_send:
+            await mod.on_message(
+                {"type": "PRIV", "text": "hi", "outgoing": False, "sender_name": "Alice"}
+            )
+            mock_send.assert_called_once()
+            body = mock_send.call_args[0][1]
+            assert "Alice" in body
+            assert "hi" in body
+            assert body != ""
 
 
 class TestAppriseNormalizeDiscordUrl:
@@ -887,6 +1289,34 @@ class TestAppriseNormalizeDiscordUrl:
 
         result = _normalize_discord_url("https://discord.com/api/webhooks/123/abc")
         assert "avatar=no" in result
+
+
+class TestFanoutMessageText:
+    def test_channel_text_strips_matching_sender_prefix(self):
+        from app.fanout.base import get_fanout_message_text
+
+        text = get_fanout_message_text(
+            {
+                "type": "CHAN",
+                "text": "Alice: hello world",
+                "sender_name": "Alice",
+            }
+        )
+
+        assert text == "hello world"
+
+    def test_channel_text_keeps_nonmatching_prefix(self):
+        from app.fanout.base import get_fanout_message_text
+
+        text = get_fanout_message_text(
+            {
+                "type": "CHAN",
+                "text": "Alice: hello world",
+                "sender_name": "Bob",
+            }
+        )
+
+        assert text == "Alice: hello world"
 
     def test_non_discord_unchanged(self):
         from app.fanout.apprise_mod import _normalize_discord_url
@@ -910,12 +1340,160 @@ class TestAppriseValidation:
 
         _validate_apprise_config({"urls": "discord://123/abc"})
 
+    def test_validate_apprise_config_accepts_format_strings(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        _validate_apprise_config(
+            {
+                "urls": "discord://123/abc",
+                "body_format_dm": "DM from {sender_name}: {text}",
+                "body_format_channel": "{channel_name}: {text}",
+            }
+        )
+
+    def test_validate_apprise_config_rejects_non_string_format(self):
+        from fastapi import HTTPException
+
+        from app.routers.fanout import _validate_apprise_config
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_apprise_config({"urls": "discord://123/abc", "body_format_dm": 123})
+        assert exc_info.value.status_code == 400
+
     def test_enforce_scope_apprise_strips_raw_packets(self):
         from app.routers.fanout import _enforce_scope
 
         scope = _enforce_scope("apprise", {"messages": "all", "raw_packets": "all"})
         assert scope["raw_packets"] == "none"
         assert scope["messages"] == "all"
+
+    def test_validate_apprise_config_accepts_markdown_format_bool(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        _validate_apprise_config({"urls": "discord://123/abc", "markdown_format": False})
+
+    def test_validate_apprise_config_normalizes_markdown_format(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        config: dict = {"urls": "discord://123/abc", "markdown_format": 0}
+        _validate_apprise_config(config)
+        assert config["markdown_format"] is False
+
+    def test_validate_apprise_config_works_without_markdown_format(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        _validate_apprise_config({"urls": "discord://123/abc"})
+
+
+class TestAppriseMarkdownFormat:
+    def test_format_body_markdown_true_uses_markdown_fallback(self):
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
+            markdown=True,
+        )
+        assert "**DM:**" in body
+
+    def test_format_body_markdown_false_uses_plain_fallback(self):
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "PRIV", "text": "hi", "sender_name": "Alice"},
+            markdown=False,
+        )
+        assert "**" not in body
+        assert "DM:" in body
+        assert "Alice" in body
+
+    def test_format_body_markdown_false_channel(self):
+        from app.fanout.apprise_mod import _format_body
+
+        body = _format_body(
+            {"type": "CHAN", "text": "hi", "sender_name": "Bob", "channel_name": "#gen"},
+            markdown=False,
+        )
+        assert "**" not in body
+        assert "#gen:" in body
+
+    def test_send_sync_passes_markdown_body_format(self):
+        from unittest.mock import MagicMock, patch
+
+        with patch("app.fanout.apprise_mod.apprise_lib", create=True) as mock_lib:
+            mock_notifier = MagicMock()
+            mock_notifier.notify.return_value = True
+            mock_lib.Apprise.return_value = mock_notifier
+
+            with patch.dict("sys.modules", {"apprise": mock_lib}):
+                from app.fanout.apprise_mod import _send_sync
+
+                _send_sync("json://localhost", "test", preserve_identity=False, markdown=True)
+                call_kwargs = mock_notifier.notify.call_args
+                assert call_kwargs.kwargs.get("body_format") or call_kwargs[1].get("body_format")
+
+    def test_send_sync_passes_text_body_format_when_markdown_false(self):
+        from unittest.mock import MagicMock, patch
+
+        with patch("app.fanout.apprise_mod.apprise_lib", create=True) as mock_lib:
+            mock_notifier = MagicMock()
+            mock_notifier.notify.return_value = True
+            mock_lib.Apprise.return_value = mock_notifier
+
+            with patch.dict("sys.modules", {"apprise": mock_lib}):
+                from app.fanout.apprise_mod import _send_sync
+
+                _send_sync("json://localhost", "test", preserve_identity=False, markdown=False)
+                call_kwargs = mock_notifier.notify.call_args
+                assert call_kwargs.kwargs.get("body_format") or call_kwargs[1].get("body_format")
+
+    @pytest.mark.asyncio
+    async def test_on_message_reads_markdown_format_config(self):
+        from unittest.mock import patch as _patch
+
+        from app.fanout.apprise_mod import AppriseModule
+
+        mod = AppriseModule("test", {"urls": "json://localhost", "markdown_format": False})
+        with _patch("app.fanout.apprise_mod._send_sync", return_value=True) as mock_send:
+            await mod.on_message(
+                {"type": "PRIV", "text": "hello", "outgoing": False, "sender_name": "S_Borkin"}
+            )
+            mock_send.assert_called_once()
+            assert mock_send.call_args.kwargs.get("markdown") is False
+
+    @pytest.mark.asyncio
+    async def test_on_message_defaults_markdown_true(self):
+        from unittest.mock import patch as _patch
+
+        from app.fanout.apprise_mod import AppriseModule
+
+        mod = AppriseModule("test", {"urls": "json://localhost"})
+        with _patch("app.fanout.apprise_mod._send_sync", return_value=True) as mock_send:
+            await mod.on_message(
+                {"type": "PRIV", "text": "hello", "outgoing": False, "sender_name": "Alice"}
+            )
+            mock_send.assert_called_once()
+            assert mock_send.call_args.kwargs.get("markdown") is True
+
+    @pytest.mark.asyncio
+    async def test_on_message_markdown_false_uses_plain_default_format(self):
+        from unittest.mock import patch as _patch
+
+        from app.fanout.apprise_mod import AppriseModule
+
+        mod = AppriseModule("test", {"urls": "json://localhost", "markdown_format": False})
+        with _patch("app.fanout.apprise_mod._send_sync", return_value=True) as mock_send:
+            await mod.on_message(
+                {
+                    "type": "CHAN",
+                    "text": "hi",
+                    "outgoing": False,
+                    "sender_name": "Bob",
+                    "channel_name": "#general",
+                }
+            )
+            body = mock_send.call_args[0][1]
+            assert "**" not in body
+            assert "#general:" in body
 
 
 # ---------------------------------------------------------------------------

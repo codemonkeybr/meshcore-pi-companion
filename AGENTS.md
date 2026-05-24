@@ -7,10 +7,10 @@
 If instructed to "run all tests" or "get ready for a commit" or other summative, work ending directives, run:
 
 ```bash
-./scripts/all_quality.sh
+./scripts/quality/all_quality.sh
 ```
 
-This runs all linting, formatting, type checking, tests, and builds for both backend and frontend sequentially. All checks must pass green.
+This is the repo's end-to-end quality gate. It runs backend/frontend autofixers first, then type checking, tests, and the standard frontend build. All checks must pass green, and the script may leave formatting/lint edits behind.
 
 ## Overview
 
@@ -144,8 +144,12 @@ MeshCore firmware can encode path hops as 1-byte, 2-byte, or 3-byte identifiers.
 - `path_hash_mode` values are `0` = 1-byte, `1` = 2-byte, `2` = 3-byte.
 - `GET /api/radio/config` exposes both the current `path_hash_mode` and `path_hash_mode_supported`.
 - `PATCH /api/radio/config` may update `path_hash_mode` only when the connected firmware supports it.
-- Contacts persist `out_path_hash_mode` separately from `last_path` so contact sync and DM send paths can round-trip correctly even when hop bytes are ambiguous.
-- Contacts may also persist an explicit routing override (`route_override_*`). When set, radio-bound operations use the override instead of the learned `last_path*`, but learned paths still keep updating from adverts.
+- Contact routing now uses canonical route fields: `direct_path`, `direct_path_len`, `direct_path_hash_mode`, plus optional `route_override_*`.
+- The contact/API surface also exposes backend-computed `effective_route`, `effective_route_source`, `direct_route`, and `route_override` so send logic and UI do not reimplement precedence rules independently.
+- Legacy `last_path`, `last_path_len`, and `out_path_hash_mode` are no longer part of the contact model or API contract.
+- Route precedence for direct-message sends is: explicit override, then learned direct route, then flood.
+- The learned direct route is sourced from radio contact sync (`out_path`) and PATH/path-discovery updates, matching how firmware updates `ContactInfo.out_path`.
+- Advertisement paths are informational only. They are retained in `contact_advert_paths` for the contact pane and visualizer, but they are not used as DM send routes.
 - `path_len` in API payloads is always hop count, not byte count. The actual path byte length is `hop_count * hash_size`.
 
 ## Data Flow
@@ -165,11 +169,25 @@ MeshCore firmware can encode path hops as 1-byte, 2-byte, or 3-byte identifiers.
 4. Message stored in database with `outgoing=true`
 5. For direct messages: ACK tracked; for channel: repeat detection
 
+Direct-message send behavior intentionally mirrors the firmware/library `send_msg_with_retry(...)` flow:
+- We push the contact's effective route to the radio via `add_contact(...)` before sending.
+- If the initial `MSG_SENT` result includes an expected ACK code, background retries are armed.
+- Non-final retry attempts use the effective route (`override > direct > flood`).
+- Retry timing follows the radio's `suggested_timeout`.
+- The final retry is sent as flood by resetting the path on the radio first, even if an override or direct route exists.
+- Path math is always hop-count based; hop bytes are interpreted using the stored `path_hash_mode`.
+
 ### ACK and Repeat Detection
 
 **Direct messages**: Expected ACK code is tracked. When ACK event arrives, message marked as acked.
 
-**Channel messages**: Flood messages echo back through repeaters. Repeats are identified by the database UNIQUE constraint on `(type, conversation_key, text, sender_timestamp)` — when an INSERT hits a duplicate, `_handle_duplicate_message()` in `packet_processor.py` adds the new path and, for outgoing messages only, increments the ack count. Incoming repeats add path data but do not change the ack count. There is no timestamp-windowed matching; deduplication is exact-match only.
+Outgoing DMs send once immediately, then may retry up to 2 more times in the background only when the initial `MSG_SENT` result includes an expected ACK code and the message remains unacked. Retry timing follows the radio's `suggested_timeout` from `PACKET_MSG_SENT`, and the final retry is sent as flood even when a routing override is configured. DM ACK state is terminal on first ACK: sibling retry ACK codes are cleared so one DM should not accumulate multiple delivery confirmations from different retry attempts.
+
+ACKs are not a contact-route source. They drive message delivery state and may appear in analytics/detail surfaces, but they do not update `direct_path*` or otherwise influence route selection for future sends.
+
+**Channel messages**: Flood messages echo back through repeaters. Repeats are identified by the database UNIQUE constraint `idx_messages_dedup_null_safe` on `(type, conversation_key, text, COALESCE(sender_timestamp, 0))` where `type = 'CHAN'` — when an INSERT hits a duplicate, `_handle_duplicate_message()` in `packet_processor.py` adds the new path and, for outgoing messages only, increments the ack count. Incoming repeats add path data but do not change the ack count. There is no timestamp-windowed matching; deduplication is exact-match only.
+
+**Incoming direct messages**: A separate unique index `idx_messages_incoming_priv_dedup` on `(type, conversation_key, text, COALESCE(sender_timestamp, 0), COALESCE(sender_key, ''))` where `type = 'PRIV' AND outgoing = 0` deduplicates incoming DMs. The additional `sender_key` term (added in migration 056) distinguishes room-server posts from different senders that arrive in the same second with identical text.
 
 This message-layer echo/path handling is independent of raw-packet storage deduplication.
 
@@ -187,6 +205,7 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   ├── event_handlers.py   # Radio events
 │   ├── decoder.py          # Packet decryption
 │   ├── websocket.py        # Real-time broadcasts
+│   ├── push/               # Web Push notification subsystem (VAPID keys, dispatch, send)
 │   └── fanout/             # Fanout bus: MQTT, bots, webhooks, Apprise, SQS (see fanout/AGENTS_fanout.md)
 ├── frontend/               # React frontend
 │   ├── AGENTS.md           # Frontend documentation
@@ -199,12 +218,21 @@ This message-layer echo/path handling is independent of raw-packet storage dedup
 │   │       ├── MapView.tsx       # Leaflet map showing node locations
 │   │       └── ...
 │   └── vite.config.ts
-├── scripts/
-│   ├── all_quality.sh      # Run all lint, format, typecheck, tests, build (sequential)
-│   ├── collect_licenses.sh # Gather third-party license attributions
-│   ├── e2e.sh              # End-to-end test runner
-│   └── publish.sh          # Version bump, changelog, docker build & push
-├── remoteterm.service      # Systemd unit file for production deployment
+├── pkg/aur/                # AUR package files (PKGBUILD, systemd service, env, install hooks)
+├── scripts/                # Quality / release helpers (listing below is representative, not exhaustive)
+│   ├── build/
+│   │   ├── collect_licenses.sh # Gather third-party license attributions
+│   │   └── publish.sh          # Version bump, changelog, docker build & push
+│   ├── quality/
+│   │   ├── all_quality.sh      # Repo-standard autofix + validate gate
+│   │   ├── e2e.sh              # End-to-end test runner
+│   │   ├── extended_quality.sh # Quality gate plus e2e and Docker matrix
+│   │   └── test_aur_package.sh # Build + install AUR package in Arch Docker containers
+│   └── setup/
+│       ├── fetch_prebuilt_frontend.py # Download release frontend fallback
+│       └── install_service.sh         # Install/configure Linux systemd service
+├── README_ADVANCED.md      # Advanced setup, troubleshooting, and service guidance
+├── CONTRIBUTING.md         # Contributor workflow and testing guidance
 ├── tests/                  # Backend tests (pytest)
 ├── data/                   # SQLite database (runtime)
 └── pyproject.toml          # Python dependencies
@@ -249,7 +277,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Access at `http://localhost:8000`. All API routes are prefixed with `/api`.
 
-If `frontend/dist` (or `frontend/dist/index.html`) is missing, backend startup now logs an explicit error and continues serving API routes. In that case, frontend static routes are not mounted until a frontend build is present.
+If `frontend/dist` is missing, the backend falls back to `frontend/prebuilt` when present (for example from the release zip artifact). If neither build directory is available, startup logs an explicit error and continues serving API routes without frontend static routes mounted.
 
 ## Testing
 
@@ -260,11 +288,12 @@ PYTHONPATH=. uv run pytest tests/ -v
 ```
 
 Key test files:
+- `tests/test_api.py` - Broad API integration coverage across routers and read-state flows
+- `tests/test_packet_pipeline.py` - End-to-end packet processing, decrypt, dedup, and message creation
+- `tests/test_event_handlers.py` - ACK tracking, fallback DM handling, and event subscription cleanup
+- `tests/test_send_messages.py` - Outgoing DM/channel send workflows, retries, and bot-trigger wiring
 - `tests/test_decoder.py` - Channel + direct message decryption, key exchange
 - `tests/test_keystore.py` - Ephemeral key store
-- `tests/test_event_handlers.py` - ACK tracking, repeat detection
-- `tests/test_packet_pipeline.py` - End-to-end packet processing
-- `tests/test_api.py` - API endpoints, read state tracking
 - `tests/test_migrations.py` - Database migration system
 - `tests/test_frontend_static.py` - Frontend static route registration (missing `dist`/`index.html` handling)
 - `tests/test_messages_search.py` - Message search, around endpoint, forward pagination
@@ -277,6 +306,25 @@ Key test files:
 - `tests/test_radio_sync.py` - Radio sync, periodic tasks, and contact offload back to the radio
 - `tests/test_real_crypto.py` - Real cryptographic operations
 - `tests/test_disable_bots.py` - MESHCORE_DISABLE_BOTS=true feature
+=======
+- `tests/test_api.py` - Broad API integration coverage across routers and read-state flows
+- `tests/test_packet_pipeline.py` - End-to-end packet processing, decrypt, dedup, and message creation
+- `tests/test_event_handlers.py` - ACK tracking, fallback DM handling, and event subscription cleanup
+- `tests/test_send_messages.py` - Outgoing DM/channel send workflows, retries, and bot-trigger wiring
+- `tests/test_packets_router.py` - Historical decrypt, maintenance, and raw-packet detail endpoints
+- `tests/test_repeater_routes.py` - Repeater command/telemetry/trace pane endpoints
+- `tests/test_room_routes.py` - Room-server login/status/ACL/telemetry endpoints
+- `tests/test_radio_router.py` - Radio config, advert, discovery, trace, and reconnect endpoints
+- `tests/test_radio_sync.py` - Radio sync, periodic tasks, contact offload/reload, and pending-message flushes
+- `tests/test_fanout.py` - Fanout config CRUD, scope matching, and manager dispatch
+- `tests/test_fanout_integration.py` - Integration-module lifecycle and delivery behavior
+- `tests/test_statistics.py` - Aggregated mesh/network statistics and noise-floor snapshots
+- `tests/test_version_info.py` - Version/build metadata resolution
+- `tests/test_websocket.py` - WS manager broadcast and cleanup behavior
+- `tests/test_frontend_static.py` - Frontend static route registration and fallback behavior
+
+For the fuller backend inventory, see `app/AGENTS.md`. For frontend-specific suites, see `frontend/AGENTS.md`.
+
 
 ### Frontend (Vitest)
 
@@ -285,9 +333,9 @@ cd frontend
 npm run test:run
 ```
 
-### Before Completing Changes
+### Before Completing Major Changes
 
-**Always run `./scripts/all_quality.sh` before finishing any changes that have modified code or tests.** This runs all linting, formatting, type checking, tests, and builds sequentially, catching type mismatches, breaking changes, and compilation errors. This is not necessary for docs-only changes.
+**Run `./scripts/quality/all_quality.sh` before finishing major changes that have modified code or tests.** It is the standard repo gate: autofix first, then type checks, tests, and the standard frontend build. This is not necessary for docs-only changes. For minor changes (like wording, color, spacing, etc.), wait until prompted to run the quality gate.
 
 ## API Summary
 
@@ -303,8 +351,11 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/debug` | Support snapshot: recent logs, live radio probe, contact/channel drift audit, and running version/git info |
 | GET | `/api/radio/config` | Radio configuration, including `path_hash_mode`, `path_hash_mode_supported`, and whether adverts include current node location |
 | PATCH | `/api/radio/config` | Update name, location, advert-location on/off, radio params, and `path_hash_mode` when supported |
+| GET | `/api/radio/private-key` | Export in-memory private key as hex (requires `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT=true`) |
 | PUT | `/api/radio/private-key` | Import private key to radio |
-| POST | `/api/radio/advertise` | Send advertisement |
+| POST | `/api/radio/advertise` | Send advertisement (`mode`: `flood` or `zero_hop`, default `flood`) |
+| POST | `/api/radio/discover` | Run a short mesh discovery sweep for nearby repeaters/sensors |
+| POST | `/api/radio/trace` | Send a multi-hop trace loop through known repeaters and back to the local radio |
 | POST | `/api/radio/reboot` | Reboot radio or reconnect if disconnected |
 | POST | `/api/radio/disconnect` | Disconnect from radio and pause automatic reconnect attempts |
 | POST | `/api/radio/reconnect` | Manual radio reconnection |
@@ -312,11 +363,13 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | GET | `/api/contacts/analytics` | Unified keyed-or-name contact analytics payload |
 | GET | `/api/contacts/repeaters/advert-paths` | List recent unique advert paths for all contacts |
 | POST | `/api/contacts` | Create contact (optionally trigger historical DM decrypt) |
+| POST | `/api/contacts/bulk-delete` | Delete multiple contacts |
 | DELETE | `/api/contacts/{public_key}` | Delete contact |
 | POST | `/api/contacts/{public_key}/mark-read` | Mark contact conversation as read |
 | POST | `/api/contacts/{public_key}/command` | Send CLI command to repeater |
 | POST | `/api/contacts/{public_key}/routing-override` | Set or clear a forced routing override |
 | POST | `/api/contacts/{public_key}/trace` | Trace route to contact |
+| POST | `/api/contacts/{public_key}/path-discovery` | Discover forward/return paths and persist the learned direct route |
 | POST | `/api/contacts/{public_key}/repeater/login` | Log in to a repeater |
 | POST | `/api/contacts/{public_key}/repeater/status` | Fetch repeater status telemetry |
 | POST | `/api/contacts/{public_key}/repeater/lpp-telemetry` | Fetch CayenneLPP sensor data |
@@ -326,12 +379,20 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/contacts/{public_key}/repeater/radio-settings` | Fetch repeater radio config via CLI |
 | POST | `/api/contacts/{public_key}/repeater/advert-intervals` | Fetch advert intervals |
 | POST | `/api/contacts/{public_key}/repeater/owner-info` | Fetch owner info |
-
+| GET | `/api/contacts/{public_key}/repeater/telemetry-history` | Stored telemetry history for a repeater (read-only, no radio access) |
+| POST | `/api/contacts/{public_key}/telemetry` | Fetch CayenneLPP telemetry from any contact (single attempt, 10s timeout) |
+| GET | `/api/contacts/{public_key}/telemetry-history` | Stored LPP telemetry history for a contact (read-only, no radio access) |
+| POST | `/api/contacts/{public_key}/room/login` | Log in to a room server |
+| POST | `/api/contacts/{public_key}/room/status` | Fetch room-server status telemetry |
+| POST | `/api/contacts/{public_key}/room/lpp-telemetry` | Fetch room-server CayenneLPP sensor data |
+| POST | `/api/contacts/{public_key}/room/acl` | Fetch room-server ACL entries |
 | GET | `/api/channels` | List channels |
 | GET | `/api/channels/{key}/detail` | Comprehensive channel profile (message stats, top senders) |
 | POST | `/api/channels` | Create channel |
+| POST | `/api/channels/bulk-hashtag` | Create multiple hashtag channels |
 | DELETE | `/api/channels/{key}` | Delete channel |
 | POST | `/api/channels/{key}/flood-scope-override` | Set or clear a per-channel regional flood-scope override |
+| POST | `/api/channels/{key}/path-hash-mode-override` | Set or clear a per-channel path hash mode override |
 | POST | `/api/channels/{key}/mark-read` | Mark channel as read |
 | GET | `/api/messages` | List with filters (`q`, `after`/`after_id` for forward pagination) |
 | GET | `/api/messages/around/{id}` | Get messages around a specific message (for jump-to-message) |
@@ -339,21 +400,35 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/messages/channel` | Send channel message |
 | POST | `/api/messages/channel/{message_id}/resend` | Resend channel message (default: byte-perfect within 30s; `?new_timestamp=true`: fresh timestamp, no time limit, creates new message row) |
 | GET | `/api/packets/undecrypted/count` | Count of undecrypted packets |
+| GET | `/api/packets/{packet_id}` | Fetch one stored raw packet by row ID for on-demand inspection |
 | POST | `/api/packets/decrypt/historical` | Decrypt stored packets |
 | POST | `/api/packets/maintenance` | Delete old packets and vacuum |
-| GET | `/api/read-state/unreads` | Server-computed unread counts, mentions, last message times |
+| GET | `/api/read-state/unreads` | Server-computed unread counts, mentions, last message times, and `last_read_ats` boundaries |
 | POST | `/api/read-state/mark-all-read` | Mark all conversations as read |
 | GET | `/api/settings` | Get app settings |
 | PATCH | `/api/settings` | Update app settings |
 | POST | `/api/settings/favorites/toggle` | Toggle favorite status |
 | POST | `/api/settings/blocked-keys/toggle` | Toggle blocked key |
 | POST | `/api/settings/blocked-names/toggle` | Toggle blocked name |
-| POST | `/api/settings/migrate` | One-time migration from frontend localStorage |
+| POST | `/api/settings/tracked-telemetry/toggle` | Toggle tracked telemetry repeater |
+| GET | `/api/settings/tracked-telemetry/schedule` | Current telemetry scheduling derivation and next-run-at timestamp |
+| POST | `/api/settings/tracked-telemetry-contacts/toggle` | Toggle tracked LPP telemetry for any contact |
+| GET | `/api/settings/tracked-telemetry-contacts/schedule` | Contact telemetry scheduling derivation (shared ceiling with repeaters) |
+| POST | `/api/settings/muted-channels/toggle` | Toggle muted status for a channel |
 | GET | `/api/fanout` | List all fanout configs |
 | POST | `/api/fanout` | Create new fanout config |
 | PATCH | `/api/fanout/{id}` | Update fanout config (triggers module reload) |
 | DELETE | `/api/fanout/{id}` | Delete fanout config (stops module) |
+| POST | `/api/fanout/bots/disable-until-restart` | Stop bot fanout modules and keep bots disabled until the process restarts |
 | GET | `/api/statistics` | Aggregated mesh network statistics |
+| GET | `/api/push/vapid-public-key` | VAPID public key for browser push subscription |
+| POST | `/api/push/subscribe` | Register/upsert a push subscription |
+| GET | `/api/push/subscriptions` | List all push subscriptions |
+| PATCH | `/api/push/subscriptions/{id}` | Update subscription label or filter preferences |
+| DELETE | `/api/push/subscriptions/{id}` | Delete a push subscription |
+| POST | `/api/push/subscriptions/{id}/test` | Send a test push notification |
+| GET | `/api/push/conversations` | Global list of push-enabled conversation state keys |
+| POST | `/api/push/conversations/toggle` | Add or remove a conversation from the global push list |
 | WS | `/api/ws` | Real-time updates |
 
 ## Key Concepts
@@ -378,6 +453,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 - Hashtag channels: `SHA256("#name")[:16]` converted to hex
 - Custom channels: User-provided or generated
 - Channels may also persist `flood_scope_override`; when set, channel sends temporarily switch the radio flood scope to that value for the duration of the send, then restore the global app setting.
+- Channels may persist `path_hash_mode_override` (0/1/2); when set, channel sends temporarily switch the radio path hash mode for the duration of the send, then restore the radio default.
 
 ### Message Types
 
@@ -391,7 +467,7 @@ Read state (`last_read_at`) is tracked **server-side** for consistency across de
 - Stored as Unix timestamp in `contacts.last_read_at` and `channels.last_read_at`
 - Updated via `POST /api/contacts/{public_key}/mark-read` and `POST /api/channels/{key}/mark-read`
 - Bulk update via `POST /api/read-state/mark-all-read`
-- Aggregated counts via `GET /api/read-state/unreads` (server-side computation)
+- Aggregated counts via `GET /api/read-state/unreads` (server-side computation of counts, mention flags, `last_message_times`, and `last_read_ats`)
 
 **State Tracking Keys (Frontend)**: Generated by `getStateKey()` for message times (sidebar sorting):
 - Channels: `channel-{channel_key}`
@@ -406,6 +482,17 @@ All external integrations are managed through the fanout bus (`app/fanout/`). Ea
 `broadcast_event()` in `websocket.py` dispatches `message` and `raw_packet` events to the fanout manager. See `app/fanout/AGENTS_fanout.md` for full architecture details.
 
 Community MQTT forwards raw packets only. Its derived `path` field, when present on direct packets, is a comma-separated list of hop identifiers as reported by the packet format. Token width therefore varies with the packet's path hash mode; it is intentionally not a flat per-byte rendering.
+
+### Web Push Notifications
+
+Web Push is a standalone subsystem (`app/push/`) that sends browser push notifications for incoming messages even when the browser tab is closed. It is **not** a fanout module — it manages its own per-browser subscriptions, while the set of push-enabled conversations is stored once per server instance.
+
+- **Requires HTTPS** (self-signed certificates work) and outbound internet from the server to reach browser push services (Google FCM, Mozilla autopush).
+- VAPID key pair is auto-generated on first startup and stored in `app_settings`.
+- Each browser subscription is stored in `push_subscriptions` with device identity and delivery state. The set of push-enabled conversations is stored globally in `app_settings.push_conversations`, so all subscribed browsers receive the same configured rooms/DMs.
+- `broadcast_event()` in `websocket.py` dispatches to `push_manager.dispatch_message()` alongside fanout for `message` events.
+- Expired subscriptions (HTTP 404/410 from push service) are auto-deleted.
+- Frontend: service worker (`sw.js`) handles push display and notification click navigation. The `BellRing` icon in `ChatHeader` toggles per-conversation push. Device management lives in Settings > Local.
 
 ### Server-Side Decryption
 
@@ -441,7 +528,7 @@ mc.subscribe(EventType.ACK, handler)
 |----------|---------|-------------|
 | `MESHCORE_SERIAL_PORT` | auto-detect | Serial port for radio |
 | `MESHCORE_TCP_HOST` | *(none)* | TCP host for radio (mutually exclusive with serial/BLE) |
-| `MESHCORE_TCP_PORT` | `4000` | TCP port (used with `MESHCORE_TCP_HOST`) |
+| `MESHCORE_TCP_PORT` | `5000` | TCP port (used with `MESHCORE_TCP_HOST`) |
 | `MESHCORE_BLE_ADDRESS` | *(none)* | BLE device address (mutually exclusive with serial/TCP) |
 | `MESHCORE_BLE_PIN` | *(required with BLE)* | BLE PIN code |
 | `MESHCORE_SERIAL_BAUDRATE` | `115200` | Serial baud rate |
@@ -452,8 +539,10 @@ mc.subscribe(EventType.ACK, handler)
 | `MESHCORE_BASIC_AUTH_PASSWORD` | *(none)* | Optional app-wide HTTP Basic auth password; must be set together with `MESHCORE_BASIC_AUTH_USERNAME` |
 | `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK` | `false` | Switch the always-on radio audit task from hourly checks to aggressive 10-second polling; the audit checks both missed message drift and channel-slot cache drift |
 | `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE` | `false` | Disable channel-slot reuse and force `set_channel(...)` before every channel send, even on serial/BLE |
+| `MESHCORE_LOAD_WITH_AUTOEVICT` | `false` | Enable autoevict contact loading: sets `AUTO_ADD_OVERWRITE_OLDEST` on the radio so adds never fail with TABLE_FULL, skips the removal phase during reconcile, and allows blind loading when `get_contacts` fails. Loaded contacts are not radio-favorited and may be evicted by new adverts when the table is full. |
+| `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT` | `false` | Enable `GET /api/radio/private-key` to return the in-memory private key as hex. Disabled by default; only enable on a trusted network where you need to retrieve the key (e.g. for backup or migration). |
 
-**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `sidebar_sort_order`, `advert_interval`, `last_advert_time`, `favorites`, `last_message_times`, `flood_scope`, `blocked_keys`, and `blocked_names`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
+**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `advert_interval`, `last_advert_time`, `last_message_times`, `flood_scope`, `blocked_keys`, `blocked_names`, `discovery_blocked_types`, `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`, `auto_resend_channel`, and `telemetry_interval_hours`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
 
 Byte-perfect channel retries are user-triggered via `POST /api/messages/channel/{message_id}/resend` and are allowed for 30 seconds after the original send.
 

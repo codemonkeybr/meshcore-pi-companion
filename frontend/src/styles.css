@@ -6,7 +6,10 @@
   padding: 0;
 }
 
-html,
+html {
+  height: 100dvh;
+}
+
 body,
 #root {
   height: 100%;

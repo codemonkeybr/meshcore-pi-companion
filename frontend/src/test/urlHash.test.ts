@@ -8,11 +8,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   parseHashConversation,
+  parseHashSettingsSection,
+  getSettingsHash,
   getMapFocusHash,
   resolveChannelFromHashToken,
   resolveContactFromHashToken,
 } from '../utils/urlHash';
 import type { Channel, Contact } from '../types';
+import { PUBLIC_CHANNEL_KEY } from '../utils/publicChannel';
 
 describe('parseHashConversation', () => {
   let originalHash: string;
@@ -47,6 +50,14 @@ describe('parseHashConversation', () => {
     const result = parseHashConversation();
 
     expect(result).toEqual({ type: 'map', name: 'map' });
+  });
+
+  it('parses #trace as trace type', () => {
+    window.location.hash = '#trace';
+
+    const result = parseHashConversation();
+
+    expect(result).toEqual({ type: 'trace', name: 'trace' });
   });
 
   it('parses #map/focus/PUBKEY with focus key', () => {
@@ -146,14 +157,44 @@ describe('parseHashConversation', () => {
   });
 });
 
+describe('settings URL hashes', () => {
+  let originalHash: string;
+
+  beforeEach(() => {
+    originalHash = window.location.hash;
+  });
+
+  afterEach(() => {
+    window.location.hash = originalHash;
+  });
+
+  it('parses a valid settings section hash', () => {
+    window.location.hash = '#settings/database';
+
+    expect(parseHashSettingsSection()).toBe('database');
+  });
+
+  it('returns null for an invalid settings section hash', () => {
+    window.location.hash = '#settings/not-a-section';
+
+    expect(parseHashSettingsSection()).toBeNull();
+  });
+
+  it('builds a stable settings hash', () => {
+    expect(getSettingsHash('local')).toBe('#settings/local');
+  });
+});
+
 describe('resolveChannelFromHashToken', () => {
   const channels: Channel[] = [
     {
-      key: 'ABCDEF0123456789ABCDEF0123456789',
+      key: PUBLIC_CHANNEL_KEY,
       name: 'Public',
       is_hashtag: false,
       on_radio: true,
       last_read_at: null,
+      favorite: false,
+      muted: false,
     },
     {
       key: '11111111111111111111111111111111',
@@ -161,6 +202,8 @@ describe('resolveChannelFromHashToken', () => {
       is_hashtag: true,
       on_radio: false,
       last_read_at: null,
+      favorite: false,
+      muted: false,
     },
     {
       key: '22222222222222222222222222222222',
@@ -168,17 +211,19 @@ describe('resolveChannelFromHashToken', () => {
       is_hashtag: false,
       on_radio: false,
       last_read_at: null,
+      favorite: false,
+      muted: false,
     },
   ];
 
   it('prefers stable key lookup (case-insensitive)', () => {
-    const result = resolveChannelFromHashToken('abcdef0123456789abcdef0123456789', channels);
-    expect(result?.key).toBe('ABCDEF0123456789ABCDEF0123456789');
+    const result = resolveChannelFromHashToken(PUBLIC_CHANNEL_KEY.toLowerCase(), channels);
+    expect(result?.key).toBe(PUBLIC_CHANNEL_KEY);
   });
 
-  it('supports legacy name-based hash lookup', () => {
+  it('resolves legacy Public hashes to the canonical Public key', () => {
     const result = resolveChannelFromHashToken('Public', channels);
-    expect(result?.key).toBe('ABCDEF0123456789ABCDEF0123456789');
+    expect(result?.key).toBe(PUBLIC_CHANNEL_KEY);
   });
 
   it('supports legacy hashtag hash without leading #', () => {
@@ -194,14 +239,15 @@ describe('resolveContactFromHashToken', () => {
       name: 'Alice',
       type: 1,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
-      out_path_hash_mode: 0,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: 0,
       last_advert: null,
       lat: null,
       lon: null,
       last_seen: null,
       on_radio: false,
+      favorite: false,
       last_contacted: null,
       last_read_at: null,
       first_seen: null,
@@ -211,14 +257,15 @@ describe('resolveContactFromHashToken', () => {
       name: 'Alice',
       type: 1,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
-      out_path_hash_mode: 0,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: 0,
       last_advert: null,
       lat: null,
       lon: null,
       last_seen: null,
       on_radio: false,
+      favorite: false,
       last_contacted: null,
       last_read_at: null,
       first_seen: null,
@@ -228,14 +275,15 @@ describe('resolveContactFromHashToken', () => {
       name: null,
       type: 1,
       flags: 0,
-      last_path: null,
-      last_path_len: -1,
-      out_path_hash_mode: 0,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: 0,
       last_advert: null,
       lat: null,
       lon: null,
       last_seen: null,
       on_radio: false,
+      favorite: false,
       last_contacted: null,
       last_read_at: null,
       first_seen: null,

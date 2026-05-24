@@ -9,7 +9,7 @@ import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import { useContactsAndChannels } from '../hooks/useContactsAndChannels';
-import type { Contact } from '../types';
+import type { BulkCreateHashtagChannelsResult, Contact } from '../types';
 
 // Mock api module
 vi.mock('../api', () => ({
@@ -18,6 +18,7 @@ vi.mock('../api', () => ({
     getChannels: vi.fn(),
     createContact: vi.fn(),
     createChannel: vi.fn(),
+    bulkCreateHashtagChannels: vi.fn(),
     deleteContact: vi.fn(),
     deleteChannel: vi.fn(),
     decryptHistoricalPackets: vi.fn(),
@@ -35,11 +36,6 @@ vi.mock('../components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-// Mock messageCache
-vi.mock('../messageCache', () => ({
-  remove: vi.fn(),
-}));
-
 function makeContact(suffix: string): Contact {
   const key = suffix.padStart(64, '0');
   return {
@@ -47,14 +43,15 @@ function makeContact(suffix: string): Contact {
     name: `Contact-${suffix}`,
     type: 1,
     flags: 0,
-    last_path: null,
-    last_path_len: -1,
-    out_path_hash_mode: 0,
+    direct_path: null,
+    direct_path_len: -1,
+    direct_path_hash_mode: 0,
     last_advert: null,
     lat: null,
     lon: null,
     last_seen: null,
     on_radio: false,
+    favorite: false,
     last_contacted: null,
     last_read_at: null,
     first_seen: null,
@@ -69,6 +66,7 @@ function makeContacts(count: number, startIndex = 0): Contact[] {
 
 describe('useContactsAndChannels', () => {
   const setActiveConversation = vi.fn();
+  const removeConversationMessages = vi.fn();
   const pendingDeleteFallbackRef = { current: false };
   const hasSetDefaultConversation = { current: false };
 
@@ -88,6 +86,7 @@ describe('useContactsAndChannels', () => {
         setActiveConversation,
         pendingDeleteFallbackRef,
         hasSetDefaultConversation,
+        removeConversationMessages,
       })
     );
   }
@@ -172,6 +171,45 @@ describe('useContactsAndChannels', () => {
 
       expect(fetched).toHaveLength(1000);
       expect(api.getContacts).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('bulk hashtag creation', () => {
+    it('refreshes channels and returns the backend result', async () => {
+      const { api } = await import('../api');
+      const resultPayload: BulkCreateHashtagChannelsResult = {
+        created_channels: [
+          {
+            key: 'AA'.repeat(16),
+            name: '#ops',
+            is_hashtag: true,
+            on_radio: false,
+            last_read_at: null,
+            favorite: false,
+            muted: false,
+          },
+        ],
+        existing_count: 1,
+        invalid_names: [],
+        decrypt_started: true,
+        decrypt_total_packets: 12,
+        message: 'Created 1 room',
+      };
+      vi.mocked(api.bulkCreateHashtagChannels).mockResolvedValueOnce(resultPayload);
+      vi.mocked(api.getChannels).mockResolvedValueOnce(resultPayload.created_channels);
+      vi.mocked(api.getUndecryptedPacketCount).mockResolvedValueOnce({ count: 9 });
+
+      const { result } = renderUseContactsAndChannels();
+
+      let response: BulkCreateHashtagChannelsResult | null = null;
+      await act(async () => {
+        response = await result.current.handleBulkCreateHashtagChannels(['#ops'], true);
+      });
+
+      expect(api.bulkCreateHashtagChannels).toHaveBeenCalledWith(['#ops'], true);
+      expect(api.getChannels).toHaveBeenCalled();
+      expect(api.getUndecryptedPacketCount).toHaveBeenCalled();
+      expect(response).toEqual(resultPayload);
     });
   });
 });

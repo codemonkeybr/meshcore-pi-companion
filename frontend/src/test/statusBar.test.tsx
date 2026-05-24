@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { StatusBar } from '../components/StatusBar';
 import type { HealthStatus } from '../types';
@@ -76,5 +76,58 @@ describe('StatusBar', () => {
 
     expect(localStorage.getItem('remoteterm-theme')).toBe('original');
     expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
+  describe('with Follow OS theme saved', () => {
+    const originalMatchMedia = globalThis.matchMedia;
+
+    afterEach(() => {
+      globalThis.matchMedia = originalMatchMedia;
+    });
+
+    // Stub matchMedia so prefers-color-scheme: light returns the desired value.
+    const setPrefersLight = (isLight: boolean) => {
+      Object.defineProperty(globalThis, 'matchMedia', {
+        configurable: true,
+        value: (query: string) => ({
+          matches: query.includes('light') ? isLight : !isLight,
+          media: query,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }),
+      });
+    };
+
+    it('clicking toggle while OS prefers dark overrides follow-os into explicit light', () => {
+      setPrefersLight(false);
+      localStorage.setItem('remoteterm-theme', 'follow-os');
+
+      render(<StatusBar health={baseHealth} config={null} onSettingsClick={vi.fn()} />);
+
+      // OS is dark → effective is original → toggle offers "Switch to light theme"
+      const toggle = screen.getByRole('button', { name: 'Switch to light theme' });
+      fireEvent.click(toggle);
+
+      expect(localStorage.getItem('remoteterm-theme')).toBe('light');
+      expect(document.documentElement.dataset.theme).toBe('light');
+    });
+
+    it('clicking toggle while OS prefers light overrides follow-os into explicit dark', () => {
+      setPrefersLight(true);
+      localStorage.setItem('remoteterm-theme', 'follow-os');
+
+      render(<StatusBar health={baseHealth} config={null} onSettingsClick={vi.fn()} />);
+
+      // OS is light → effective is light → toggle offers "Switch to classic theme"
+      const toggle = screen.getByRole('button', { name: 'Switch to classic theme' });
+      fireEvent.click(toggle);
+
+      expect(localStorage.getItem('remoteterm-theme')).toBe('original');
+      expect(document.documentElement.dataset.theme).toBeUndefined();
+    });
   });
 });

@@ -23,8 +23,8 @@ test.describe('Radio settings', () => {
       await nameInput.clear();
       await nameInput.fill(testName);
 
-      // Use "Save" (no reboot) — name changes apply immediately
-      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      // Use "Save Radio Config" (no reboot) — name changes apply immediately
+      await page.getByRole('button', { name: 'Save Radio Config', exact: true }).click();
       await expect(page.getByText('Radio config saved')).toBeVisible({ timeout: 10_000 });
 
       // --- Step 2: Verify via API (send_appstart refreshes cached info) ---

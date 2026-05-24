@@ -1,8 +1,10 @@
 import type { Channel, Contact, Conversation } from '../types';
+import { findPublicChannel, PUBLIC_CHANNEL_NAME } from './publicChannel';
 import { getContactDisplayName } from './pubkey';
+import type { SettingsSection } from '../components/settings/settingsConstants';
 
 interface ParsedHashConversation {
-  type: 'channel' | 'contact' | 'raw' | 'map' | 'visualizer' | 'search';
+  type: 'channel' | 'contact' | 'raw' | 'map' | 'visualizer' | 'search' | 'trace';
   /** Conversation identity token (channel key or contact public key, or legacy name token) */
   name: string;
   /** Optional human-readable label segment (ignored for identity resolution) */
@@ -10,6 +12,16 @@ interface ParsedHashConversation {
   /** For map view: public key prefix to focus on */
   mapFocusKey?: string;
 }
+
+const SETTINGS_SECTIONS: SettingsSection[] = [
+  'radio',
+  'local',
+  'radio-app',
+  'fanout',
+  'database',
+  'statistics',
+  'about',
+];
 
 // Parse URL hash to get conversation
 // (e.g., #channel/ABCDEF0123456789ABCDEF0123456789 or #contact/<64-char-pubkey>).
@@ -31,6 +43,10 @@ export function parseHashConversation(): ParsedHashConversation | null {
 
   if (hash === 'search') {
     return { type: 'search', name: 'search' };
+  }
+
+  if (hash === 'trace') {
+    return { type: 'trace', name: 'trace' };
   }
 
   // Check for map with focus: #map/focus/{pubkey_prefix}
@@ -69,6 +85,20 @@ export function parseHashConversation(): ParsedHashConversation | null {
   };
 }
 
+export function parseHashSettingsSection(): SettingsSection | null {
+  const hash = window.location.hash.slice(1);
+  if (!hash.startsWith('settings/')) {
+    return null;
+  }
+
+  const section = decodeURIComponent(hash.slice('settings/'.length)) as SettingsSection;
+  return SETTINGS_SECTIONS.includes(section) ? section : null;
+}
+
+export function getSettingsHash(section: SettingsSection): string {
+  return `#settings/${encodeURIComponent(section)}`;
+}
+
 export function resolveChannelFromHashToken(token: string, channels: Channel[]): Channel | null {
   const normalizedToken = token.trim();
   if (!normalizedToken) return null;
@@ -76,6 +106,13 @@ export function resolveChannelFromHashToken(token: string, channels: Channel[]):
   // Preferred path: stable identity by channel key.
   const byKey = channels.find((c) => c.key.toLowerCase() === normalizedToken.toLowerCase());
   if (byKey) return byKey;
+
+  // Legacy Public hashes should resolve to the canonical Public key, not any
+  // arbitrary row that happens to share the display name.
+  if (normalizedToken.toLowerCase() === PUBLIC_CHANNEL_NAME.toLowerCase()) {
+    const publicChannel = findPublicChannel(channels);
+    if (publicChannel) return publicChannel;
+  }
 
   // Backward compatibility for legacy name-based hashes.
   return (
@@ -111,12 +148,13 @@ export function getMapFocusHash(publicKeyPrefix: string): string {
 }
 
 // Generate URL hash from conversation
-function getConversationHash(conv: Conversation | null): string {
+export function getConversationHash(conv: Conversation | null): string {
   if (!conv) return '';
   if (conv.type === 'raw') return '#raw';
   if (conv.type === 'map') return '#map';
   if (conv.type === 'visualizer') return '#visualizer';
   if (conv.type === 'search') return '#search';
+  if (conv.type === 'trace') return '#trace';
 
   // Use immutable IDs for identity, append readable label for UX.
   if (conv.type === 'channel') {
@@ -131,5 +169,12 @@ export function updateUrlHash(conv: Conversation | null): void {
   const newHash = getConversationHash(conv);
   if (newHash !== window.location.hash) {
     window.history.replaceState(null, '', newHash || window.location.pathname);
+  }
+}
+
+export function updateSettingsHash(section: SettingsSection): void {
+  const newHash = getSettingsHash(section);
+  if (newHash !== window.location.hash) {
+    window.history.replaceState(null, '', newHash);
   }
 }

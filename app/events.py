@@ -2,10 +2,10 @@
 
 import json
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired
 
 from pydantic import TypeAdapter
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from app.models import Channel, Contact, Message, MessagePath, RawPacketBroadcast
 from app.routers.health import HealthResponse
@@ -44,25 +44,13 @@ class MessageAckedPayload(TypedDict):
     message_id: int
     ack_count: int
     paths: NotRequired[list[MessagePath]]
+    packet_id: NotRequired[int | None]
 
 
 class ToastPayload(TypedDict):
     message: str
     details: NotRequired[str]
 
-
-WsEventPayload = (
-    HealthResponse
-    | Message
-    | Contact
-    | ContactResolvedPayload
-    | Channel
-    | ContactDeletedPayload
-    | ChannelDeletedPayload
-    | RawPacketBroadcast
-    | MessageAckedPayload
-    | ToastPayload
-)
 
 _PAYLOAD_ADAPTERS: dict[WsEventType, TypeAdapter[Any]] = {
     "health": TypeAdapter(HealthResponse),
@@ -77,14 +65,6 @@ _PAYLOAD_ADAPTERS: dict[WsEventType, TypeAdapter[Any]] = {
     "error": TypeAdapter(ToastPayload),
     "success": TypeAdapter(ToastPayload),
 }
-
-
-def validate_ws_event_payload(event_type: str, data: Any) -> WsEventPayload | Any:
-    """Validate known WebSocket payloads; pass unknown events through unchanged."""
-    adapter = _PAYLOAD_ADAPTERS.get(event_type)  # type: ignore[arg-type]
-    if adapter is None:
-        return data
-    return adapter.validate_python(data)
 
 
 def dump_ws_event(event_type: str, data: Any) -> str:
@@ -103,13 +83,3 @@ def dump_ws_event(event_type: str, data: Any) -> str:
             event_type,
         )
         return json.dumps({"type": event_type, "data": data})
-
-
-def dump_ws_event_payload(event_type: str, data: Any) -> Any:
-    """Return the JSON-serializable payload for a WebSocket event."""
-    adapter = _PAYLOAD_ADAPTERS.get(event_type)  # type: ignore[arg-type]
-    if adapter is None:
-        return data
-
-    validated = adapter.validate_python(data)
-    return adapter.dump_python(validated, mode="json")

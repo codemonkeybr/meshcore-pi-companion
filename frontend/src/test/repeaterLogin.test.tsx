@@ -7,6 +7,10 @@ describe('RepeaterLogin', () => {
     repeaterName: 'TestRepeater',
     loading: false,
     error: null as string | null,
+    password: '',
+    onPasswordChange: vi.fn(),
+    rememberPassword: false,
+    onRememberPasswordChange: vi.fn(),
     onLogin: vi.fn(),
     onLoginAsGuest: vi.fn(),
   };
@@ -26,18 +30,43 @@ describe('RepeaterLogin', () => {
     render(<RepeaterLogin {...defaultProps} />);
 
     expect(screen.getByPlaceholderText('Repeater password...')).toBeInTheDocument();
+    expect(screen.getByText('Remember password')).toBeInTheDocument();
     expect(screen.getByText('Login with Password')).toBeInTheDocument();
     expect(screen.getByText('Login as Guest / ACLs')).toBeInTheDocument();
   });
 
   it('calls onLogin with trimmed password on submit', () => {
-    render(<RepeaterLogin {...defaultProps} />);
-
-    const input = screen.getByPlaceholderText('Repeater password...');
-    fireEvent.change(input, { target: { value: '  secret  ' } });
+    render(<RepeaterLogin {...defaultProps} password="  secret  " />);
     fireEvent.submit(screen.getByText('Login with Password').closest('form')!);
 
     expect(defaultProps.onLogin).toHaveBeenCalledWith('secret');
+  });
+
+  it('propagates password changes', () => {
+    render(<RepeaterLogin {...defaultProps} />);
+
+    const input = screen.getByPlaceholderText('Repeater password...');
+    fireEvent.change(input, { target: { value: 'new secret' } });
+
+    expect(defaultProps.onPasswordChange).toHaveBeenCalledWith('new secret');
+  });
+
+  it('toggles remember password checkbox', () => {
+    render(<RepeaterLogin {...defaultProps} />);
+
+    fireEvent.click(screen.getByLabelText('Remember password'));
+
+    expect(defaultProps.onRememberPasswordChange).toHaveBeenCalledWith(true);
+  });
+
+  it('shows storage warning when remember password is enabled', () => {
+    render(<RepeaterLogin {...defaultProps} rememberPassword={true} />);
+
+    expect(
+      screen.getByText(
+        /Passwords are stored unencrypted in local browser storage for this domain\./
+      )
+    ).toBeInTheDocument();
   });
 
   it('calls onLoginAsGuest when guest button clicked', () => {

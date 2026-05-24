@@ -222,6 +222,8 @@ class SpiBackend(RadioBackend):
             "name": node_name,
             "lat": 0.0,
             "lon": 0.0,
+            "adv_lat": 0.0,
+            "adv_lon": 0.0,
             "tx_power": tx_power,
             "radio_freq": frequency / 1_000_000,
             "radio_bw": bandwidth / 1_000,
@@ -310,6 +312,11 @@ class SpiBackend(RadioBackend):
     @property
     def self_info(self) -> dict[str, Any] | None:
         return self._self_info
+
+    @property
+    def commands(self) -> SpiBackend:
+        """Expose methods as a commands namespace so callers can use mc.commands.X()."""
+        return self
 
     async def start_auto_message_fetching(self) -> None:
         pass  # Dispatcher handles RX via callbacks
@@ -450,6 +457,7 @@ class SpiBackend(RadioBackend):
         msg: str,
         *,
         timestamp: int | None = None,
+        attempt: int | None = None,
     ) -> Any:
         from meshcore import EventType
 
@@ -511,13 +519,14 @@ class SpiBackend(RadioBackend):
             if 0 <= chan < len(channels):
                 group_name = channels[chan]["name"]
         if group_name:
-            result = await self._node.send_group_text(group_name, msg)
-            return _Event(
-                EventType.MSG_SENT,
-                {
-                    "success": result.get("success", False),
-                },
+            # send_group_text is fire-and-forget (no ACK expected). Scheduling it
+            # as a background task lets the API return immediately so the message
+            # appears in the UI without waiting for LBT + transmission (~5-15s).
+            asyncio.create_task(
+                self._node.send_group_text(group_name, msg),
+                name=f"spi-group-send-{chan}",
             )
+            return _Event(EventType.MSG_SENT, {"success": True})
         return _Event(EventType.ERROR, {"error": f"Channel index {chan} out of range"})
 
     async def get_msg(self, timeout: float = 2.0) -> Any:
@@ -585,6 +594,8 @@ class SpiBackend(RadioBackend):
         if self._self_info:
             self._self_info["lat"] = lat
             self._self_info["lon"] = lon
+            self._self_info["adv_lat"] = lat
+            self._self_info["adv_lon"] = lon
         return _Event(EventType.OK, {})
 
     async def set_tx_power(self, *, val: int) -> Any:
@@ -624,6 +635,51 @@ class SpiBackend(RadioBackend):
         from meshcore import EventType
 
         return _Event(EventType.OK, {})
+
+    async def set_advert_loc_policy(self, policy: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def set_multi_acks(self, val: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def set_telemetry_mode_base(self, mode: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def set_telemetry_mode_loc(self, mode: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def set_telemetry_mode_env(self, mode: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def get_autoadd_config(self) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {"config": 0})
+
+    async def set_autoadd_config(self, new_flags: int) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def get_time(self) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.CURRENT_TIME, {"time": int(time.time())})
+
+    async def send_node_discover_req(self, *args: Any, **kwargs: Any) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.ERROR, {"error": "Not supported in SPI mode"})
 
     async def send_appstart(self) -> Any:
         from meshcore import EventType
@@ -859,7 +915,17 @@ class SpiBackend(RadioBackend):
 
         return _Event(EventType.ERROR, {"error": "Not yet implemented for SPI backend"})
 
-    async def send_trace(self, *, path: str, tag: int) -> Any:
+    async def reset_path(self, public_key: str) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def send_path_discovery(self, public_key: str) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.OK, {})
+
+    async def send_trace(self, *, path: str, tag: int, flags: int | None = None) -> Any:
         from meshcore import EventType
 
         if not self._node:
@@ -896,7 +962,7 @@ class SpiBackend(RadioBackend):
         try:
             await asyncio.wait_for(captured.wait(), timeout=timeout)
             return result[0] if result else None
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
         finally:
             sub.unsubscribe()
@@ -926,6 +992,11 @@ class SpiBackend(RadioBackend):
         if self._node and hasattr(self._node.dispatcher, "get_filter_stats"):
             stats["filter"] = self._node.dispatcher.get_filter_stats()
         return _Event(EventType.STATS_RADIO, stats)
+
+    async def get_stats_packets(self) -> Any:
+        from meshcore import EventType
+
+        return _Event(EventType.STATS_PACKETS, {"backend": "spi"})
 
     # ------------------------------------------------------------------
     # Events / subscriptions

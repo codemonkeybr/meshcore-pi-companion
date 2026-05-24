@@ -1,5 +1,20 @@
-import { MapContainer, TileLayer, CircleMarker, Popup, Polyline } from 'react-leaflet';
+import { useEffect } from 'react';
+import { MapContainer, TileLayer, CircleMarker, Popup, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
+
+/** Watches the map container for size changes and tells Leaflet to re-tile. */
+function InvalidateOnResize() {
+  const map = useMap();
+  useEffect(() => {
+    const container = map.getContainer();
+    const ro = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [map]);
+  return null;
+}
 
 interface Neighbor {
   lat: number | null;
@@ -40,6 +55,7 @@ export function NeighborsMiniMap({ neighbors, radioLat, radioLon, radioName }: P
         className="h-full w-full"
         style={{ background: '#1a1a2e' }}
       >
+        <InvalidateOnResize />
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

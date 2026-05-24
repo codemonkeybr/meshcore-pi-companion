@@ -12,13 +12,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from meshcore import EventType
 
-from app.backends.client_backend import ClientBackend
 from app.repository import ContactAdvertPathRepository, ContactRepository, MessageRepository
 
 # Sample 64-char hex public keys for testing
 KEY_A = "aa" * 32  # aaaa...aa
 KEY_B = "bb" * 32  # bbbb...bb
 KEY_C = "cc" * 32  # cccc...cc
+
+
+def _radio_result(event_type=EventType.OK, payload=None):
+    result = MagicMock()
+    result.type = event_type
+    result.payload = payload or {}
+    return result
 
 
 def _noop_radio_operation(mc=None):
@@ -38,8 +44,9 @@ async def _insert_contact(public_key=KEY_A, name="Alice", on_radio=False, **over
         "name": name,
         "type": 0,
         "flags": 0,
-        "last_path": None,
-        "last_path_len": -1,
+        "direct_path": None,
+        "direct_path_len": -1,
+        "direct_path_hash_mode": -1,
         "last_advert": None,
         "lat": None,
         "lon": None,
@@ -98,13 +105,15 @@ class TestCreateContact:
         data = response.json()
         assert data["public_key"] == KEY_A
         assert data["name"] == "NewContact"
-        assert data["last_seen"] is not None
+        # Manually created contacts have no RF observation yet, so last_seen
+        # stays NULL until we actually hear them on the air.
+        assert data["last_seen"] is None
 
         # Verify in DB
         contact = await ContactRepository.get_by_key(KEY_A)
         assert contact is not None
         assert contact.name == "NewContact"
-        assert data["last_seen"] == contact.last_seen
+        assert contact.last_seen is None
         mock_broadcast.assert_called_once_with("contact", contact.model_dump())
 
     @pytest.mark.asyncio
@@ -256,6 +265,77 @@ class TestContactAnalytics:
         assert "exactly one" in response.json()["detail"].lower()
 
 
+class TestPathDiscovery:
+    @pytest.mark.asyncio
+    async def test_updates_contact_route_and_broadcasts_contact(self, test_db, client):
+        await _insert_contact(KEY_A, "Alice", type=1)
+        mc = MagicMock()
+        mc.commands = MagicMock()
+        mc.commands.add_contact = AsyncMock(return_value=_radio_result())
+        mc.commands.send_path_discovery = AsyncMock(return_value=_radio_result(EventType.MSG_SENT))
+        mc.wait_for_event = AsyncMock(
+            return_value=MagicMock(
+                payload={
+                    "pubkey_pre": KEY_A[:12],
+                    "out_path": "11223344",
+                    "out_path_len": 2,
+                    "out_path_hash_len": 2,
+                    "in_path": "778899",
+                    "in_path_len": 1,
+                    "in_path_hash_len": 3,
+                }
+            )
+        )
+
+        with (
+            patch("app.routers.contacts.radio_manager.require_connected", return_value=mc),
+            patch("app.routers.contacts.radio_manager") as mock_rm,
+            patch("app.websocket.broadcast_event") as mock_broadcast,
+        ):
+            mock_rm.radio_operation = _noop_radio_operation(mc)
+            response = await client.post(f"/api/contacts/{KEY_A}/path-discovery")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["forward_path"] == {
+            "path": "11223344",
+            "path_len": 2,
+            "path_hash_mode": 1,
+        }
+        assert data["return_path"] == {
+            "path": "778899",
+            "path_len": 1,
+            "path_hash_mode": 2,
+        }
+
+        updated = await ContactRepository.get_by_key(KEY_A)
+        assert updated is not None
+        assert updated.direct_path == "11223344"
+        assert updated.direct_path_len == 2
+        assert updated.direct_path_hash_mode == 1
+        mc.commands.add_contact.assert_awaited()
+        mock_broadcast.assert_called_once_with("contact", updated.model_dump())
+
+    @pytest.mark.asyncio
+    async def test_returns_408_when_no_response_is_heard(self, test_db, client):
+        await _insert_contact(KEY_A, "Alice", type=1)
+        mc = MagicMock()
+        mc.commands = MagicMock()
+        mc.commands.add_contact = AsyncMock(return_value=_radio_result())
+        mc.commands.send_path_discovery = AsyncMock(return_value=_radio_result(EventType.MSG_SENT))
+        mc.wait_for_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.routers.contacts.radio_manager.require_connected", return_value=mc),
+            patch("app.routers.contacts.radio_manager") as mock_rm,
+        ):
+            mock_rm.radio_operation = _noop_radio_operation(mc)
+            response = await client.post(f"/api/contacts/{KEY_A}/path-discovery")
+
+        assert response.status_code == 408
+        assert "No path discovery response heard" in response.json()["detail"]
+
+
 class TestDeleteContactCascade:
     """Test that contact delete cleans up related tables."""
 
@@ -284,6 +364,48 @@ class TestDeleteContactCascade:
         # Verify related data cleaned up
         assert len(await ContactNameHistoryRepository.get_history(KEY_A)) == 0
         assert len(await ContactAdvertPathRepository.get_recent_for_contact(KEY_A)) == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_preserves_dms_and_readd_resurfaces_them(self, test_db, client):
+        await _insert_contact(KEY_A, "Alice")
+
+        # Create an incoming DM for this contact
+        await MessageRepository.create(
+            msg_type="PRIV",
+            conversation_key=KEY_A,
+            text="hello",
+            sender_timestamp=1000,
+            received_at=1000,
+        )
+
+        # Unread count should include the DM
+        unreads = await MessageRepository.get_unread_counts()
+        assert unreads["counts"].get(f"contact-{KEY_A.lower()}", 0) == 1
+
+        with patch("app.routers.contacts.radio_manager") as mock_rm:
+            mock_rm.is_connected = False
+            mock_rm.meshcore = None
+            mock_rm.radio_operation = _noop_radio_operation()
+
+            response = await client.delete(f"/api/contacts/{KEY_A}")
+        assert response.status_code == 200
+
+        # DMs are preserved in the database
+        msgs = await MessageRepository.get_all(msg_type="PRIV", conversation_key=KEY_A)
+        assert len(msgs) == 1
+
+        # Orphaned DMs still appear in unread counts (LEFT JOIN)
+        unreads = await MessageRepository.get_unread_counts()
+        assert unreads["counts"].get(f"contact-{KEY_A.lower()}", 0) == 1
+
+        # Re-add the contact
+        await _insert_contact(KEY_A, "Alice Returns")
+
+        # Messages re-surface with the re-added contact
+        msgs = await MessageRepository.get_all(msg_type="PRIV", conversation_key=KEY_A)
+        assert len(msgs) == 1
+        unreads = await MessageRepository.get_unread_counts()
+        assert unreads["counts"].get(f"contact-{KEY_A.lower()}", 0) == 1
 
 
 class TestMarkRead:
@@ -348,7 +470,8 @@ class TestDeleteContact:
 
         with patch("app.routers.contacts.radio_manager") as mock_rm:
             mock_rm.is_connected = True
-            mock_rm.radio_operation = _noop_radio_operation(ClientBackend(mock_mc))
+            mock_rm.meshcore = mock_mc
+            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
 
             response = await client.delete(f"/api/contacts/{KEY_A}")
 
@@ -449,7 +572,7 @@ class TestRoutingOverride:
 
     @pytest.mark.asyncio
     async def test_set_explicit_routing_override(self, test_db, client):
-        await _insert_contact(KEY_A, last_path="11", last_path_len=1, out_path_hash_mode=0)
+        await _insert_contact(KEY_A, direct_path="11", direct_path_len=1, direct_path_hash_mode=0)
 
         with (
             patch("app.routers.contacts.radio_manager") as mock_rm,
@@ -464,8 +587,8 @@ class TestRoutingOverride:
         assert response.status_code == 200
         contact = await ContactRepository.get_by_key(KEY_A)
         assert contact is not None
-        assert contact.last_path == "11"
-        assert contact.last_path_len == 1
+        assert contact.direct_path == "11"
+        assert contact.direct_path_len == 1
         assert contact.route_override_path == "ae92f13e"
         assert contact.route_override_len == 2
         assert contact.route_override_hash_mode == 1
@@ -476,9 +599,9 @@ class TestRoutingOverride:
         await _insert_contact(
             KEY_A,
             on_radio=True,
-            last_path="11",
-            last_path_len=1,
-            out_path_hash_mode=0,
+            direct_path="11",
+            direct_path_len=1,
+            direct_path_hash_mode=0,
         )
 
         mock_mc = MagicMock()
@@ -491,7 +614,7 @@ class TestRoutingOverride:
             patch("app.websocket.broadcast_event"),
         ):
             mock_rm.is_connected = True
-            mock_rm.radio_operation = _noop_radio_operation(ClientBackend(mock_mc))
+            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
             response = await client.post(
                 f"/api/contacts/{KEY_A}/routing-override",
                 json={"route": "-1"},
@@ -506,16 +629,17 @@ class TestRoutingOverride:
         contact = await ContactRepository.get_by_key(KEY_A)
         assert contact is not None
         assert contact.route_override_len == -1
-        assert contact.last_path == "11"
-        assert contact.last_path_len == 1
+        assert contact.direct_path == "11"
+        assert contact.direct_path_len == 1
 
     @pytest.mark.asyncio
-    async def test_blank_route_clears_override_and_resets_learned_path(self, test_db, client):
+    async def test_blank_route_clears_override_and_preserves_learned_path(self, test_db, client):
         await _insert_contact(
             KEY_A,
-            last_path="11",
-            last_path_len=1,
-            out_path_hash_mode=0,
+            direct_path="11",
+            direct_path_len=1,
+            direct_path_hash_mode=0,
+            direct_path_updated_at=1700000000,
             route_override_path="ae92f13e",
             route_override_len=2,
             route_override_hash_mode=1,
@@ -535,9 +659,10 @@ class TestRoutingOverride:
         contact = await ContactRepository.get_by_key(KEY_A)
         assert contact is not None
         assert contact.route_override_len is None
-        assert contact.last_path == ""
-        assert contact.last_path_len == -1
-        assert contact.out_path_hash_mode == -1
+        assert contact.direct_path == "11"
+        assert contact.direct_path_len == 1
+        assert contact.direct_path_hash_mode == 0
+        assert contact.direct_path_updated_at == 1700000000
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_explicit_route(self, test_db, client):
@@ -550,3 +675,89 @@ class TestRoutingOverride:
 
         assert response.status_code == 400
         assert "same width" in response.json()["detail"].lower()
+
+
+class TestContactTelemetry:
+    """Tests for on-demand contact telemetry endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_telemetry_happy_path(self, test_db, client):
+        """Successful telemetry request returns sensors and persists history."""
+        await _insert_contact(KEY_A, name="Alice")
+
+        mock_mc = MagicMock()
+        mock_mc.commands.add_contact = AsyncMock(return_value=_radio_result())
+        mock_mc.commands.req_telemetry_sync = AsyncMock(
+            return_value=[
+                {"channel": 1, "type": "voltage", "value": 3.7},
+                {"channel": 1, "type": "temperature", "value": 22.5},
+            ]
+        )
+
+        with (
+            patch("app.routers.contacts.radio_manager") as mock_rm,
+            patch("app.websocket.broadcast_event"),
+        ):
+            mock_rm.is_connected = True
+            mock_rm.require_connected = MagicMock()
+            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+
+            response = await client.post(f"/api/contacts/{KEY_A}/telemetry")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["sensors"]) == 2
+        assert data["sensors"][0]["type_name"] == "voltage"
+        assert data["sensors"][0]["value"] == 3.7
+        assert data["fetched_at"] > 0
+        assert len(data["telemetry_history"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_telemetry_timeout_returns_504(self, test_db, client):
+        """No response from contact returns 504."""
+        await _insert_contact(KEY_A)
+
+        mock_mc = MagicMock()
+        mock_mc.commands.add_contact = AsyncMock(return_value=_radio_result())
+        mock_mc.commands.req_telemetry_sync = AsyncMock(return_value=None)
+
+        with (
+            patch("app.routers.contacts.radio_manager") as mock_rm,
+        ):
+            mock_rm.is_connected = True
+            mock_rm.require_connected = MagicMock()
+            mock_rm.radio_operation = _noop_radio_operation(mock_mc)
+
+            response = await client.post(f"/api/contacts/{KEY_A}/telemetry")
+
+        assert response.status_code == 504
+
+    @pytest.mark.asyncio
+    async def test_telemetry_history_endpoint(self, test_db, client):
+        """History endpoint returns stored telemetry snapshots."""
+        import time
+
+        from app.repository.contact_telemetry import ContactTelemetryRepository
+
+        await _insert_contact(KEY_A)
+        now = int(time.time())
+        await ContactTelemetryRepository.record(
+            KEY_A, now, {"lpp_sensors": [{"channel": 1, "type_name": "voltage", "value": 3.6}]}
+        )
+
+        response = await client.get(f"/api/contacts/{KEY_A}/telemetry-history")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["data"]["lpp_sensors"][0]["value"] == 3.6
+
+    @pytest.mark.asyncio
+    async def test_telemetry_contact_not_found(self, test_db, client):
+        """Telemetry for non-existent contact returns 404."""
+        with patch("app.routers.contacts.radio_manager") as mock_rm:
+            mock_rm.is_connected = True
+            mock_rm.require_connected = MagicMock()
+
+            response = await client.post(f"/api/contacts/{KEY_A}/telemetry")
+
+        assert response.status_code == 404

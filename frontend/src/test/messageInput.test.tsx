@@ -9,11 +9,17 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { MessageInput } from '../components/MessageInput';
+import { toast } from '../components/ui/sonner';
 
 // Mock sonner (toast)
 vi.mock('../components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
+
+const mockToast = toast as unknown as {
+  success: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+};
 
 const textEncoder = new TextEncoder();
 
@@ -45,7 +51,7 @@ describe('MessageInput', () => {
   }
 
   function getInput() {
-    return screen.getByPlaceholderText('Type a message...') as HTMLInputElement;
+    return screen.getByPlaceholderText('Type a message...') as HTMLTextAreaElement;
   }
 
   function getSendButton() {
@@ -180,6 +186,26 @@ describe('MessageInput', () => {
 
       // Button is still enabled — canSubmit only checks non-empty text
       expect(getSendButton()).toBeEnabled();
+    });
+  });
+
+  describe('send failure toasts', () => {
+    it('shows the radio no-response toast when the send outcome is unknown', async () => {
+      onSend.mockRejectedValueOnce(
+        new Error(
+          'Send command was issued to the radio, but no response was heard back. The message may or may not have sent successfully.'
+        )
+      );
+      renderInput({ conversationType: 'contact' });
+
+      fireEvent.change(getInput(), { target: { value: 'Hello' } });
+      fireEvent.click(getSendButton());
+
+      expect(await screen.findByDisplayValue('Hello')).toBeTruthy();
+      expect(mockToast.error).toHaveBeenCalledWith('Radio did not confirm send', {
+        description:
+          'Send command was issued to the radio, but no response was heard back. The message may or may not have sent successfully.',
+      });
     });
   });
 });

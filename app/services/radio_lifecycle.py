@@ -1,10 +1,28 @@
 import asyncio
 import logging
+from datetime import UTC, datetime
+
+from app.radio_backend import RadioBackend
 
 logger = logging.getLogger(__name__)
 
 POST_CONNECT_SETUP_TIMEOUT_SECONDS = 300
 POST_CONNECT_SETUP_MAX_ATTEMPTS = 2
+
+
+def _clean_device_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _decode_fixed_string(raw: bytes, start: int, length: int) -> str | None:
+    if len(raw) < start:
+        return None
+    return _clean_device_string(
+        raw[start : start + length].decode("utf-8", "ignore").replace("\0", "")
+    )
 
 
 async def run_post_connect_setup(radio_manager) -> None:
@@ -17,6 +35,7 @@ async def run_post_connect_setup(radio_manager) -> None:
         start_message_polling,
         start_periodic_advert,
         start_periodic_sync,
+        start_telemetry_collect,
         sync_and_offload_all,
         sync_radio_time,
     )
@@ -44,15 +63,17 @@ async def run_post_connect_setup(radio_manager) -> None:
                 if not be:
                     return
 
+                from app.config import settings as app_settings_config
+
                 # Register event handlers so RX packets (RX_LOG_DATA, CONTACT_MSG_RECV, etc.)
                 # are stored and broadcast. ClientBackend subscribes on meshcore; SpiBackend
                 # subscribes on its _event_bus (fed by _on_raw_packet).
-                register_event_handlers(be)
+                register_event_handlers(mc)
 
-                await export_and_store_private_key(be)
+                await export_and_store_private_key(mc)
 
-                # Sync radio clock with system time (use current backend after lock)
-                await sync_radio_time(be)
+                # Sync radio clock with system time (use current raw mc after lock)
+                await sync_radio_time(mc)
 
                 # Apply flood scope from settings (best-effort; older firmware
                 # may not support set_flood_scope)
@@ -62,7 +83,7 @@ async def run_post_connect_setup(radio_manager) -> None:
                 app_settings = await AppSettingsRepository.get()
                 scope = normalize_region_scope(app_settings.flood_scope)
                 try:
-                    if mc is not None:
+                    if mc is not None and not isinstance(mc, RadioBackend):
                         await mc.commands.set_flood_scope(scope if scope else "")
                     else:
                         await be.set_flood_scope(scope if scope else "")
@@ -72,10 +93,15 @@ async def run_post_connect_setup(radio_manager) -> None:
 
                 # Query device capabilities (max_channels, path_hash_mode).
                 # MeshCore path uses mc.commands + optional raw-frame fallback; SPI uses backend.
+                radio_manager.device_info_loaded = False
+                radio_manager.max_contacts = None
+                radio_manager.device_model = None
+                radio_manager.firmware_build = None
+                radio_manager.firmware_version = None
                 radio_manager.max_channels = 40
                 radio_manager.path_hash_mode = 0
                 radio_manager.path_hash_mode_supported = False
-                if mc is not None:
+                if mc is not None and not isinstance(mc, RadioBackend):
                     reader = mc._reader
                     _original_handle_rx = reader.handle_rx
                     _captured_frame: list[bytes] = []
@@ -90,21 +116,60 @@ async def run_post_connect_setup(radio_manager) -> None:
                     reader.handle_rx = _capture_handle_rx
                     try:
                         device_query = await mc.commands.send_device_query()
-                        if device_query and "max_channels" in device_query.payload:
-                            radio_manager.max_channels = max(
-                                1, int(device_query.payload["max_channels"])
-                            )
-                        if device_query and "path_hash_mode" in device_query.payload:
-                            radio_manager.path_hash_mode = device_query.payload["path_hash_mode"]
+                        payload = (
+                            device_query.payload
+                            if device_query is not None and isinstance(device_query.payload, dict)
+                            else {}
+                        )
+
+                        payload_max_contacts = payload.get("max_contacts")
+                        if isinstance(payload_max_contacts, int):
+                            radio_manager.max_contacts = max(1, payload_max_contacts)
+
+                        payload_max_channels = payload.get("max_channels")
+                        if isinstance(payload_max_channels, int):
+                            radio_manager.max_channels = max(1, payload_max_channels)
+
+                        radio_manager.device_model = _clean_device_string(payload.get("model"))
+                        radio_manager.firmware_build = _clean_device_string(payload.get("fw_build"))
+                        radio_manager.firmware_version = _clean_device_string(payload.get("ver"))
+
+                        fw_ver = payload.get("fw ver")
+                        payload_reports_device_info = isinstance(fw_ver, int) and fw_ver >= 3
+                        if payload_reports_device_info:
+                            radio_manager.device_info_loaded = True
+
+                        if "path_hash_mode" in payload and isinstance(
+                            payload["path_hash_mode"], int
+                        ):
+                            radio_manager.path_hash_mode = payload["path_hash_mode"]
                             radio_manager.path_hash_mode_supported = True
-                        elif _captured_frame:
-                            # Raw-frame fallback:
-                            # byte 1 = fw_ver, byte 3 = max_channels, byte 81 = path_hash_mode
+
+                        if _captured_frame:
+                            # Raw-frame fallback / completion:
+                            # byte 1 = fw_ver, byte 2 = max_contacts/2, byte 3 = max_channels,
+                            # bytes 8:20 = fw_build, 20:60 = model, 60:80 = ver, byte 81 = path_hash_mode
                             raw = _captured_frame[-1]
                             fw_ver = raw[1] if len(raw) > 1 else 0
-                            if fw_ver >= 3 and len(raw) >= 4:
-                                radio_manager.max_channels = max(1, raw[3])
-                            if fw_ver >= 10 and len(raw) >= 82:
+                            if fw_ver >= 3:
+                                radio_manager.device_info_loaded = True
+                                if radio_manager.max_contacts is None and len(raw) >= 3:
+                                    radio_manager.max_contacts = max(1, raw[2] * 2)
+                                if len(raw) >= 4 and not isinstance(payload_max_channels, int):
+                                    radio_manager.max_channels = max(1, raw[3])
+                                if radio_manager.firmware_build is None:
+                                    radio_manager.firmware_build = _decode_fixed_string(raw, 8, 12)
+                                if radio_manager.device_model is None:
+                                    radio_manager.device_model = _decode_fixed_string(raw, 20, 40)
+                                if radio_manager.firmware_version is None:
+                                    radio_manager.firmware_version = _decode_fixed_string(
+                                        raw, 60, 20
+                                    )
+                            if (
+                                not radio_manager.path_hash_mode_supported
+                                and fw_ver >= 10
+                                and len(raw) >= 82
+                            ):
                                 radio_manager.path_hash_mode = raw[81]
                                 radio_manager.path_hash_mode_supported = True
                                 logger.warning(
@@ -123,6 +188,36 @@ async def run_post_connect_setup(radio_manager) -> None:
                             )
                         else:
                             logger.debug("Firmware does not report path_hash_mode")
+                        if radio_manager.device_info_loaded:
+                            logger.info(
+                                "Radio device info: model=%s build=%s version=%s max_contacts=%s max_channels=%d",
+                                radio_manager.device_model or "unknown",
+                                radio_manager.firmware_build or "unknown",
+                                radio_manager.firmware_version or "unknown",
+                                radio_manager.max_contacts
+                                if radio_manager.max_contacts is not None
+                                else "unknown",
+                                radio_manager.max_channels,
+                            )
+                            try:
+                                time_result = await mc.commands.get_time()
+                                radio_time = (
+                                    time_result.payload.get("time")
+                                    if time_result is not None and time_result.payload
+                                    else None
+                                )
+                                if isinstance(radio_time, int):
+                                    logger.info(
+                                        "Radio clock at connect: epoch=%d utc=%s",
+                                        radio_time,
+                                        datetime.fromtimestamp(radio_time, UTC).strftime(
+                                            "%Y-%m-%d %H:%M:%S UTC"
+                                        ),
+                                    )
+                            except Exception as exc:
+                                logger.debug(
+                                    "Failed to query radio clock after device info: %s", exc
+                                )
                         logger.info("Max channel slots: %d", radio_manager.max_channels)
                     except Exception as exc:
                         logger.debug("Failed to query device info capabilities: %s", exc)
@@ -132,44 +227,66 @@ async def run_post_connect_setup(radio_manager) -> None:
                     try:
                         device_query = await be.send_device_query()
                         payload = (device_query.payload or {}) if device_query else {}
-                        radio_manager.max_channels = max(1, int(payload.get("max_channels", 8)))
+                        payload_max_channels = payload.get("max_channels")
+                        radio_manager.max_channels = max(
+                            1, int(payload_max_channels if payload_max_channels is not None else 8)
+                        )
                         if "path_hash_mode" in payload:
                             radio_manager.path_hash_mode = payload["path_hash_mode"]
                             radio_manager.path_hash_mode_supported = True
-                        logger.info("Path hash mode: %d (supported)", radio_manager.path_hash_mode)
+                            logger.info(
+                                "Path hash mode: %d (supported)", radio_manager.path_hash_mode
+                            )
                         logger.info("Max channel slots: %d", radio_manager.max_channels)
                     except Exception as exc:
                         logger.debug("Failed to query device info (SPI): %s", exc)
 
-                # Sync contacts/channels from radio to DB and clear radio
-                logger.info("Syncing and offloading radio data...")
-                result = await sync_and_offload_all(be)
-                logger.info("Sync complete: %s", result)
-
-                # Send advertisement to announce our presence (if enabled and not throttled)
-                if await send_advertisement(be):
-                    logger.info("Advertisement sent")
+                if app_settings_config.skip_post_connect_sync:
+                    logger.info(
+                        "Skipping sync/offload/advert/drain (MESHCORE_SKIP_POST_CONNECT_SYNC)"
+                    )
                 else:
-                    logger.debug("Advertisement skipped (disabled or throttled)")
+                    # Sync contacts/channels from radio to DB and clear radio
+                    logger.info("Syncing and offloading radio data...")
+                    result = await sync_and_offload_all(be)
+                    c = result.get("contacts", {})
+                    ch = result.get("channels", {})
+                    logger.info(
+                        "Sync complete: %d contacts synced, %d channels synced, %d channels cleared",
+                        c.get("synced", 0),
+                        ch.get("synced", 0),
+                        ch.get("cleared", 0),
+                    )
 
-                # Drain any messages that were queued before we connected.
-                # This must happen BEFORE starting auto-fetch, otherwise both
-                # compete on get_msg() with interleaved radio I/O.
-                drained = await drain_pending_messages(be)
-                if drained > 0:
-                    logger.info("Drained %d pending message(s)", drained)
-                radio_manager.clear_pending_message_channel_slots()
+                    # Send advertisement to announce our presence (if enabled and not throttled)
+                    if await send_advertisement(be):
+                        logger.info("Advertisement sent")
+                    else:
+                        logger.debug("Advertisement skipped (disabled or throttled)")
 
-                await be.start_auto_message_fetching()
+                    # Drain any messages that were queued before we connected.
+                    # This must happen BEFORE starting auto-fetch, otherwise both
+                    # compete on get_msg() with interleaved radio I/O.
+                    drained = await drain_pending_messages(be)
+                    if drained > 0:
+                        logger.info("Drained %d pending message(s)", drained)
+                    radio_manager.clear_pending_message_channel_slots()
+
+                if mc is not None:
+                    await mc.start_auto_message_fetching()
+                else:
+                    await be.start_auto_message_fetching()
                 logger.info("Auto message fetching started")
             finally:
                 radio_manager._release_operation_lock("post_connect_setup")
 
-            # Start background tasks AFTER releasing the operation lock.
-            # These tasks acquire their own locks when they need radio access.
-            start_periodic_sync()
-            start_periodic_advert()
-            start_message_polling()
+            if not app_settings_config.skip_post_connect_sync:
+                # Start background tasks AFTER releasing the operation lock.
+                # These tasks acquire their own locks when they need radio access.
+                start_periodic_sync()
+                start_periodic_advert()
+                start_message_polling()
+                start_telemetry_collect()
 
             radio_manager._setup_complete = True
         finally:
@@ -194,7 +311,7 @@ async def prepare_connected_radio(radio_manager, *, broadcast_on_success: bool =
         try:
             await radio_manager.post_connect_setup()
             break
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             if attempt < POST_CONNECT_SETUP_MAX_ATTEMPTS:
                 logger.warning(
                     "Post-connect setup timed out after %ds on attempt %d/%d; retrying once",

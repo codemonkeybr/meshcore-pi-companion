@@ -2,26 +2,31 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 from meshcore import EventType
 from pydantic import ValidationError
 
-from app.backends.client_backend import ClientBackend
+from app.models import CONTACT_TYPE_REPEATER, Contact, RadioTraceHopRequest, RadioTraceRequest
 from app.radio import RadioManager, radio_manager
 from app.routers.radio import (
     PrivateKeyUpdate,
+    RadioAdvertiseRequest,
     RadioConfigResponse,
     RadioConfigUpdate,
+    RadioDiscoveryRequest,
     RadioSettings,
     disconnect_radio,
+    discover_mesh,
+    get_private_key,
     get_radio_config,
     reboot_radio,
     reconnect_radio,
     send_advertisement,
     set_private_key,
+    trace_path,
     update_radio_config,
 )
 from app.services.radio_runtime import RadioRuntime
@@ -51,10 +56,10 @@ def _runtime(manager):
 @pytest.fixture(autouse=True)
 def _reset_radio_state():
     """Save/restore radio_manager state so tests don't leak."""
-    prev = radio_manager._backend
+    prev = radio_manager._meshcore
     prev_lock = radio_manager._operation_lock
     yield
-    radio_manager._backend = prev
+    radio_manager._meshcore = prev
     radio_manager._operation_lock = prev_lock
 
 
@@ -72,6 +77,7 @@ def _mock_meshcore_with_info():
         "radio_sf": 7,
         "radio_cr": 5,
         "adv_loc_policy": 2,
+        "multi_acks": 0,
     }
     mc.commands = MagicMock()
     mc.commands.set_name = AsyncMock()
@@ -79,8 +85,12 @@ def _mock_meshcore_with_info():
     mc.commands.set_tx_power = AsyncMock()
     mc.commands.set_radio = AsyncMock()
     mc.commands.set_advert_loc_policy = AsyncMock(return_value=_radio_result())
+    mc.commands.set_multi_acks = AsyncMock(return_value=_radio_result())
     mc.commands.send_appstart = AsyncMock()
     mc.commands.import_private_key = AsyncMock(return_value=_radio_result())
+    mc.commands.send_node_discover_req = AsyncMock(return_value=_radio_result())
+    mc.stop_auto_message_fetching = AsyncMock()
+    mc.start_auto_message_fetching = AsyncMock()
     return mc
 
 
@@ -88,7 +98,7 @@ class TestGetRadioConfig:
     @pytest.mark.asyncio
     async def test_maps_self_info_to_response(self):
         mc = _mock_meshcore_with_info()
-        with patch("app.routers.radio.require_connected", return_value=mc):
+        with patch("app.routers.radio.radio_manager.require_connected", return_value=mc):
             response = await get_radio_config()
 
         assert response.public_key == "aa" * 32
@@ -98,26 +108,37 @@ class TestGetRadioConfig:
         assert response.radio.freq == 910.525
         assert response.radio.cr == 5
         assert response.advert_location_source == "current"
+        assert response.multi_acks_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_maps_multi_acks_to_response(self):
+        mc = _mock_meshcore_with_info()
+        mc.self_info["multi_acks"] = 1
+
+        with patch("app.routers.radio.radio_manager.require_connected", return_value=mc):
+            response = await get_radio_config()
+
+        assert response.multi_acks_enabled is True
 
     @pytest.mark.asyncio
     async def test_maps_any_nonzero_advert_location_policy_to_current(self):
         mc = _mock_meshcore_with_info()
         mc.self_info["adv_loc_policy"] = 1
 
-        with patch("app.routers.radio.require_connected", return_value=mc):
+        with patch("app.routers.radio.radio_manager.require_connected", return_value=mc):
             response = await get_radio_config()
 
         assert response.advert_location_source == "current"
 
     @pytest.mark.asyncio
-    async def test_returns_503_when_self_info_missing(self):
+    async def test_returns_423_when_self_info_missing(self):
         mc = MagicMock()
         mc.self_info = None
-        with patch("app.routers.radio.require_connected", return_value=mc):
+        with patch("app.routers.radio.radio_manager.require_connected", return_value=mc):
             with pytest.raises(HTTPException) as exc:
                 await get_radio_config()
 
-        assert exc.value.status_code == 503
+        assert exc.value.status_code == 423
 
 
 class TestUpdateRadioConfig:
@@ -135,8 +156,8 @@ class TestUpdateRadioConfig:
         )
 
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.radio.sync_radio_time", new_callable=AsyncMock) as mock_sync_time,
             patch(
                 "app.routers.radio.get_radio_config", new_callable=AsyncMock, return_value=expected
@@ -166,11 +187,12 @@ class TestUpdateRadioConfig:
             path_hash_mode=0,
             path_hash_mode_supported=False,
             advert_location_source="current",
+            multi_acks_enabled=False,
         )
 
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch("app.routers.radio.sync_radio_time", new_callable=AsyncMock),
             patch(
                 "app.routers.radio.get_radio_config", new_callable=AsyncMock, return_value=expected
@@ -179,6 +201,36 @@ class TestUpdateRadioConfig:
             result = await update_radio_config(RadioConfigUpdate(advert_location_source="current"))
 
         mc.commands.set_advert_loc_policy.assert_awaited_once_with(1)
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_updates_multi_acks_enabled(self):
+        mc = _mock_meshcore_with_info()
+        expected = RadioConfigResponse(
+            public_key="aa" * 32,
+            name="NodeA",
+            lat=10.0,
+            lon=20.0,
+            tx_power=17,
+            max_tx_power=22,
+            radio=RadioSettings(freq=910.525, bw=62.5, sf=7, cr=5),
+            path_hash_mode=0,
+            path_hash_mode_supported=False,
+            advert_location_source="current",
+            multi_acks_enabled=True,
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.sync_radio_time", new_callable=AsyncMock),
+            patch(
+                "app.routers.radio.get_radio_config", new_callable=AsyncMock, return_value=expected
+            ),
+        ):
+            result = await update_radio_config(RadioConfigUpdate(multi_acks_enabled=True))
+
+        mc.commands.set_multi_acks.assert_awaited_once_with(1)
         assert result == expected
 
     def test_model_rejects_negative_path_hash_mode(self):
@@ -201,8 +253,8 @@ class TestUpdateRadioConfig:
         mc = _mock_meshcore_with_info()
 
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch.object(radio_manager, "path_hash_mode_supported", False),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -218,25 +270,57 @@ class TestUpdateRadioConfig:
         )
 
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch.object(radio_manager, "path_hash_mode_supported", True),
             patch.object(radio_manager, "path_hash_mode", 0),
         ):
             with pytest.raises(HTTPException) as exc:
                 await update_radio_config(RadioConfigUpdate(path_hash_mode=1))
 
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 422
         assert "Failed to set path hash mode" in str(exc.value.detail)
         assert radio_manager.path_hash_mode == 0
         mc.commands.send_appstart.assert_not_awaited()
+
+
+class TestPrivateKeyExport:
+    @pytest.mark.asyncio
+    async def test_returns_403_when_export_disabled(self):
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.enable_local_private_key_export = False
+            with pytest.raises(HTTPException) as exc:
+                await get_private_key()
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_no_key_available(self):
+        with (
+            patch("app.config.settings") as mock_settings,
+            patch("app.keystore.get_private_key", return_value=None),
+        ):
+            mock_settings.enable_local_private_key_export = True
+            with pytest.raises(HTTPException) as exc:
+                await get_private_key()
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_returns_key_hex_when_enabled_and_available(self):
+        key_bytes = bytes.fromhex("ab" * 64)
+        with (
+            patch("app.config.settings") as mock_settings,
+            patch("app.keystore.get_private_key", return_value=key_bytes),
+        ):
+            mock_settings.enable_local_private_key_export = True
+            result = await get_private_key()
+        assert result == {"private_key": "ab" * 64}
 
 
 class TestPrivateKeyImport:
     @pytest.mark.asyncio
     async def test_rejects_invalid_hex(self):
         mc = _mock_meshcore_with_info()
-        with patch("app.routers.radio.require_connected", return_value=mc):
+        with patch("app.routers.radio.radio_manager.require_connected", return_value=mc):
             with pytest.raises(HTTPException) as exc:
                 await set_private_key(PrivateKeyUpdate(private_key="not-hex"))
 
@@ -249,21 +333,533 @@ class TestPrivateKeyImport:
             return_value=_radio_result(EventType.ERROR, {"error": "failed"})
         )
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
         ):
             with pytest.raises(HTTPException) as exc:
                 await set_private_key(PrivateKeyUpdate(private_key="aa" * 64))
 
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 422
+
+
+class TestDiscoverMesh:
+    @pytest.mark.asyncio
+    async def test_discovers_repeaters_and_deduplicates_by_pubkey(self):
+        mc = _mock_meshcore_with_info()
+        callbacks = {}
+
+        def _subscribe(event_type, callback, attribute_filters=None):
+            callbacks["event_type"] = event_type
+            callbacks["callback"] = callback
+            callbacks["filters"] = attribute_filters
+            subscription = MagicMock()
+            subscription.unsubscribe = MagicMock()
+            callbacks["subscription"] = subscription
+            return subscription
+
+        async def _send_node_discover_req(filter_bits, prefix_only=True, tag=None, since=None):
+            assert filter_bits == (1 << 2)
+            assert prefix_only is False
+            assert since is None
+            callbacks["callback"](
+                _radio_result(
+                    payload={
+                        "pubkey": "11" * 32,
+                        "node_type": 2,
+                        "SNR": 7.5,
+                        "RSSI": -101,
+                        "SNR_in": 4.0,
+                    }
+                )
+            )
+            callbacks["callback"](
+                _radio_result(
+                    payload={
+                        "pubkey": "11" * 32,
+                        "node_type": 2,
+                        "SNR": 9.0,
+                        "RSSI": -99,
+                        "SNR_in": 3.0,
+                    }
+                )
+            )
+            callbacks["callback"](
+                _radio_result(
+                    payload={
+                        "pubkey": "22" * 32,
+                        "node_type": 2,
+                        "SNR": 2.5,
+                        "RSSI": -110,
+                        "SNR_in": 1.0,
+                    }
+                )
+            )
+            return _radio_result()
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+        mc.commands.send_node_discover_req = AsyncMock(side_effect=_send_node_discover_req)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.DISCOVERY_WINDOW_SECONDS", 0.01),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("app.routers.radio.ContactRepository.upsert", new_callable=AsyncMock),
+            patch(
+                "app.routers.radio.promote_prefix_contacts_for_contact",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "app.routers.radio.reconcile_contact_messages",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch("app.routers.radio.broadcast_event"),
+        ):
+            response = await discover_mesh(RadioDiscoveryRequest(target="repeaters"))
+
+        assert response.target == "repeaters"
+        assert len(response.results) == 2
+        assert response.results[0].public_key == "11" * 32
+        assert response.results[0].node_type == "repeater"
+        assert response.results[0].heard_count == 2
+        assert response.results[0].local_snr == 9.0
+        assert response.results[0].local_rssi == -99
+        assert response.results[0].remote_snr == 4.0
+        assert callbacks["event_type"] == EventType.DISCOVER_RESPONSE
+        assert callbacks["subscription"].unsubscribe.called
+        mc.stop_auto_message_fetching.assert_awaited_once()
+        mc.start_auto_message_fetching.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_persists_newly_discovered_nodes_and_broadcasts_contact_updates(self):
+        mc = _mock_meshcore_with_info()
+        created_contact = Contact(
+            public_key="44" * 32,
+            name=None,
+            type=2,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=123,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=123,
+        )
+
+        def _subscribe(_event_type, callback, _attribute_filters=None):
+            callback(
+                _radio_result(
+                    payload={
+                        "pubkey": "44" * 32,
+                        "node_type": 2,
+                        "SNR": 6.0,
+                        "RSSI": -100,
+                        "SNR_in": 2.5,
+                    }
+                )
+            )
+            return MagicMock(unsubscribe=MagicMock())
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.DISCOVERY_WINDOW_SECONDS", 0.01),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                # 1st: _persist check (not found), 2nd: _persist re-fetch (created),
+                # 3rd: _attach_known_names lookup
+                side_effect=[None, created_contact, created_contact],
+            ) as mock_get_by_key,
+            patch(
+                "app.routers.radio.ContactRepository.upsert", new_callable=AsyncMock
+            ) as mock_upsert,
+            patch(
+                "app.routers.radio.promote_prefix_contacts_for_contact",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_promote,
+            patch(
+                "app.routers.radio.reconcile_contact_messages",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch("app.routers.radio.broadcast_event") as mock_broadcast,
+        ):
+            response = await discover_mesh(RadioDiscoveryRequest(target="repeaters"))
+
+        assert len(response.results) == 1
+        assert response.results[0].name is None  # created_contact has no name
+        mock_get_by_key.assert_awaited()
+        mock_upsert.assert_awaited_once()
+        mock_promote.assert_awaited_once_with(public_key="44" * 32, log=ANY)
+        upsert_arg = mock_upsert.await_args.args[0]
+        assert upsert_arg.public_key == "44" * 32
+        assert upsert_arg.type == 2
+        assert upsert_arg.on_radio is False
+        mock_broadcast.assert_called_once_with("contact", created_contact.model_dump())
+
+    @pytest.mark.asyncio
+    async def test_does_not_reinsert_existing_discovered_nodes(self):
+        mc = _mock_meshcore_with_info()
+        existing_contact = Contact(
+            public_key="55" * 32,
+            name="Known",
+            type=4,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=123,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=123,
+        )
+
+        def _subscribe(_event_type, callback, _attribute_filters=None):
+            callback(
+                _radio_result(
+                    payload={
+                        "pubkey": "55" * 32,
+                        "node_type": 4,
+                        "SNR": 5.0,
+                        "RSSI": -102,
+                        "SNR_in": 1.5,
+                    }
+                )
+            )
+            return MagicMock(unsubscribe=MagicMock())
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.DISCOVERY_WINDOW_SECONDS", 0.01),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=existing_contact,
+            ),
+            patch(
+                "app.routers.radio.ContactRepository.upsert", new_callable=AsyncMock
+            ) as mock_upsert,
+            patch("app.routers.radio.broadcast_event") as mock_broadcast,
+        ):
+            await discover_mesh(RadioDiscoveryRequest(target="sensors"))
+
+        mock_upsert.assert_not_awaited()
+        mock_broadcast.assert_not_called()
+
+
+class TestTracePath:
+    @pytest.mark.asyncio
+    async def test_returns_resolved_nodes_for_multi_hop_trace(self):
+        mc = _mock_meshcore_with_info()
+        repeater_a = Contact(
+            public_key="11" * 32,
+            name="Relay Alpha",
+            type=CONTACT_TYPE_REPEATER,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=None,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=None,
+        )
+        repeater_b = Contact(
+            public_key="22" * 32,
+            name="Relay Beta",
+            type=CONTACT_TYPE_REPEATER,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=None,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=None,
+        )
+        mc.commands.send_trace = AsyncMock(
+            return_value=_radio_result(EventType.MSG_SENT, {"suggested_timeout": 4000})
+        )
+        mc.wait_for_event = AsyncMock(
+            return_value=MagicMock(
+                payload={
+                    "path_len": 2,
+                    "path": [
+                        {"hash": "11111111", "snr": 7.5},
+                        {"hash": "22222222", "snr": 3.25},
+                        {"snr": 5.0},
+                    ],
+                }
+            )
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key", new_callable=AsyncMock
+            ) as mock_get,
+            patch("app.routers.radio.radio_manager") as mock_rm,
+        ):
+            mock_get.side_effect = [repeater_a, repeater_b]
+            mock_rm.radio_operation = _noop_radio_operation(mc)
+            response = await trace_path(
+                RadioTraceRequest(
+                    hop_hash_bytes=4,
+                    hops=[
+                        RadioTraceHopRequest(public_key=repeater_a.public_key),
+                        RadioTraceHopRequest(public_key=repeater_b.public_key),
+                    ],
+                )
+            )
+
+        mc.commands.send_trace.assert_awaited_once_with(
+            path="11111111,22222222",
+            tag=ANY,
+            flags=2,
+        )
+        mc.wait_for_event.assert_awaited_once()
+        assert response.path_len == 2
+        assert response.nodes[0].name == "Relay Alpha"
+        assert response.nodes[0].snr == 7.5
+        assert response.nodes[1].name == "Relay Beta"
+        assert response.nodes[1].observed_hash == "22222222"
+        assert response.nodes[2].role == "local"
+        assert response.nodes[2].public_key == "aa" * 32
+        assert response.nodes[2].observed_hash is None
+        assert response.nodes[2].snr == 5.0
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_repeater_nodes(self):
+        mc = _mock_meshcore_with_info()
+        non_repeater = Contact(
+            public_key="33" * 32,
+            name="Client",
+            type=1,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=None,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=None,
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key", new_callable=AsyncMock
+            ) as mock_get,
+        ):
+            mock_get.return_value = non_repeater
+            with pytest.raises(HTTPException) as exc:
+                await trace_path(
+                    RadioTraceRequest(
+                        hop_hash_bytes=4,
+                        hops=[RadioTraceHopRequest(public_key=non_repeater.public_key)],
+                    )
+                )
+
+        assert exc.value.status_code == 400
+        assert "not a repeater" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_returns_408_when_no_trace_response_is_heard(self):
+        mc = _mock_meshcore_with_info()
+        repeater = Contact(
+            public_key="44" * 32,
+            name="Relay",
+            type=CONTACT_TYPE_REPEATER,
+            flags=0,
+            direct_path=None,
+            direct_path_len=-1,
+            direct_path_hash_mode=-1,
+            last_advert=None,
+            lat=None,
+            lon=None,
+            last_seen=None,
+            on_radio=False,
+            last_contacted=None,
+            last_read_at=None,
+            first_seen=None,
+        )
+        mc.commands.send_trace = AsyncMock(
+            return_value=_radio_result(EventType.MSG_SENT, {"suggested_timeout": 1000})
+        )
+        mc.wait_for_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key", new_callable=AsyncMock
+            ) as mock_get,
+            patch("app.routers.radio.radio_manager") as mock_rm,
+        ):
+            mock_get.return_value = repeater
+            mock_rm.radio_operation = _noop_radio_operation(mc)
+            with pytest.raises(HTTPException) as exc:
+                await trace_path(
+                    RadioTraceRequest(
+                        hop_hash_bytes=4,
+                        hops=[RadioTraceHopRequest(public_key=repeater.public_key)],
+                    )
+                )
+
+        assert exc.value.status_code == 408
+        assert "No trace response heard" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_supports_custom_hops_with_shorter_hash_width(self):
+        mc = _mock_meshcore_with_info()
+        mc.commands.send_trace = AsyncMock(
+            return_value=_radio_result(EventType.MSG_SENT, {"suggested_timeout": 2500})
+        )
+        mc.wait_for_event = AsyncMock(
+            return_value=MagicMock(
+                payload={
+                    "path_len": 2,
+                    "path": [
+                        {"hash": "ae", "snr": 4.0},
+                        {"hash": "bf", "snr": 2.5},
+                        {"snr": 3.0},
+                    ],
+                }
+            )
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.radio_manager") as mock_rm,
+        ):
+            mock_rm.radio_operation = _noop_radio_operation(mc)
+            response = await trace_path(
+                RadioTraceRequest(
+                    hop_hash_bytes=1,
+                    hops=[
+                        RadioTraceHopRequest(hop_hex="ae"),
+                        RadioTraceHopRequest(hop_hex="bf"),
+                    ],
+                )
+            )
+
+        mc.commands.send_trace.assert_awaited_once_with(path="ae,bf", tag=ANY, flags=0)
+        assert response.nodes[0].role == "custom"
+        assert response.nodes[0].observed_hash == "ae"
+        assert response.nodes[1].role == "custom"
+        assert response.nodes[1].observed_hash == "bf"
+
+    @pytest.mark.asyncio
+    async def test_discovers_all_supported_types(self):
+        mc = _mock_meshcore_with_info()
+
+        def _subscribe(_event_type, callback, _attribute_filters=None):
+            callback(
+                _radio_result(
+                    payload={
+                        "pubkey": "33" * 32,
+                        "node_type": 4,
+                        "SNR": 5.0,
+                        "RSSI": -100,
+                        "SNR_in": 2.0,
+                    }
+                )
+            )
+            subscription = MagicMock()
+            subscription.unsubscribe = MagicMock()
+            return subscription
+
+        mc.subscribe = MagicMock(side_effect=_subscribe)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.DISCOVERY_WINDOW_SECONDS", 0.01),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("app.routers.radio.ContactRepository.upsert", new_callable=AsyncMock),
+            patch(
+                "app.routers.radio.promote_prefix_contacts_for_contact",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "app.routers.radio.reconcile_contact_messages",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch("app.routers.radio.broadcast_event"),
+        ):
+            response = await discover_mesh(RadioDiscoveryRequest(target="all"))
+
+        mc.commands.send_node_discover_req.assert_awaited_once()
+        assert mc.commands.send_node_discover_req.await_args.args[0] == (1 << 2) | (1 << 4)
+        assert response.results[0].node_type == "sensor"
+
+    @pytest.mark.asyncio
+    async def test_raises_when_discovery_request_fails(self):
+        mc = _mock_meshcore_with_info()
+        mc.subscribe = MagicMock(return_value=MagicMock(unsubscribe=MagicMock()))
+        mc.commands.send_node_discover_req = AsyncMock(
+            return_value=_radio_result(EventType.ERROR, {"error": "nope"})
+        )
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await discover_mesh(RadioDiscoveryRequest(target="sensors"))
+
+        assert exc.value.status_code == 422
+        assert exc.value.detail == "Failed to start mesh discovery"
 
     @pytest.mark.asyncio
     async def test_successful_import_refreshes_keystore(self):
         mc = _mock_meshcore_with_info()
         mc.commands.import_private_key = AsyncMock(return_value=_radio_result())
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch(
                 "app.keystore.export_and_store_private_key",
                 new_callable=AsyncMock,
@@ -280,8 +876,8 @@ class TestPrivateKeyImport:
         mc = _mock_meshcore_with_info()
         mc.commands.import_private_key = AsyncMock(return_value=_radio_result())
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch(
                 "app.keystore.export_and_store_private_key",
                 new_callable=AsyncMock,
@@ -291,7 +887,7 @@ class TestPrivateKeyImport:
             with pytest.raises(HTTPException) as exc:
                 await set_private_key(PrivateKeyUpdate(private_key="aa" * 64))
 
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 422
         assert "keystore" in exc.value.detail.lower()
         # Called twice: initial attempt + one retry
         assert mock_export.await_count == 2
@@ -301,8 +897,8 @@ class TestPrivateKeyImport:
         mc = _mock_meshcore_with_info()
         mc.commands.import_private_key = AsyncMock(return_value=_radio_result())
         with (
-            patch("app.routers.radio.require_connected", return_value=mc),
-            patch.object(radio_manager, "_backend", ClientBackend(mc) if mc else None),
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
             patch(
                 "app.keystore.export_and_store_private_key",
                 new_callable=AsyncMock,
@@ -318,9 +914,9 @@ class TestPrivateKeyImport:
 class TestAdvertise:
     @pytest.mark.asyncio
     async def test_raises_when_send_fails(self):
-        radio_manager._backend = ClientBackend(MagicMock())
+        radio_manager._meshcore = MagicMock()
         with (
-            patch("app.routers.radio.require_connected"),
+            patch("app.routers.radio.radio_manager.require_connected"),
             patch(
                 "app.routers.radio.do_send_advertisement",
                 new_callable=AsyncMock,
@@ -330,16 +926,53 @@ class TestAdvertise:
             with pytest.raises(HTTPException) as exc:
                 await send_advertisement()
 
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_flood_mode(self):
+        radio_manager._meshcore = MagicMock()
+        with (
+            patch("app.routers.radio.radio_manager.require_connected"),
+            patch(
+                "app.routers.radio.do_send_advertisement",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send,
+        ):
+            result = await send_advertisement()
+
+        assert result == {"status": "ok"}
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.kwargs["force"] is True
+        assert mock_send.await_args.kwargs["mode"] == "flood"
+
+    @pytest.mark.asyncio
+    async def test_accepts_zero_hop_mode(self):
+        radio_manager._meshcore = MagicMock()
+        with (
+            patch("app.routers.radio.radio_manager.require_connected"),
+            patch(
+                "app.routers.radio.do_send_advertisement",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send,
+        ):
+            result = await send_advertisement(RadioAdvertiseRequest(mode="zero_hop"))
+
+        assert result == {"status": "ok"}
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.kwargs["force"] is True
+        assert mock_send.await_args.kwargs["mode"] == "zero_hop"
 
     @pytest.mark.asyncio
     async def test_concurrent_advertise_calls_are_serialized(self):
         active = 0
         max_active = 0
 
-        async def fake_send(mc, *, force: bool):
+        async def fake_send(mc, *, force: bool, mode: str):
             nonlocal active, max_active
             assert force is True
+            assert mode == "flood"
             active += 1
             max_active = max(max_active, active)
             await asyncio.sleep(0.05)
@@ -347,9 +980,9 @@ class TestAdvertise:
             return True
 
         isolated_manager = RadioManager()
-        isolated_manager._backend = ClientBackend(MagicMock())
+        isolated_manager._meshcore = MagicMock()
         with (
-            patch("app.routers.radio.require_connected"),
+            patch("app.routers.radio.radio_manager.require_connected"),
             patch("app.routers.radio.radio_manager", _runtime(isolated_manager)),
             patch(
                 "app.routers.radio.do_send_advertisement",
@@ -370,7 +1003,8 @@ class TestRebootAndReconnect:
 
         mock_rm = MagicMock()
         mock_rm.is_connected = True
-        mock_rm.radio_operation = _noop_radio_operation(ClientBackend(mock_mc))
+        mock_rm.meshcore = mock_mc
+        mock_rm.radio_operation = _noop_radio_operation(mock_mc)
 
         with patch("app.routers.radio.radio_manager", _runtime(mock_rm)):
             result = await reboot_radio()
@@ -425,7 +1059,7 @@ class TestRebootAndReconnect:
         assert result["connected"] is True
 
     @pytest.mark.asyncio
-    async def test_reconnect_raises_503_on_failure(self):
+    async def test_reconnect_raises_423_on_failure(self):
         mock_rm = MagicMock()
         mock_rm.is_connected = False
         mock_rm.is_reconnecting = False
@@ -436,7 +1070,7 @@ class TestRebootAndReconnect:
             with pytest.raises(HTTPException) as exc:
                 await reconnect_radio()
 
-        assert exc.value.status_code == 503
+        assert exc.value.status_code == 423
 
     @pytest.mark.asyncio
     async def test_disconnect_pauses_connection_attempts_and_broadcasts_health(self):

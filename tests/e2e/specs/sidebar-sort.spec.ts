@@ -5,12 +5,14 @@ test.describe('Sidebar sort toggle', () => {
     await page.goto('/');
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    // There are multiple sort toggles (Channels, Contacts, Repeaters sections).
-    // Use .first() to target the Channels sort toggle.
-    // When sort is 'alpha', button text is "A-Z" and title is "Sort by recent".
-    // When sort is 'recent', button text is "⏱" and title is "Sort alphabetically".
-    const sortByRecent = page.getByTitle('Sort by recent').first();
-    const sortAlpha = page.getByTitle('Sort alphabetically').first();
+    // Sidebar sort is now tracked per section, so target the Channels control
+    // explicitly instead of assuming a shared global toggle.
+    const sortByRecent = page.getByRole('button', {
+      name: 'Sort Channels by recent',
+    });
+    const sortAlpha = page.getByRole('button', {
+      name: 'Sort Channels alphabetically',
+    });
 
     // Wait for at least one sort button to appear
     await expect(sortByRecent.or(sortAlpha)).toBeVisible({ timeout: 10_000 });

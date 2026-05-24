@@ -1,13 +1,17 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsModal } from '../components/SettingsModal';
 import type {
   AppSettings,
   AppSettingsUpdate,
+  Contact,
   HealthStatus,
+  RadioAdvertMode,
   RadioConfig,
   RadioConfigUpdate,
+  RadioDiscoveryResponse,
+  RadioDiscoveryTarget,
   StatisticsResponse,
 } from '../types';
 import type { SettingsSection } from '../components/settings/settingsConstants';
@@ -16,6 +20,13 @@ import {
   REOPEN_LAST_CONVERSATION_KEY,
 } from '../utils/lastViewedConversation';
 import { api } from '../api';
+import { DISTANCE_UNIT_KEY } from '../utils/distanceUnits';
+import {
+  DEFAULT_FONT_SCALE,
+  FONT_SCALE_KEY,
+  MAX_FONT_SCALE,
+  MIN_FONT_SCALE,
+} from '../utils/fontScale';
 
 const baseConfig: RadioConfig = {
   public_key: 'aa'.repeat(32),
@@ -33,6 +44,7 @@ const baseConfig: RadioConfig = {
   path_hash_mode: 0,
   path_hash_mode_supported: false,
   advert_location_source: 'current',
+  multi_acks_enabled: false,
 };
 
 const baseHealth: HealthStatus = {
@@ -48,19 +60,24 @@ const baseHealth: HealthStatus = {
 
 const baseSettings: AppSettings = {
   max_radio_contacts: 200,
-  favorites: [],
   auto_decrypt_dm_on_advert: false,
-  sidebar_sort_order: 'recent',
   last_message_times: {},
-  preferences_migrated: false,
+
   advert_interval: 0,
   last_advert_time: 0,
   flood_scope: '',
   blocked_keys: [],
   blocked_names: [],
+  discovery_blocked_types: [],
+  tracked_telemetry_repeaters: [],
+  tracked_telemetry_contacts: [],
+  auto_resend_channel: false,
+  telemetry_interval_hours: 8,
+  telemetry_routed_hourly: false,
 };
 
 function renderModal(overrides?: {
+  config?: RadioConfig | null;
   appSettings?: AppSettings;
   health?: HealthStatus;
   onSaveAppSettings?: (update: AppSettingsUpdate) => Promise<void>;
@@ -71,6 +88,12 @@ function renderModal(overrides?: {
   onReboot?: () => Promise<void>;
   onDisconnect?: () => Promise<void>;
   onReconnect?: () => Promise<void>;
+  onAdvertise?: (mode: RadioAdvertMode) => Promise<void>;
+  meshDiscovery?: RadioDiscoveryResponse | null;
+  meshDiscoveryLoadingTarget?: RadioDiscoveryTarget | null;
+  onDiscoverMesh?: (target: RadioDiscoveryTarget) => Promise<void>;
+  contacts?: Contact[];
+  trackedTelemetryRepeaters?: string[];
   open?: boolean;
   pageMode?: boolean;
   externalSidebarNav?: boolean;
@@ -87,11 +110,13 @@ function renderModal(overrides?: {
   const onReboot = overrides?.onReboot ?? vi.fn(async () => {});
   const onDisconnect = overrides?.onDisconnect ?? vi.fn(async () => {});
   const onReconnect = overrides?.onReconnect ?? vi.fn(async () => {});
+  const onAdvertise = overrides?.onAdvertise ?? vi.fn(async (_mode: RadioAdvertMode) => {});
+  const onDiscoverMesh = overrides?.onDiscoverMesh ?? vi.fn(async () => {});
 
   const commonProps = {
     open: overrides?.open ?? true,
     pageMode: overrides?.pageMode,
-    config: baseConfig,
+    config: overrides?.config === undefined ? baseConfig : overrides.config,
     health: overrides?.health ?? baseHealth,
     appSettings: overrides?.appSettings ?? baseSettings,
     onClose,
@@ -101,10 +126,15 @@ function renderModal(overrides?: {
     onReboot,
     onDisconnect,
     onReconnect,
-    onAdvertise: vi.fn(async () => {}),
+    onAdvertise,
+    meshDiscovery: overrides?.meshDiscovery ?? null,
+    meshDiscoveryLoadingTarget: overrides?.meshDiscoveryLoadingTarget ?? null,
+    onDiscoverMesh,
     onSyncChannels: vi.fn(async () => {}),
     onHealthRefresh: vi.fn(async () => {}),
     onRefreshAppSettings,
+    contacts: overrides?.contacts,
+    trackedTelemetryRepeaters: overrides?.trackedTelemetryRepeaters,
   };
 
   const view = overrides?.externalSidebarNav
@@ -126,6 +156,8 @@ function renderModal(overrides?: {
     onReboot,
     onDisconnect,
     onReconnect,
+    onAdvertise,
+    onDiscoverMesh,
     view,
   };
 }
@@ -147,7 +179,7 @@ function setMatchMedia(matches: boolean) {
 }
 
 function openRadioSection() {
-  const radioToggle = screen.getByRole('button', { name: /Radio/i });
+  const radioToggle = screen.getByRole('button', { name: /^Radio$/i });
   fireEvent.click(radioToggle);
 }
 
@@ -162,10 +194,15 @@ function openDatabaseSection() {
 }
 
 describe('SettingsModal', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'getFanoutConfigs').mockResolvedValue([]);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
     window.location.hash = '';
+    document.documentElement.style.fontSize = '';
   });
 
   it('refreshes app settings when opened', async () => {
@@ -196,6 +233,62 @@ describe('SettingsModal', () => {
     expect(screen.getByText(/Configured radio contact capacity/i)).toBeInTheDocument();
   });
 
+  it('renders flood and zero-hop advert buttons and passes the selected mode', async () => {
+    const onAdvertise = vi.fn(async (_mode: RadioAdvertMode) => {});
+    renderModal({ onAdvertise });
+    openRadioSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send Flood Advertisement' }));
+    await waitFor(() => {
+      expect(onAdvertise).toHaveBeenCalledWith('flood');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send Zero-Hop Advertisement' }));
+    await waitFor(() => {
+      expect(onAdvertise).toHaveBeenCalledWith('zero_hop');
+    });
+  });
+
+  it('shows radio-unavailable message when config is null', () => {
+    renderModal({ config: null });
+
+    const radioToggle = screen.getByRole('button', { name: /^Radio$/i });
+    expect(radioToggle).not.toBeDisabled();
+
+    fireEvent.click(radioToggle);
+    expect(screen.getByText('Radio is not available.')).toBeInTheDocument();
+  });
+
+  it('shows radio-unavailable message in sidebar-nav mode when config is null', () => {
+    renderModal({
+      config: null,
+      externalSidebarNav: true,
+      desktopSection: 'radio',
+    });
+
+    expect(screen.getByText('Radio is not available.')).toBeInTheDocument();
+  });
+
+  it('shows cached radio firmware and capacity info under the connection status', () => {
+    renderModal({
+      health: {
+        ...baseHealth,
+        radio_device_info: {
+          model: 'T-Echo',
+          firmware_build: '2025-02-01',
+          firmware_version: '1.2.3',
+          max_contacts: 350,
+          max_channels: 64,
+        },
+      },
+    });
+    openRadioSection();
+
+    expect(
+      screen.getByText('T-Echo running 2025-02-01/1.2.3 (max: 350 contacts, 64 channels)')
+    ).toBeInTheDocument();
+  });
+
   it('shows reconnect action when radio connection is paused', () => {
     renderModal({
       health: { ...baseHealth, radio_state: 'paused' },
@@ -205,6 +298,43 @@ describe('SettingsModal', () => {
     expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
   });
 
+  it('runs repeater mesh discovery from the radio tab', async () => {
+    const { onDiscoverMesh } = renderModal();
+    openRadioSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discover Repeaters' }));
+
+    await waitFor(() => {
+      expect(onDiscoverMesh).toHaveBeenCalledWith('repeaters');
+    });
+  });
+
+  it('renders mesh discovery results in the radio tab', () => {
+    renderModal({
+      meshDiscovery: {
+        target: 'all',
+        duration_seconds: 8,
+        results: [
+          {
+            public_key: '11'.repeat(32),
+            name: null,
+            node_type: 'repeater',
+            heard_count: 2,
+            local_snr: 7.5,
+            local_rssi: -101,
+            remote_snr: 4,
+          },
+        ],
+      },
+    });
+    openRadioSection();
+
+    expect(screen.getByText('Last sweep: 1 node')).toBeInTheDocument();
+    expect(screen.getByText('repeater')).toBeInTheDocument();
+    expect(screen.getByText('heard 2 times')).toBeInTheDocument();
+    expect(screen.getByText('8s listen window')).toBeInTheDocument();
+  });
+
   it('saves advert location source through radio config save', async () => {
     const { onSave } = renderModal();
     openRadioSection();
@@ -212,12 +342,24 @@ describe('SettingsModal', () => {
     fireEvent.change(screen.getByLabelText('Advert Location Source'), {
       target: { value: 'off' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Radio Config' }));
 
     await waitFor(() => {
       expect(onSave).toHaveBeenCalledWith(
         expect.objectContaining({ advert_location_source: 'off' })
       );
+    });
+  });
+
+  it('saves multi-acks through radio config save', async () => {
+    const { onSave } = renderModal();
+    openRadioSection();
+
+    fireEvent.click(screen.getByLabelText('Extra Direct ACK Transmission'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Radio Config' }));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ multi_acks_enabled: true }));
     });
   });
 
@@ -228,8 +370,8 @@ describe('SettingsModal', () => {
     const maxContactsInput = screen.getByLabelText('Max Contacts on Radio');
     fireEvent.change(maxContactsInput, { target: { value: '250' } });
 
-    // Click the "Save Settings" button in the Flood & Advert Control section
-    const saveButtons = screen.getAllByRole('button', { name: 'Save Settings' });
+    // Click the "Save Messaging Settings" button
+    const saveButtons = screen.getAllByRole('button', { name: 'Save Messaging Settings' });
     fireEvent.click(saveButtons[0]);
 
     await waitFor(() => {
@@ -243,8 +385,8 @@ describe('SettingsModal', () => {
     });
     openRadioSection();
 
-    // Click the "Save Settings" button in the Flood & Advert Control section
-    const saveButtons = screen.getAllByRole('button', { name: 'Save Settings' });
+    // Click the "Save Messaging Settings" button
+    const saveButtons = screen.getAllByRole('button', { name: 'Save Messaging Settings' });
     fireEvent.click(saveButtons[0]);
 
     await waitFor(() => {
@@ -258,17 +400,21 @@ describe('SettingsModal', () => {
       desktopSection: 'fanout',
     });
 
+    await waitFor(() => {
+      expect(api.getFanoutConfigs).toHaveBeenCalled();
+    });
+    expect(screen.getByRole('button', { name: 'Add Integration' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Local Configuration/i })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Preset')).not.toBeInTheDocument();
   });
 
-  it('does not clip the fanout add-integration menu in external desktop mode', () => {
+  it('does not clip the fanout add-integration menu in external desktop mode', async () => {
     renderModal({
       externalSidebarNav: true,
       desktopSection: 'fanout',
     });
 
-    const addIntegrationButton = screen.getByRole('button', { name: 'Add Integration' });
+    const addIntegrationButton = await screen.findByRole('button', { name: 'Add Integration' });
     const wrapperSection = addIntegrationButton.closest('section');
     expect(wrapperSection).not.toHaveClass('overflow-hidden');
   });
@@ -305,45 +451,86 @@ describe('SettingsModal', () => {
     expect(screen.getByText('iPhone')).toBeInTheDocument();
   });
 
-  it('clears stale errors when switching external desktop sections', async () => {
+  it('reverts checkbox state when auto-persist fails on the database section', async () => {
+    // Auto-persist replaced the old "Save Settings" button on this section.
+    // The risk is now: a toggle gets applied optimistically, the PATCH fails,
+    // and we're left with the UI out of sync with saved state. Verify the
+    // revert-on-error path keeps the checkbox consistent with the server.
     const onSaveAppSettings = vi.fn(async () => {
       throw new Error('Save failed');
     });
 
-    const { view } = renderModal({
+    renderModal({
       externalSidebarNav: true,
       desktopSection: 'database',
       onSaveAppSettings,
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }));
+    const checkbox = screen.getByRole('checkbox', {
+      name: /Auto-decrypt historical DMs/i,
+    }) as HTMLInputElement;
+    const initialChecked = checkbox.checked;
+
+    fireEvent.click(checkbox);
+
     await waitFor(() => {
-      expect(screen.getByText('Save failed')).toBeInTheDocument();
+      expect(onSaveAppSettings).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(checkbox.checked).toBe(initialChecked);
+    });
+  });
+
+  it('serializes rapid auto-persist clicks so stale writes cannot win', async () => {
+    // Regression test for a race where rapid consecutive checkbox toggles
+    // fire overlapping PATCHes that can land out of order. The page now
+    // chains saves through a single promise, so the server sees them in
+    // the order the user clicked. This test hand-controls resolution
+    // order to force the "stale write" scenario if serialization were off.
+
+    const deferred: { resolve: () => void }[] = [];
+    const callOrder: number[] = [];
+
+    const onSaveAppSettings = vi.fn(async (_update: unknown) => {
+      const index = deferred.length;
+      callOrder.push(index);
+      await new Promise<void>((res) => {
+        deferred.push({ resolve: res });
+      });
     });
 
-    view.rerender(
-      <SettingsModal
-        open
-        externalSidebarNav
-        desktopSection="fanout"
-        config={baseConfig}
-        health={baseHealth}
-        appSettings={baseSettings}
-        onClose={vi.fn()}
-        onSave={vi.fn(async () => {})}
-        onSaveAppSettings={onSaveAppSettings}
-        onSetPrivateKey={vi.fn(async () => {})}
-        onReboot={vi.fn(async () => {})}
-        onDisconnect={vi.fn(async () => {})}
-        onReconnect={vi.fn(async () => {})}
-        onAdvertise={vi.fn(async () => {})}
-        onSyncChannels={vi.fn(async () => {})}
-        onHealthRefresh={vi.fn(async () => {})}
-        onRefreshAppSettings={vi.fn(async () => {})}
-      />
-    );
+    renderModal({
+      externalSidebarNav: true,
+      desktopSection: 'radio-app',
+      onSaveAppSettings,
+    });
 
-    expect(screen.queryByText('Save failed')).not.toBeInTheDocument();
+    // Two distinct checkboxes in quick succession.
+    const blockClients = screen.getByRole('checkbox', { name: /Block clients/i });
+    const blockRepeaters = screen.getByRole('checkbox', { name: /Block repeaters/i });
+
+    fireEvent.click(blockClients);
+    fireEvent.click(blockRepeaters);
+
+    // Wait for the first PATCH to be registered. Only the first should be
+    // in-flight — the second must be queued behind it.
+    await waitFor(() => {
+      expect(deferred.length).toBe(1);
+    });
+    expect(callOrder).toEqual([0]);
+
+    // Resolve the first PATCH. The chain should now dispatch the second.
+    deferred[0].resolve();
+    await waitFor(() => {
+      expect(deferred.length).toBe(2);
+    });
+    expect(callOrder).toEqual([0, 1]);
+
+    // Resolve the second so the test tears down cleanly.
+    deferred[1].resolve();
+    await waitFor(() => {
+      expect(onSaveAppSettings).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('does not call onClose after save/reboot flows in page mode', async () => {
@@ -363,7 +550,7 @@ describe('SettingsModal', () => {
     });
     openRadioSection();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save & Reboot' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Radio Config & Reboot' }));
     await waitFor(() => {
       expect(onSave).toHaveBeenCalledTimes(1);
       expect(onReboot).toHaveBeenCalledTimes(1);
@@ -387,7 +574,7 @@ describe('SettingsModal', () => {
     renderModal();
     openLocalSection();
 
-    const checkbox = screen.getByLabelText('Reopen to last viewed channel/conversation');
+    const checkbox = screen.getByLabelText('Reopen Last Conversation');
     expect(checkbox).not.toBeChecked();
 
     fireEvent.click(checkbox);
@@ -401,6 +588,67 @@ describe('SettingsModal', () => {
     expect(localStorage.getItem(LAST_VIEWED_CONVERSATION_KEY)).toBeNull();
   });
 
+  it('defaults distance units to metric and stores local changes', () => {
+    renderModal();
+    openLocalSection();
+
+    const select = screen.getByLabelText('Distance Units');
+    expect(select).toHaveValue('metric');
+
+    fireEvent.change(select, { target: { value: 'smoots' } });
+
+    expect(localStorage.getItem(DISTANCE_UNIT_KEY)).toBe('smoots');
+  });
+
+  it('defaults relative font size to 100% and exposes the expected input bounds', () => {
+    renderModal();
+    openLocalSection();
+
+    const slider = screen.getByLabelText('Relative font size slider');
+    const input = screen.getByLabelText('Relative font size percentage');
+
+    expect(slider).toHaveValue(String(DEFAULT_FONT_SCALE));
+    expect(slider).toHaveAttribute('step', '5');
+    expect(input).toHaveValue(DEFAULT_FONT_SCALE);
+    expect(input).toHaveAttribute('min', String(MIN_FONT_SCALE));
+    expect(input).toHaveAttribute('max', String(MAX_FONT_SCALE));
+  });
+
+  it('stores and applies relative font size changes locally', async () => {
+    renderModal();
+    openLocalSection();
+
+    const slider = screen.getByLabelText('Relative font size slider');
+
+    fireEvent.change(slider, { target: { value: '135' } });
+
+    expect(localStorage.getItem(FONT_SCALE_KEY)).toBeNull();
+    expect(document.documentElement.style.fontSize).toBe('');
+
+    fireEvent.mouseUp(slider);
+
+    await waitFor(() => {
+      expect(localStorage.getItem(FONT_SCALE_KEY)).toBe('135');
+      expect(document.documentElement.style.fontSize).toBe('135%');
+    });
+
+    fireEvent.change(screen.getByLabelText('Relative font size percentage'), {
+      target: { value: '137.5' },
+    });
+
+    await waitFor(() => {
+      expect(localStorage.getItem(FONT_SCALE_KEY)).toBe('137.5');
+      expect(document.documentElement.style.fontSize).toBe('137.5%');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(FONT_SCALE_KEY)).toBeNull();
+      expect(document.documentElement.style.fontSize).toBe('100%');
+    });
+  });
+
   it('purges decrypted raw packets via maintenance endpoint action', async () => {
     const runMaintenanceSpy = vi.spyOn(api, 'runMaintenance').mockResolvedValue({
       packets_deleted: 12,
@@ -410,7 +658,11 @@ describe('SettingsModal', () => {
     renderModal();
     openDatabaseSection();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Purge Archival Raw Packets' }));
+    expect(
+      screen.getByText(/removes packet-analysis availability for those messages/i)
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Purge Archival Packets' }));
 
     await waitFor(() => {
       expect(runMaintenanceSpy).toHaveBeenCalledWith({ purgeLinkedRawPackets: true });
@@ -433,6 +685,7 @@ describe('SettingsModal', () => {
       total_outgoing: 30,
       contacts_heard: { last_hour: 2, last_24_hours: 7, last_week: 10 },
       repeaters_heard: { last_hour: 1, last_24_hours: 3, last_week: 3 },
+      known_channels_active: { last_hour: 1, last_24_hours: 4, last_week: 6 },
       path_hash_width_24h: {
         total_packets: 120,
         single_byte: 60,
@@ -441,6 +694,17 @@ describe('SettingsModal', () => {
         single_byte_pct: 50,
         double_byte_pct: 30,
         triple_byte_pct: 20,
+      },
+      packets_per_hour_72h: [
+        { timestamp: 1711792800, count: 12 },
+        { timestamp: 1711796400, count: 8 },
+      ],
+      noise_floor_24h: {
+        sample_interval_seconds: 60,
+        coverage_seconds: 3600,
+        latest_noise_floor_dbm: -105,
+        latest_timestamp: 1711800000,
+        samples: [],
       },
     };
 
@@ -473,16 +737,11 @@ describe('SettingsModal', () => {
     expect(
       screen.getByText(/Parsed stored raw packets from the last 24 hours: 120/)
     ).toBeInTheDocument();
-    expect(screen.getByText('1-byte hops')).toBeInTheDocument();
-    expect(screen.getByText('60 (50.0%)')).toBeInTheDocument();
-    expect(screen.getByText('36 (30.0%)')).toBeInTheDocument();
-    expect(screen.getByText('24 (20.0%)')).toBeInTheDocument();
     expect(screen.getByText('Contacts heard')).toBeInTheDocument();
     expect(screen.getByText('Repeaters heard')).toBeInTheDocument();
-
-    // Busiest channels
-    expect(screen.getByText('general')).toBeInTheDocument();
-    expect(screen.getByText('42 msgs')).toBeInTheDocument();
+    expect(screen.getByText('Known-channels active')).toBeInTheDocument();
+    expect(screen.getByText('Busiest Channels (24h)')).toBeInTheDocument();
+    expect(screen.getByText('Noise Floor (24h)')).toBeInTheDocument();
   });
 
   it('fetches statistics when expanded in mobile external-nav mode', async () => {
@@ -499,6 +758,7 @@ describe('SettingsModal', () => {
       total_outgoing: 30,
       contacts_heard: { last_hour: 2, last_24_hours: 7, last_week: 10 },
       repeaters_heard: { last_hour: 1, last_24_hours: 3, last_week: 3 },
+      known_channels_active: { last_hour: 1, last_24_hours: 4, last_week: 6 },
       path_hash_width_24h: {
         total_packets: 120,
         single_byte: 60,
@@ -507,6 +767,14 @@ describe('SettingsModal', () => {
         single_byte_pct: 50,
         double_byte_pct: 30,
         triple_byte_pct: 20,
+      },
+      packets_per_hour_72h: [],
+      noise_floor_24h: {
+        sample_interval_seconds: 60,
+        coverage_seconds: 0,
+        latest_noise_floor_dbm: null,
+        latest_timestamp: null,
+        samples: [],
       },
     };
 
@@ -527,11 +795,75 @@ describe('SettingsModal', () => {
     fireEvent.click(screen.getByRole('button', { name: /Statistics/i }));
 
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledWith('/api/statistics', expect.any(Object));
+      expect(fetchSpy).toHaveBeenCalledWith('./api/statistics', expect.any(Object));
     });
 
     await waitFor(() => {
       expect(screen.getByText('Network')).toBeInTheDocument();
     });
+  });
+
+  it('renders routed hourly checkbox and calls save on toggle', async () => {
+    const onSaveAppSettings = vi.fn(async () => {});
+
+    renderModal({
+      externalSidebarNav: true,
+      desktopSection: 'radio-app',
+      onSaveAppSettings,
+    });
+
+    const checkbox = screen.getByRole('checkbox', {
+      name: /Poll direct\/routed-path repeaters hourly/i,
+    }) as HTMLInputElement;
+
+    expect(checkbox).toBeInTheDocument();
+    expect(checkbox.checked).toBe(false);
+
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(onSaveAppSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ telemetry_routed_hourly: true })
+      );
+    });
+  });
+
+  it('shows route badge per tracked repeater', async () => {
+    const directKey = 'bb'.repeat(32);
+
+    renderModal({
+      externalSidebarNav: true,
+      desktopSection: 'radio-app',
+      appSettings: {
+        ...baseSettings,
+        tracked_telemetry_repeaters: [directKey],
+      },
+      trackedTelemetryRepeaters: [directKey],
+      contacts: [
+        {
+          public_key: directKey,
+          name: 'DirectRepeater',
+          type: 2,
+          flags: 0,
+          direct_path: 'aabb',
+          direct_path_len: 1,
+          direct_path_hash_mode: 1,
+          last_advert: null,
+          lat: null,
+          lon: null,
+          last_seen: null,
+          on_radio: false,
+          favorite: false,
+          last_contacted: null,
+          last_read_at: null,
+          first_seen: null,
+          effective_route: { path: 'aabb', path_len: 1, path_hash_mode: 1 },
+          effective_route_source: 'direct',
+        },
+      ],
+    });
+
+    expect(screen.getByText('DirectRepeater')).toBeInTheDocument();
+    expect(screen.getByText('direct')).toBeInTheDocument();
   });
 });

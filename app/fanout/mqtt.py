@@ -27,7 +27,7 @@ class PrivateMqttSettings(Protocol):
 class MqttPublisher(BaseMqttPublisher):
     """Manages an MQTT connection and publishes mesh network events."""
 
-    _backoff_max = 30
+    _backoff_max = 3600
     _log_prefix = "MQTT"
 
     def _is_configured(self) -> bool:

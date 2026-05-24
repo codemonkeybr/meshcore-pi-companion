@@ -1,11 +1,21 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChatHeader } from '../components/ChatHeader';
-import type { Channel, Conversation, Favorite } from '../types';
+import type { Channel, Contact, Conversation, PathDiscoveryResponse } from '../types';
+import { CONTACT_TYPE_ROOM } from '../types';
+import { PUBLIC_CHANNEL_KEY } from '../utils/publicChannel';
 
 function makeChannel(key: string, name: string, isHashtag: boolean): Channel {
-  return { key, name, is_hashtag: isHashtag, on_radio: false, last_read_at: null };
+  return {
+    key,
+    name,
+    is_hashtag: isHashtag,
+    on_radio: false,
+    last_read_at: null,
+    favorite: false,
+    muted: false,
+  };
 }
 
 const noop = () => {};
@@ -13,11 +23,13 @@ const noop = () => {};
 const baseProps = {
   contacts: [],
   config: null,
-  favorites: [] as Favorite[],
   notificationsSupported: true,
   notificationsEnabled: false,
   notificationsPermission: 'granted' as const,
   onTrace: noop,
+  onPathDiscovery: vi.fn(async () => {
+    throw new Error('unused');
+  }) as (_: string) => Promise<PathDiscoveryResponse>,
   onToggleNotifications: noop,
   onToggleFavorite: noop,
   onSetChannelFloodScopeOverride: noop,
@@ -146,7 +158,7 @@ describe('ChatHeader key visibility', () => {
     expect(screen.getAllByText('#Esperance')).toHaveLength(2);
   });
 
-  it('shows enabled notification state and toggles when clicked', () => {
+  it('shows filled bell when notifications are enabled and toggles via dropdown', () => {
     const conversation: Conversation = { type: 'contact', id: '11'.repeat(32), name: 'Alice' };
     const onToggleNotifications = vi.fn();
 
@@ -160,18 +172,180 @@ describe('ChatHeader key visibility', () => {
       />
     );
 
-    fireEvent.click(screen.getByText('Notifications On'));
+    // Bell button should be present; open the dropdown
+    const bellBtn = screen.getByRole('button', { name: 'Notification settings' });
+    fireEvent.click(bellBtn);
 
-    expect(screen.getByText('Notifications On')).toBeInTheDocument();
+    // Desktop notifications checkbox should be checked
+    const checkbox = screen.getByRole('checkbox', { name: /desktop notifications/i });
+    expect(checkbox).toBeChecked();
+
+    // Toggling calls the handler
+    fireEvent.click(checkbox);
     expect(onToggleNotifications).toHaveBeenCalledTimes(1);
   });
 
-  it('prompts for regional override when globe button is clicked', () => {
+  it('keeps desktop notifications available when web push is also supported', () => {
+    const conversation: Conversation = { type: 'contact', id: '13'.repeat(32), name: 'Alice' };
+
+    render(
+      <ChatHeader
+        {...baseProps}
+        conversation={conversation}
+        channels={[]}
+        pushSupported
+        pushSubscribed
+        pushEnabledForConversation
+        onTogglePush={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notification settings' }));
+
+    expect(screen.getByRole('checkbox', { name: /desktop notifications/i })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /web push/i })).toBeInTheDocument();
+  });
+
+  it('hides trace and notification controls for room-server contacts', () => {
+    const pubKey = '41'.repeat(32);
+    const contact: Contact = {
+      public_key: pubKey,
+      name: 'Ops Board',
+      type: CONTACT_TYPE_ROOM,
+      flags: 0,
+      direct_path: null,
+      direct_path_len: -1,
+      direct_path_hash_mode: -1,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+    const conversation: Conversation = { type: 'contact', id: pubKey, name: 'Ops Board' };
+
+    render(
+      <ChatHeader {...baseProps} conversation={conversation} channels={[]} contacts={[contact]} />
+    );
+
+    expect(screen.queryByRole('button', { name: 'Path Discovery' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Direct Trace' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Notification settings' })).not.toBeInTheDocument();
+  });
+
+  it('hides the delete button for the canonical Public channel', () => {
+    const channel = makeChannel(PUBLIC_CHANNEL_KEY, 'Public', false);
+    const conversation: Conversation = { type: 'channel', id: PUBLIC_CHANNEL_KEY, name: 'Public' };
+
+    render(<ChatHeader {...baseProps} conversation={conversation} channels={[channel]} />);
+
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+  });
+
+  it('still shows the delete button for non-canonical channels named Public', () => {
+    const key = 'AB'.repeat(16);
+    const channel = makeChannel(key, 'Public', false);
+    const conversation: Conversation = { type: 'channel', id: key, name: 'Public' };
+
+    render(<ChatHeader {...baseProps} conversation={conversation} channels={[channel]} />);
+
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();
+  });
+
+  it('opens path discovery modal for contacts and runs the request on demand', async () => {
+    const pubKey = '21'.repeat(32);
+    const contact: Contact = {
+      public_key: pubKey,
+      name: 'Alice',
+      type: 1,
+      flags: 0,
+      direct_path: 'AA',
+      direct_path_len: 1,
+      direct_path_hash_mode: 0,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+    const conversation: Conversation = { type: 'contact', id: pubKey, name: 'Alice' };
+    const onPathDiscovery = vi.fn().mockResolvedValue({
+      contact,
+      forward_path: { path: 'AA', path_len: 1, path_hash_mode: 0 },
+      return_path: { path: '', path_len: 0, path_hash_mode: 0 },
+    } satisfies PathDiscoveryResponse);
+
+    render(
+      <ChatHeader
+        {...baseProps}
+        conversation={conversation}
+        channels={[]}
+        contacts={[contact]}
+        onPathDiscovery={onPathDiscovery}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Path Discovery' }));
+
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Run path discovery' }));
+
+    await waitFor(() => {
+      expect(onPathDiscovery).toHaveBeenCalledWith(pubKey);
+    });
+  });
+
+  it('shows an override warning in the path discovery modal when forced routing is set', async () => {
+    const pubKey = '31'.repeat(32);
+    const contact: Contact = {
+      public_key: pubKey,
+      name: 'Alice',
+      type: 1,
+      flags: 0,
+      direct_path: 'AA',
+      direct_path_len: 1,
+      direct_path_hash_mode: 0,
+      route_override_path: 'BBDD',
+      route_override_len: 2,
+      route_override_hash_mode: 0,
+      last_advert: null,
+      lat: null,
+      lon: null,
+      last_seen: null,
+      on_radio: false,
+      favorite: false,
+      last_contacted: null,
+      last_read_at: null,
+      first_seen: null,
+    };
+    const conversation: Conversation = { type: 'contact', id: pubKey, name: 'Alice' };
+
+    render(
+      <ChatHeader {...baseProps} conversation={conversation} channels={[]} contacts={[contact]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Path Discovery' }));
+
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByText(/current learned route: 1 hop \(AA\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/current forced route: 2 hops \(BB -> DD\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/forced route override is currently set/i)).toBeInTheDocument();
+    expect(screen.getByText(/clearing the forced route afterward is enough/i)).toBeInTheDocument();
+  });
+
+  it('opens the regional override modal and applies the entered region', async () => {
     const key = 'CD'.repeat(16);
     const channel = makeChannel(key, '#flightless', true);
     const conversation: Conversation = { type: 'channel', id: key, name: '#flightless' };
     const onSetChannelFloodScopeOverride = vi.fn();
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('Esperance');
 
     render(
       <ChatHeader
@@ -184,8 +358,10 @@ describe('ChatHeader key visibility', () => {
 
     fireEvent.click(screen.getByTitle('Set regional override'));
 
-    expect(promptSpy).toHaveBeenCalled();
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Region'), { target: { value: 'Esperance' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use Esperance region for #flightless' }));
+
     expect(onSetChannelFloodScopeOverride).toHaveBeenCalledWith(key, 'Esperance');
-    promptSpy.mockRestore();
   });
 });

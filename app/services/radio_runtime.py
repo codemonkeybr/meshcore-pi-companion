@@ -50,20 +50,20 @@ class RadioRuntime:
         delattr(self.manager, name)
 
     def require_connected(self):
-        """Ensure radio is connected and return the backend (for self_info, etc.).
+        """Ensure radio is connected and return the raw MeshCore (or SpiBackend for SPI).
 
-        With ClientBackend this is the MeshCore wrapper; with SpiBackend it is the
-        SPI backend. Callers that need .self_info or to run operations use
-        radio_operation() which yields the backend in both cases.
+        radio_operation() should be used for any actual radio I/O since it holds
+        the operation lock.  This method is a lightweight connectivity guard that
+        returns the current meshcore so callers can read .self_info etc.
         """
         if self.is_setup_in_progress:
-            raise HTTPException(status_code=503, detail="Radio is initializing")
+            raise HTTPException(status_code=423, detail="Radio is initializing")
         if not self.is_connected:
-            raise HTTPException(status_code=503, detail="Radio not connected")
-        be = self.backend
-        if be is None:
-            raise HTTPException(status_code=503, detail="Radio not connected")
-        return be
+            raise HTTPException(status_code=423, detail="Radio not connected")
+        mc = self.meshcore
+        if mc is None:
+            raise HTTPException(status_code=423, detail="Radio not connected")
+        return mc
 
     @asynccontextmanager
     async def radio_operation(self, name: str, **kwargs):
