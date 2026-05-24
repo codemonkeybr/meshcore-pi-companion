@@ -1,0 +1,51 @@
+services:
+  remoteterm:
+    # build: .
+    image: docker.io/jkingsman/remoteterm-meshcore:latest
+
+    # Optional on Linux: run container as your host user to avoid root-owned files in ./data
+    # This is less reliable for serial-device access than running as root and may require
+    # extra group setup (for example dialout) or other manual customization.
+    # user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+
+    #####################################################################
+    # Map your radio by stable device ID if available.                  #
+    # If your by-id path contains ':' characters, Docker Compose cannot #
+    # represent it here directly; use a colon-free host alias instead.  #
+    # (e.g. /dev/ttyUSB0)                                               #
+    #####################################################################
+    devices:
+      - /dev/serial/by-id/your-meshcore-radio:/dev/meshcore-radio
+
+    environment:
+      MESHCORE_DATABASE_PATH: data/meshcore.db
+
+      # Radio connection
+      # Serial (USB)
+      MESHCORE_SERIAL_PORT: /dev/meshcore-radio
+      # MESHCORE_SERIAL_BAUDRATE: 115200
+
+      # TCP
+      # MESHCORE_TCP_HOST: 192.168.1.100
+      # MESHCORE_TCP_PORT: 5000
+
+      # BLE
+      # BLE in Docker usually needs additional manual compose changes such as
+      # Bluetooth device passthrough, privileged mode, host networking, or
+      # other host-specific tweaks before it will actually work.
+      # MESHCORE_BLE_ADDRESS: AA:BB:CC:DD:EE:FF
+      # MESHCORE_BLE_PIN: 123456
+
+      # Security
+      # MESHCORE_DISABLE_BOTS: "true"
+      # MESHCORE_BASIC_AUTH_USERNAME: changeme
+      # MESHCORE_BASIC_AUTH_PASSWORD: changeme
+      # MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT: "false"
+
+      # Logging
+      # MESHCORE_LOG_LEVEL: INFO
+    restart: unless-stopped
