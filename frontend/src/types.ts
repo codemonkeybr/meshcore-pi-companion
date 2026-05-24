@@ -650,3 +650,29 @@ export interface StatisticsResponse {
   packets_per_hour_72h: PacketsPerHourBucket[];
   noise_floor_24h: NoiseFloorHistoryStats;
 }
+
+// Virtual rooms and companions
+export interface RoomStatus {
+  name: string;
+  public_key_prefix: string;
+  client_count: number;
+  message_count: number;
+  running: boolean;
+}
+
+export interface CompanionStatus {
+  name: string;
+  public_key_prefix: string;
+  tcp_port: number;
+  bind_address: string;
+  connected: boolean;
+  client_address: string | null;
+}
+
+export interface VirtualRoomsResponse {
+  rooms: RoomStatus[];
+}
+
+export interface VirtualCompanionsResponse {
+  companions: CompanionStatus[];
+}

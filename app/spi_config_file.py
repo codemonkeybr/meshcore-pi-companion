@@ -85,6 +85,12 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
         "logging": log_section,
     }
 
+    # Pass through virtual rooms/companions config sections unchanged
+    if "virtual_rooms" in raw:
+        config["virtual_rooms"] = raw["virtual_rooms"]
+    if "virtual_companions" in raw:
+        config["virtual_companions"] = raw["virtual_companions"]
+
     logger.info("Loaded SPI config from %s (profile=%s)", path, hardware["profile"])
     return config
 

@@ -25,6 +25,7 @@ import { SettingsFanoutSection } from './settings/SettingsFanoutSection';
 import { SettingsDatabaseSection } from './settings/SettingsDatabaseSection';
 import { SettingsStatisticsSection } from './settings/SettingsStatisticsSection';
 import { SettingsAboutSection } from './settings/SettingsAboutSection';
+import { VirtualStatus } from './VirtualStatus';
 
 interface SettingsModalBaseProps {
   open: boolean;
@@ -115,6 +116,7 @@ export function SettingsModal(props: SettingsModalProps) {
     local: false,
     'radio-app': false,
     fanout: false,
+    virtual: false,
     database: false,
     statistics: false,
     about: false,
@@ -309,6 +311,17 @@ export function SettingsModal(props: SettingsModalProps) {
               onHealthRefresh={onHealthRefresh}
               className={sectionContentClass}
             />
+          )}
+        </section>
+      )}
+
+      {shouldRenderSection('virtual') && (
+        <section className={sectionWrapperClass}>
+          {renderSectionHeader('virtual')}
+          {isSectionVisible('virtual') && (
+            <div className={sectionContentClass}>
+              <VirtualStatus />
+            </div>
           )}
         </section>
       )}

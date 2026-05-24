@@ -70,3 +70,28 @@ logging:
 
 # Node identity — auto-generated on first run; do not edit by hand.
 # identity_key: <base64-encoded 32-byte seed>
+
+# Virtual rooms — SPI mode only. Each room appears as a separate MeshCore node
+# on the mesh and accepts logins from other nodes using the passwords below.
+# Identity keys are auto-generated on first run; you can also set them manually
+# (64-char hex string, 32-byte seed).
+#
+# virtual_rooms:
+#   - name: "MyRoom"
+#     admin_password: "admin-secret"
+#     guest_password: "guest-secret"
+#     max_posts: 32          # messages kept in memory per room
+#     latitude: 0.0
+#     longitude: 0.0
+#     # identity_key: <64-char hex>   # auto-generated if omitted
+
+# Virtual TCP companions — SPI mode only. Each companion acts as a MeshCore
+# node reachable over TCP (binary frame protocol). One client per port at a time;
+# additional connections are rejected immediately.
+#
+# virtual_companions:
+#   - name: "MyCompanion"
+#     tcp_port: 5000
+#     bind_address: "0.0.0.0"   # use "127.0.0.1" to restrict to localhost
+#     tcp_timeout: 28800         # seconds of inactivity before disconnect (8h)
+#     # identity_key: <64-char hex>   # auto-generated if omitted

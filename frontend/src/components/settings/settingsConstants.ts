@@ -3,6 +3,7 @@ import {
   Database,
   Info,
   MonitorCog,
+  Network,
   RadioTower,
   Share2,
   SlidersHorizontal,
@@ -15,6 +16,7 @@ export type SettingsSection =
   | 'radio-app'
   | 'database'
   | 'fanout'
+  | 'virtual'
   | 'statistics'
   | 'about';
 
@@ -22,6 +24,7 @@ export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   'radio',
   'local',
   'fanout',
+  'virtual',
   'radio-app',
   'database',
   'statistics',
@@ -34,6 +37,7 @@ export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   'radio-app': 'Radio-App Management',
   database: 'Database',
   fanout: 'MQTT & Automation',
+  virtual: 'Virtual Rooms & Companions',
   statistics: 'Statistics',
   about: 'About',
 };
@@ -44,6 +48,7 @@ export const SETTINGS_SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   'radio-app': SlidersHorizontal,
   database: Database,
   fanout: Share2,
+  virtual: Network,
   statistics: BarChart3,
   about: Info,
 };

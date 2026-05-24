@@ -493,4 +493,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ key }),
     }),
+
+  // Virtual rooms and companions
+  getVirtualRooms: () => fetchJson<import('./types').VirtualRoomsResponse>('/virtual/rooms'),
+  getVirtualCompanions: () =>
+    fetchJson<import('./types').VirtualCompanionsResponse>('/virtual/companions'),
 };

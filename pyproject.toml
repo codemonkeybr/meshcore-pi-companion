@@ -64,7 +64,7 @@ known-first-party = ["app"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 include = ["app"]
-exclude = ["references", ".venv", "tests", "app/backends/spi_backend.py"]
+exclude = ["references", ".venv", "tests", "app/backends/spi_backend.py", "app/virtual"]
 reportMissingImports = true
 reportMissingTypeStubs = false
 

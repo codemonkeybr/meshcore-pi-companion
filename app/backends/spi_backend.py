@@ -325,6 +325,27 @@ class SpiBackend(RadioBackend):
         pass
 
     # ------------------------------------------------------------------
+    # Virtual rooms / companions — dispatcher access
+    # ------------------------------------------------------------------
+
+    @property
+    def packet_injector(self):
+        """Return the dispatcher's inject_packet callable for secondary identities."""
+        if self._node is None:
+            return None
+        return self._node.dispatcher.inject_packet
+
+    def register_raw_rx_subscriber(self, handler) -> None:
+        """Register an async callable that receives every raw incoming packet."""
+        if self._node is not None:
+            self._node.dispatcher.add_raw_rx_subscriber(handler)
+
+    def register_dispatcher_handler(self, handler) -> None:
+        """Register a typed packet handler (e.g. LoginServerHandler) on the dispatcher."""
+        if self._node is not None:
+            self._node.dispatcher.register_handler(handler)
+
+    # ------------------------------------------------------------------
     # Contacts
     # ------------------------------------------------------------------
 

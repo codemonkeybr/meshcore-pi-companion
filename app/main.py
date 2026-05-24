@@ -76,6 +76,7 @@ from app.routers import (
     settings,
     setup,
     statistics,
+    virtual,
     ws,
 )
 from app.security import add_optional_basic_auth_middleware
@@ -93,10 +94,37 @@ async def _startup_radio_connect_and_setup() -> None:
         connected = await radio_manager.reconnect_and_prepare(broadcast_on_success=True)
         if connected:
             logger.info("Connected to radio")
+            await _start_virtual_manager()
         else:
             logger.warning("Failed to connect to radio on startup")
     except Exception:
         logger.exception("Failed to connect to radio on startup")
+
+
+async def _start_virtual_manager() -> None:
+    """Start virtual rooms and companions after radio is connected (SPI only)."""
+    try:
+        from pathlib import Path
+
+        from app.spi_config_file import load_config
+        from app.virtual.manager import virtual_manager
+
+        backend = radio_manager.backend
+        if backend is None:
+            return
+
+        config_path = Path("data/config.yaml")
+        if not config_path.exists():
+            return
+
+        config = load_config(config_path)
+        await virtual_manager.start(
+            backend=backend, db=db.conn, config=config, config_path=config_path
+        )
+    except RuntimeError as exc:
+        logger.critical("VirtualManager startup failed: %s", exc)
+    except Exception:
+        logger.exception("VirtualManager: unexpected error during startup")
 
 
 @asynccontextmanager
@@ -144,6 +172,9 @@ async def lifespan(app: FastAPI):
             await startup_radio_task
         except asyncio.CancelledError:
             pass
+    from app.virtual.manager import virtual_manager
+
+    await virtual_manager.stop()
     await fanout_manager.stop_all()
     await radio_manager.stop_connection_monitor()
     await stop_background_contact_reconciliation()
@@ -220,6 +251,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
 app.include_router(statistics.router, prefix="/api")
 app.include_router(push.router, prefix="/api")
+app.include_router(virtual.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
 
 # Serve frontend static files in production

@@ -89,3 +89,31 @@ def export_identity(path: Path = DEFAULT_CONFIG_PATH) -> bytes | None:
     if not encoded:
         return None
     return base64.b64decode(encoded)
+
+
+def ensure_virtual_identity_keys(
+    config: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH
+) -> dict[str, Any]:
+    """Auto-generate missing identity keys for virtual rooms and companions.
+
+    Modifies ``config`` in place and writes back to ``path`` if any keys were
+    generated. Returns the (possibly updated) config dict.
+
+    Virtual identity keys are stored as 64-char hex strings (raw bytes as hex),
+    distinct from the main node identity which uses base64.
+    """
+    changed = False
+
+    for section in ("virtual_rooms", "virtual_companions"):
+        for entry in config.get(section) or []:
+            if not entry.get("identity_key"):
+                seed = generate_identity_seed()
+                entry["identity_key"] = seed.hex()
+                name = entry.get("name", "<unnamed>")
+                logger.info("Generated new identity for %s '%s'", section.rstrip("s"), name)
+                changed = True
+
+    if changed:
+        save_spi_config(config, path)
+
+    return config
