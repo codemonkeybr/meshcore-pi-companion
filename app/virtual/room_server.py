@@ -274,7 +274,9 @@ class RoomServer:
         entry.post_timestamps.append(now)
         entry.last_activity = now
 
-        await self._store_message(sender_hex, text)
+        msg_id = await self._store_message(sender_hex, text)
+        # Advance sender's sync_since past this message so the sync loop won't echo it back
+        entry.sync_since = msg_id
         self._sync_event.set()
 
     # ------------------------------------------------------------------
@@ -319,12 +321,15 @@ class RoomServer:
         )
         await self._db.commit()
 
-    async def _store_message(self, sender_key_hex: str, text: str) -> None:
-        await self._db.execute(
+    async def _store_message(self, sender_key_hex: str, text: str) -> int:
+        """Store a message and return its row ID."""
+        async with self._db.execute(
             "INSERT INTO room_messages (room_name, sender_key_hex, text) VALUES (?, ?, ?)",
             (self.config.name, sender_key_hex, text),
-        )
+        ) as cur:
+            row_id: int = cur.lastrowid  # type: ignore[assignment]
         await self._db.commit()
+        return row_id
 
     async def _get_messages_since(self, since_id: int) -> list[Any]:
         """Return (id, sender_key_hex, text) rows with id > since_id."""
