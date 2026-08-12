@@ -56,6 +56,13 @@ HARDWARE_PROFILES: dict[str, HardwareProfile] = {
         irq_pin=26,
         txen_pin=-1,
         rxen_pin=-1,
+        # Per HackerGadgets' own setup guide: DIO2_AS_RF_SWITCH and
+        # DIO3_TCXO_VOLTAGE must both be true for this board's SX1262.
+        # Without these the chip responds to basic SPI config commands but
+        # the RF frontend/TCXO clock reference is unstable, causing CAD/TX
+        # to fail (IRQ status reads returning 0xFFFF, no TX_DONE interrupt).
+        use_dio3_tcxo=True,
+        use_dio2_rf=True,
         prerequisites=[
             "Enable SPI and SPI1 overlay: add 'dtparam=spi=on' and "
             "'dtoverlay=spi1-1cs' to /boot/firmware/config.txt",
