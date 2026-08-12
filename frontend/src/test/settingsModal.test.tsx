@@ -12,6 +12,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioDiscoveryTarget,
+  RadioRegionDiscoveryResponse,
   StatisticsResponse,
 } from '../types';
 import type { SettingsSection } from '../components/settings/settingsConstants';
@@ -21,6 +22,7 @@ import {
 } from '../utils/lastViewedConversation';
 import { api } from '../api';
 import { DISTANCE_UNIT_KEY } from '../utils/distanceUnits';
+import { SHOW_PATH_HOP_WIDTH_KEY } from '../utils/pathHopWidthPreference';
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_KEY,
@@ -66,6 +68,7 @@ const baseSettings: AppSettings = {
   advert_interval: 0,
   last_advert_time: 0,
   flood_scope: '',
+  known_regions: [],
   blocked_keys: [],
   blocked_names: [],
   discovery_blocked_types: [],
@@ -92,6 +95,7 @@ function renderModal(overrides?: {
   meshDiscovery?: RadioDiscoveryResponse | null;
   meshDiscoveryLoadingTarget?: RadioDiscoveryTarget | null;
   onDiscoverMesh?: (target: RadioDiscoveryTarget) => Promise<void>;
+  regionDiscovery?: RadioRegionDiscoveryResponse | null;
   contacts?: Contact[];
   trackedTelemetryRepeaters?: string[];
   open?: boolean;
@@ -112,6 +116,7 @@ function renderModal(overrides?: {
   const onReconnect = overrides?.onReconnect ?? vi.fn(async () => {});
   const onAdvertise = overrides?.onAdvertise ?? vi.fn(async (_mode: RadioAdvertMode) => {});
   const onDiscoverMesh = overrides?.onDiscoverMesh ?? vi.fn(async () => {});
+  const onDiscoverRegions = vi.fn(async () => {});
 
   const commonProps = {
     open: overrides?.open ?? true,
@@ -131,6 +136,9 @@ function renderModal(overrides?: {
     meshDiscoveryLoadingTarget: overrides?.meshDiscoveryLoadingTarget ?? null,
     onDiscoverMesh,
     onSyncChannels: vi.fn(async () => {}),
+    regionDiscovery: overrides?.regionDiscovery ?? null,
+    regionDiscoveryLoading: false,
+    onDiscoverRegions,
     onHealthRefresh: vi.fn(async () => {}),
     onRefreshAppSettings,
     contacts: overrides?.contacts,
@@ -158,6 +166,7 @@ function renderModal(overrides?: {
     onReconnect,
     onAdvertise,
     onDiscoverMesh,
+    onDiscoverRegions,
     view,
   };
 }
@@ -333,6 +342,67 @@ describe('SettingsModal', () => {
     expect(screen.getByText('repeater')).toBeInTheDocument();
     expect(screen.getByText('heard 2 times')).toBeInTheDocument();
     expect(screen.getByText('8s listen window')).toBeInTheDocument();
+  });
+
+  it('discovers regions using repeaters from the last mesh sweep', async () => {
+    const { onDiscoverRegions } = renderModal({
+      meshDiscovery: {
+        target: 'all',
+        duration_seconds: 8,
+        results: [
+          {
+            public_key: '11'.repeat(32),
+            name: 'RPT-A',
+            node_type: 'repeater',
+            heard_count: 1,
+            local_snr: 5,
+            local_rssi: -100,
+            remote_snr: 3,
+          },
+          {
+            public_key: '22'.repeat(32),
+            name: 'Sensor',
+            node_type: 'sensor',
+            heard_count: 1,
+            local_snr: 5,
+            local_rssi: -100,
+            remote_snr: 3,
+          },
+        ],
+      },
+    });
+    openRadioSection();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discover Regions' }));
+
+    // Only the repeater's key is passed, not the sensor's.
+    await waitFor(() => {
+      expect(onDiscoverRegions).toHaveBeenCalledWith(['11'.repeat(32)]);
+    });
+  });
+
+  it('adds discovered regions to the known-regions field', () => {
+    renderModal({
+      regionDiscovery: {
+        repeaters_queried: 2,
+        repeaters_answered: 2,
+        regions: ['nl-gr', 'de-by'],
+        results: [],
+      },
+    });
+    openRadioSection();
+
+    expect(screen.getByText('2/2 repeaters answered — 2 regions found')).toBeInTheDocument();
+
+    const knownRegions = screen.getByLabelText(
+      'Known Regions (for decoding)'
+    ) as HTMLTextAreaElement;
+    fireEvent.change(knownRegions, { target: { value: 'nl-gr' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to Known Regions' }));
+
+    // Existing 'nl-gr' preserved, only the new 'de-by' appended.
+    expect(knownRegions.value).toBe('nl-gr\nde-by');
   });
 
   it('saves advert location source through radio config save', async () => {
@@ -588,6 +658,19 @@ describe('SettingsModal', () => {
     expect(localStorage.getItem(LAST_VIEWED_CONVERSATION_KEY)).toBeNull();
   });
 
+  it('defaults the path-hop-width toggle to off and persists enabling it', () => {
+    renderModal();
+    openLocalSection();
+
+    const checkbox = screen.getByLabelText('Show Path Hop Width');
+    expect(checkbox).not.toBeChecked();
+    expect(localStorage.getItem(SHOW_PATH_HOP_WIDTH_KEY)).toBeNull();
+
+    fireEvent.click(checkbox);
+
+    expect(localStorage.getItem(SHOW_PATH_HOP_WIDTH_KEY)).toBe('true');
+  });
+
   it('defaults distance units to metric and stores local changes', () => {
     renderModal();
     openLocalSection();
@@ -695,6 +778,15 @@ describe('SettingsModal', () => {
         double_byte_pct: 30,
         triple_byte_pct: 20,
       },
+      region_scope_24h: {
+        total_messages: 120,
+        scoped_messages: 40,
+        scoped_pct: 33.3,
+        false_positive_floor: 2,
+        total_senders: 12,
+        scoped_senders: 3,
+        scoped_senders_pct: 25,
+      },
       packets_per_hour_72h: [
         { timestamp: 1711792800, count: 12 },
         { timestamp: 1711796400, count: 8 },
@@ -742,6 +834,146 @@ describe('SettingsModal', () => {
     expect(screen.getByText('Known-channels active')).toBeInTheDocument();
     expect(screen.getByText('Busiest Channels (24h)')).toBeInTheDocument();
     expect(screen.getByText('Noise Floor (24h)')).toBeInTheDocument();
+    expect(screen.getByText('Region Scope (24h)')).toBeInTheDocument();
+    // Fractions, not bare percentages — the sample size matters at this sparsity
+    expect(screen.getByText(/40 of 120/)).toBeInTheDocument();
+    expect(screen.getByText(/3 of 12/)).toBeInTheDocument();
+    // 40 scoped is well above the floor of 2, so the percentage is shown
+    expect(screen.getByText(/33\.3%/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/at or below the estimated false-positive floor/)
+    ).not.toBeInTheDocument();
+  });
+
+  it('discloses the false-positive floor and withholds a sub-0.1% scoped share', async () => {
+    const mockStats: StatisticsResponse = {
+      busiest_channels_24h: [],
+      contact_count: 0,
+      repeater_count: 0,
+      channel_count: 0,
+      total_packets: 0,
+      decrypted_packets: 0,
+      undecrypted_packets: 0,
+      total_dms: 0,
+      total_channel_messages: 0,
+      total_outgoing: 0,
+      contacts_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      repeaters_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      known_channels_active: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      path_hash_width_24h: {
+        total_packets: 0,
+        single_byte: 0,
+        double_byte: 0,
+        triple_byte: 0,
+        single_byte_pct: 0,
+        double_byte_pct: 0,
+        triple_byte_pct: 0,
+      },
+      // Mirrors real-world data: 70 "scoped" packets against a measured floor of
+      // 60 is corrupt-capture noise, not adoption.
+      region_scope_24h: {
+        total_messages: 391757,
+        scoped_messages: 70,
+        scoped_pct: 0.0179,
+        false_positive_floor: 60.3,
+        total_senders: 117,
+        scoped_senders: 3,
+        scoped_senders_pct: 2.56,
+      },
+      packets_per_hour_72h: [],
+      noise_floor_24h: {
+        sample_interval_seconds: 60,
+        coverage_seconds: 0,
+        latest_noise_floor_dbm: null,
+        latest_timestamp: null,
+        samples: [],
+      },
+    };
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(mockStats), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    renderModal({ externalSidebarNav: true, desktopSection: 'statistics' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Region Scope (24h)')).toBeInTheDocument();
+    });
+
+    // 70 scoped sits just above the 60.3 floor, so most of it is corrupt captures
+    expect(screen.getByText(/Includes an estimated 60 false positives/)).toBeInTheDocument();
+    // 0.0179% would render as a meaningless "0.0%", so the share is withheld
+    expect(screen.queryByText(/0\.0%/)).not.toBeInTheDocument();
+    expect(screen.getByText(/70 of 391,757/)).toBeInTheDocument();
+    // ...but the decryption-backed sender figure still stands
+    expect(screen.getByText(/3 of 117/)).toBeInTheDocument();
+    expect(screen.getByText(/2\.6%/)).toBeInTheDocument();
+  });
+
+  it('reports scoped traffic as noise when it is at or below the floor', async () => {
+    const mockStats: StatisticsResponse = {
+      busiest_channels_24h: [],
+      contact_count: 0,
+      repeater_count: 0,
+      channel_count: 0,
+      total_packets: 0,
+      decrypted_packets: 0,
+      undecrypted_packets: 0,
+      total_dms: 0,
+      total_channel_messages: 0,
+      total_outgoing: 0,
+      contacts_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      repeaters_heard: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      known_channels_active: { last_hour: 0, last_24_hours: 0, last_week: 0 },
+      path_hash_width_24h: {
+        total_packets: 0,
+        single_byte: 0,
+        double_byte: 0,
+        triple_byte: 0,
+        single_byte_pct: 0,
+        double_byte_pct: 0,
+        triple_byte_pct: 0,
+      },
+      region_scope_24h: {
+        total_messages: 5000,
+        scoped_messages: 12,
+        scoped_pct: 0.24,
+        false_positive_floor: 20,
+        total_senders: 40,
+        scoped_senders: 0,
+        scoped_senders_pct: 0,
+      },
+      packets_per_hour_72h: [],
+      noise_floor_24h: {
+        sample_interval_seconds: 60,
+        coverage_seconds: 0,
+        latest_noise_floor_dbm: null,
+        latest_timestamp: null,
+        samples: [],
+      },
+    };
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(mockStats), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    renderModal({ externalSidebarNav: true, desktopSection: 'statistics' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Region Scope (24h)')).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText(/at or below the estimated false-positive floor \(20\)/)
+    ).toBeInTheDocument();
+    // Percentage withheld even though 0.24% would round visibly — it is noise
+    expect(screen.queryByText(/0\.2%/)).not.toBeInTheDocument();
   });
 
   it('fetches statistics when expanded in mobile external-nav mode', async () => {
@@ -767,6 +999,15 @@ describe('SettingsModal', () => {
         single_byte_pct: 50,
         double_byte_pct: 30,
         triple_byte_pct: 20,
+      },
+      region_scope_24h: {
+        total_messages: 0,
+        scoped_messages: 0,
+        scoped_pct: 0,
+        false_positive_floor: 0,
+        total_senders: 0,
+        scoped_senders: 0,
+        scoped_senders_pct: 0,
       },
       packets_per_hour_72h: [],
       noise_floor_24h: {

@@ -571,6 +571,8 @@ export function App() {
     contacts,
     channels,
     config,
+    blockedKeys: appSettings?.blocked_keys,
+    blockedNames: appSettings?.blocked_names,
     health,
     messages: sortedMessages,
     preSorted: activeContactIsRoom,

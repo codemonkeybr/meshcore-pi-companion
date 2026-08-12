@@ -37,6 +37,8 @@ interface ConversationPaneProps {
   contacts: Contact[];
   channels: Channel[];
   config: RadioConfig | null;
+  blockedKeys?: string[];
+  blockedNames?: string[];
   health: HealthStatus | null;
   notificationsSupported: boolean;
   notificationsEnabled: boolean;
@@ -121,6 +123,8 @@ export function ConversationPane({
   contacts,
   channels,
   config,
+  blockedKeys,
+  blockedNames,
   health,
   notificationsSupported,
   notificationsEnabled,
@@ -210,6 +214,8 @@ export function ConversationPane({
               contacts={contacts}
               focusedKey={activeConversation.mapFocusKey}
               config={config}
+              blockedKeys={blockedKeys}
+              blockedNames={blockedNames}
               onSelectContact={(contact) =>
                 onSelectConversation({
                   type: 'contact',

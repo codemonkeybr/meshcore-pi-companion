@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { configure, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -47,6 +47,7 @@ vi.mock('../hooks', async (importOriginal) => {
       mentions: {},
       lastMessageTimes: {},
       unreadLastReadAts: {},
+      firstUnreadIds: {},
       recordMessageEvent: vi.fn(),
       renameConversationState: vi.fn(),
       markAllRead: vi.fn(),
@@ -149,11 +150,28 @@ const publicChannel = {
   favorite: false,
 };
 
+// Modest timeout headroom for genuine CPU contention under the full parallel
+// suite (a healthy render settles in ~100ms). Must run at module scope, not in
+// beforeAll: vitest bakes each test's timeout in when it() registers during
+// collection, before any beforeAll runs. vi.setConfig is scoped to this file.
+vi.setConfig({ testTimeout: 15000 });
+configure({ asyncUtilTimeout: 5000 });
+
+// Set the URL hash the way the app reads it, WITHOUT the jsdom side effect that
+// makes this suite flaky. Assigning `window.location.hash = ...` queues an
+// *asynchronous* popstate in jsdom (real browsers only fire hashchange); those
+// stray popstates drain during a later test and reset the App's resolved
+// conversation to null via the popstate handler, permanently stranding it.
+// history.replaceState updates the hash without ever queuing a popstate.
+function setHash(hash: string) {
+  window.history.replaceState(null, '', hash || window.location.pathname);
+}
+
 describe('App startup hash resolution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
-    window.location.hash = `#contact/${'a'.repeat(64)}/Alice`;
+    setHash(`#contact/${'a'.repeat(64)}/Alice`);
 
     mocks.api.getRadioConfig.mockResolvedValue({
       public_key: 'aa'.repeat(32),
@@ -180,7 +198,9 @@ describe('App startup hash resolution', () => {
   });
 
   afterEach(() => {
-    window.location.hash = '';
+    // Reset via replaceState (never queues a popstate) so no hash state leaks
+    // into the next test. beforeEach also sets a known hash before each render.
+    setHash('');
     localStorage.clear();
   });
 
@@ -195,7 +215,7 @@ describe('App startup hash resolution', () => {
   });
 
   it('restores the trace tool from the URL hash', async () => {
-    window.location.hash = '#trace';
+    setHash('#trace');
 
     render(<App />);
 
@@ -207,7 +227,7 @@ describe('App startup hash resolution', () => {
   });
 
   it('restores the trace tool from the URL hash even when channels are unavailable', async () => {
-    window.location.hash = '#trace';
+    setHash('#trace');
     mocks.api.getChannels.mockResolvedValue([]);
 
     render(<App />);
@@ -220,7 +240,7 @@ describe('App startup hash resolution', () => {
   });
 
   it('reopens the last viewed trace tool even when channels are unavailable', async () => {
-    window.location.hash = '';
+    setHash('');
     localStorage.setItem(REOPEN_LAST_CONVERSATION_KEY, '1');
     localStorage.setItem(
       LAST_VIEWED_CONVERSATION_KEY,
@@ -251,7 +271,7 @@ describe('App startup hash resolution', () => {
       favorite: false,
     };
 
-    window.location.hash = '';
+    setHash('');
     localStorage.setItem(REOPEN_LAST_CONVERSATION_KEY, '1');
     localStorage.setItem(
       LAST_VIEWED_CONVERSATION_KEY,
@@ -283,7 +303,7 @@ describe('App startup hash resolution', () => {
       favorite: false,
     };
 
-    window.location.hash = '';
+    setHash('');
     localStorage.setItem(
       LAST_VIEWED_CONVERSATION_KEY,
       JSON.stringify({
@@ -314,7 +334,7 @@ describe('App startup hash resolution', () => {
       favorite: false,
     };
 
-    window.location.hash = '';
+    setHash('');
     mocks.api.getChannels.mockResolvedValue([publicChannel, chatChannel]);
     localStorage.setItem(
       LAST_VIEWED_CONVERSATION_KEY,
@@ -355,7 +375,7 @@ describe('App startup hash resolution', () => {
       first_seen: null,
     };
 
-    window.location.hash = '';
+    setHash('');
     localStorage.setItem(REOPEN_LAST_CONVERSATION_KEY, '1');
     localStorage.setItem(
       LAST_VIEWED_CONVERSATION_KEY,
@@ -377,8 +397,117 @@ describe('App startup hash resolution', () => {
     expect(window.location.hash).toBe('');
   });
 
+  describe('Browser back/forward navigation', () => {
+    it('navigates to a channel conversation when popstate fires', async () => {
+      const opsChannel = {
+        key: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC',
+        name: 'Ops',
+        is_hashtag: false,
+        on_radio: false,
+        last_read_at: null,
+        favorite: false,
+      };
+
+      setHash(`#channel/${opsChannel.key}/Ops`);
+      mocks.api.getChannels.mockResolvedValue([publicChannel, opsChannel]);
+
+      render(<App />);
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`channel:${opsChannel.key}:Ops`);
+        }
+      });
+
+      act(() => {
+        setHash(`#channel/${publicChannel.key}/Public`);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+      });
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`channel:${publicChannel.key}:Public`);
+        }
+      });
+    });
+
+    it('navigates to a contact conversation when popstate fires with a contact hash', async () => {
+      const aliceContact = {
+        public_key: 'b'.repeat(64),
+        name: 'Alice',
+        type: 1,
+        flags: 0,
+        direct_path: null,
+        direct_path_len: -1,
+        last_advert: null,
+        lat: null,
+        lon: null,
+        last_seen: null,
+        on_radio: false,
+        favorite: false,
+        last_contacted: null,
+        last_read_at: null,
+        first_seen: null,
+      };
+
+      setHash('');
+      mocks.api.getContacts.mockResolvedValue([aliceContact]);
+
+      render(<App />);
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`channel:${publicChannel.key}:Public`);
+        }
+      });
+
+      // Flush any pending React work (contacts render + its effects) so that
+      // contactsRef.current is populated before the popstate handler reads it.
+      // waitFor may resolve after the channels render commits but before the
+      // contacts render commits, leaving contactsRef.current=[].
+      await act(async () => {});
+
+      act(() => {
+        setHash(`#contact/${aliceContact.public_key}/Alice`);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+      });
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`contact:${aliceContact.public_key}:Alice`);
+        }
+      });
+    });
+
+    it('recovers to Public when a popstate lands on an empty/unresolvable hash', async () => {
+      setHash('');
+      render(<App />);
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`channel:${publicChannel.key}:Public`);
+        }
+      });
+
+      // A back/forward navigation to the bare URL (empty hash) must not strand
+      // the app on a blank conversation: the initial-load phases are gated by
+      // hasSetDefaultConversation and won't re-resolve, so the popstate handler
+      // itself has to fall back to Public rather than clearing to null.
+      act(() => {
+        setHash('');
+        window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+      });
+
+      await waitFor(() => {
+        for (const node of screen.getAllByTestId('active-conversation')) {
+          expect(node).toHaveTextContent(`channel:${publicChannel.key}:Public`);
+        }
+      });
+    });
+  });
+
   it('stays on radio settings section even when radio is disconnected', async () => {
-    window.location.hash = '#settings/radio';
+    setHash('#settings/radio');
     mocks.api.getRadioConfig.mockRejectedValue(new Error('radio offline'));
 
     render(<App />);

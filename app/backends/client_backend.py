@@ -32,6 +32,15 @@ class ClientBackend(RadioBackend):
         await self._mc.disconnect()
 
     @property
+    def commands(self) -> Any:
+        """Underlying meshcore_py command handler, for call sites that need raw
+        command dispatch (e.g. firmware-version-gated commands in
+        ``app.services.flood_scope``) rather than one of the passthrough methods
+        below. SpiBackend.commands returns itself for the same call sites.
+        """
+        return self._mc.commands
+
+    @property
     def is_connected(self) -> bool:
         return self._mc.is_connected
 

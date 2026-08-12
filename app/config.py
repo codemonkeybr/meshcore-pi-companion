@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     basic_auth_password: str = ""
     # SPI backend: path to config.yaml (auto-detected at data/config.yaml)
     config_file: str = "data/config.yaml"
+    vapid_subject: str = "mailto:noreply@meshcore.local"
 
     @property
     def spi_config_path(self) -> Path | None:
