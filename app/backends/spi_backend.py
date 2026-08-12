@@ -451,6 +451,161 @@ class SpiBackend(RadioBackend):
     # Messaging
     # ------------------------------------------------------------------
 
+    async def _send_text(
+        self,
+        contact_name: str,
+        message: str,
+        attempt: int = 1,
+        message_type: str = "direct",
+        out_path: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_text(); rebuilt here from the
+        pre-1.0.10 implementation using PacketBuilder + dispatcher.send_packet
+        directly. Return shape matches the old method exactly (success/attempt/
+        message_type/out_path/snr/rssi/crc) so callers are unaffected.
+        """
+        from pymc_core.protocol import PacketBuilder
+
+        contact = self._contact_store.get_by_name(contact_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {contact_name}")
+
+        pkt, ack_crc = PacketBuilder.create_text_message(
+            contact=contact,
+            local_identity=self._identity,
+            message=message,
+            attempt=attempt,
+            message_type=message_type,
+            out_path=out_path,
+        )
+
+        success = await self._node.dispatcher.send_packet(
+            pkt, wait_for_ack=True, expected_crc=ack_crc
+        )
+        if not success:
+            logger.warning("No ACK received for CRC %08X", ack_crc)
+
+        snr = getattr(pkt, "snr", None)
+        rssi = self._radio.get_last_rssi() if hasattr(self._radio, "get_last_rssi") else None
+        if snr is None and hasattr(self._radio, "get_last_snr"):
+            snr = self._radio.get_last_snr()
+
+        return {
+            "success": success,
+            "attempt": attempt,
+            "message_type": message_type,
+            "out_path": out_path,
+            "snr": snr,
+            "rssi": rssi,
+            "crc": ack_crc,
+        }
+
+    async def _send_repeater_command(
+        self,
+        repeater_name: str,
+        command: str,
+        parameters: str | None = None,
+    ) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_repeater_command(); rebuilt here
+        from the pre-1.0.10 implementation. Sends a text command to a repeater and
+        waits for a text response via the shared TextMessageHandler's command-response
+        callback. Return shape matches the old method exactly.
+        """
+        from pymc_core.protocol import PacketBuilder
+
+        contact = self._contact_store.get_by_name(repeater_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {repeater_name}")
+
+        start_time = time.time()
+        full_command = f"{command} {parameters}" if parameters else command
+
+        response_event = asyncio.Event()
+        response_data: dict[str, Any] = {"text": None}
+
+        def response_callback(message_text: str, sender_contact: Any) -> None:
+            response_data["text"] = message_text
+            response_event.set()
+
+        text_handler = self._node.dispatcher.text_message_handler
+        text_handler.set_command_response_callback(response_callback)
+        try:
+            pkt, ack_crc = PacketBuilder.create_text_message(
+                contact=contact,
+                local_identity=self._identity,
+                message=full_command,
+                attempt=1,
+                message_type="command",
+            )
+            ack_success = await self._node.dispatcher.send_packet(
+                pkt, wait_for_ack=True, expected_crc=ack_crc
+            )
+
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=15.0)
+                response_received = True
+            except TimeoutError:
+                response_received = False
+
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+            response_text = response_data["text"]
+
+            if response_received:
+                return {
+                    "success": True,
+                    "repeater": repeater_name,
+                    "command": command,
+                    "parameters": parameters,
+                    "full_command": full_command,
+                    "response": response_text,
+                    "rtt_ms": rtt_ms,
+                    "crc": ack_crc,
+                    "ack_received": ack_success,
+                    "reason": f"Command '{command}' successful with response"
+                    + ("" if ack_success else " (no ACK)"),
+                }
+            if ack_success:
+                return {
+                    "success": True,
+                    "repeater": repeater_name,
+                    "command": command,
+                    "parameters": parameters,
+                    "full_command": full_command,
+                    "response": "Command sent successfully (no response received)",
+                    "rtt_ms": rtt_ms,
+                    "crc": ack_crc,
+                    "ack_received": True,
+                    "reason": f"Command '{command}' sent but no response received",
+                }
+            return {
+                "success": False,
+                "repeater": repeater_name,
+                "command": command,
+                "parameters": parameters,
+                "full_command": full_command,
+                "response": None,
+                "rtt_ms": rtt_ms,
+                "crc": ack_crc,
+                "ack_received": False,
+                "reason": f"No ACK or response received for command '{command}'",
+            }
+        except Exception as e:
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+            return {
+                "success": False,
+                "repeater": repeater_name,
+                "command": command,
+                "parameters": parameters,
+                "full_command": full_command,
+                "response": None,
+                "rtt_ms": rtt_ms,
+                "crc": None,
+                "ack_received": False,
+                "reason": f"Error sending command: {e}",
+            }
+        finally:
+            text_handler.set_command_response_callback(None)
+
     async def send_msg(
         self,
         dst: Any,
@@ -465,7 +620,7 @@ class SpiBackend(RadioBackend):
             return _Event(EventType.ERROR, {"error": "Not connected"})
 
         contact_name = getattr(dst, "name", None) or str(dst)
-        result = await self._node.send_text(contact_name, msg)
+        result = await self._send_text(contact_name, msg)
 
         ack_crc = result.get("crc", 0)
         # meshcore uses MSG_SENT for successful send acknowledgements; mirror that here
@@ -492,7 +647,7 @@ class SpiBackend(RadioBackend):
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
 
-        result = await self._node.send_repeater_command(contact_name, cmd)
+        result = await self._send_repeater_command(contact_name, cmd)
         # meshcore's EventType enum does not define CMD_RESPONSE in all versions.
         # For SPI mode we already have the full response dict from pymc_core, so
         # return OK and let the router decide whether it needs to wait for a
@@ -519,11 +674,26 @@ class SpiBackend(RadioBackend):
             if 0 <= chan < len(channels):
                 group_name = channels[chan]["name"]
         if group_name:
-            # send_group_text is fire-and-forget (no ACK expected). Scheduling it
-            # as a background task lets the API return immediately so the message
-            # appears in the UI without waiting for LBT + transmission (~5-15s).
+            # pymc_core >=1.0.10 dropped MeshNode.send_group_text(); build and send
+            # the group datagram directly the same way it did internally, matching
+            # the send_advert pattern below.
+            from pymc_core.protocol import PacketBuilder
+
+            pkt = PacketBuilder.create_group_datagram(
+                group_name=group_name,
+                local_identity=self._identity,
+                message=msg,
+                sender_name=self._self_info.get("adv_name", "RemoteTerm")
+                if self._self_info
+                else "RemoteTerm",
+                channels_config=self._channel_db.get_channels(),
+            )
+
+            # Fire-and-forget (no ACK expected). Scheduling it as a background task
+            # lets the API return immediately so the message appears in the UI
+            # without waiting for LBT + transmission (~5-15s).
             asyncio.create_task(
-                self._node.send_group_text(group_name, msg),
+                self._node.dispatcher.send_packet(pkt, wait_for_ack=False),
                 name=f"spi-group-send-{chan}",
             )
             return _Event(EventType.MSG_SENT, {"success": True})
@@ -721,6 +891,75 @@ class SpiBackend(RadioBackend):
     # Repeater operations
     # ------------------------------------------------------------------
 
+    async def _send_login(self, repeater_name: str, password: str) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_login(); rebuilt here from the
+        pre-1.0.10 implementation using the dispatcher's login_response_handler
+        directly (same handler CompanionBase._get_login_response_handler() returns).
+        """
+        from pymc_core.protocol import PacketBuilder
+
+        contact = self._contact_store.get_by_name(repeater_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {repeater_name}")
+
+        start_time = time.time()
+        contact_pubkey = bytes.fromhex(contact.public_key)
+        dest_hash = contact_pubkey[0] if len(contact_pubkey) > 0 else 0
+
+        login_handler = self._node.dispatcher.login_response_handler
+        login_handler.store_login_password(dest_hash, password)
+
+        login_result: dict[str, Any] = {"success": False, "data": {}}
+        login_event = asyncio.Event()
+
+        def login_response_callback(success: bool, response_data: dict) -> None:
+            login_result["success"] = success
+            login_result["data"] = response_data
+            login_event.set()
+
+        login_handler.set_login_callback(login_response_callback)
+        try:
+            pkt = PacketBuilder.create_login_packet(
+                contact=contact, local_identity=self._identity, password=password
+            )
+            await self._node.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            try:
+                await asyncio.wait_for(login_event.wait(), timeout=10.0)
+            except TimeoutError:
+                logger.warning("Login timeout for repeater %r", repeater_name)
+                return {
+                    "success": False,
+                    "repeater": repeater_name,
+                    "command": "login",
+                    "rtt_ms": round((time.time() - start_time) * 1000, 2),
+                    "reason": "Login response timeout",
+                }
+
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+            success = login_result["success"]
+            response_data = login_result["data"]
+
+            if success:
+                reason = (
+                    f"Login successful - Admin: {'Yes' if response_data.get('is_admin') else 'No'}"
+                )
+            else:
+                reason = f"Login failed: {response_data.get('error', 'Login failed')}"
+
+            return {
+                "success": success,
+                "repeater": repeater_name,
+                "command": "login",
+                "rtt_ms": rtt_ms,
+                "is_admin": response_data.get("is_admin", False),
+                "keep_alive_interval": response_data.get("keep_alive_interval", 0),
+                "reason": reason,
+            }
+        finally:
+            login_handler.set_login_callback(None)
+            login_handler.clear_login_password(dest_hash)
+
     async def send_login(self, public_key: str, password: str) -> Any:
         from meshcore import EventType
 
@@ -730,8 +969,261 @@ class SpiBackend(RadioBackend):
         contact_name = self._resolve_name(public_key)
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
-        result = await self._node.send_login(contact_name, password)
+        result = await self._send_login(contact_name, password)
         return _Event(EventType.LOGIN_SUCCESS, result)
+
+    async def _send_protocol_request(
+        self,
+        repeater_name: str,
+        protocol_code: int,
+        data: bytes = b"",
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_protocol_request(); rebuilt here
+        from the pre-1.0.10 implementation using the dispatcher's
+        protocol_response_handler directly.
+        """
+        from pymc_core.protocol import PacketBuilder
+
+        contact = self._contact_store.get_by_name(repeater_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {repeater_name}")
+
+        start_time = time.time()
+        contact_hash = bytes.fromhex(contact.public_key)[0]
+
+        proto_handler = self._node.dispatcher.protocol_response_handler
+        if proto_handler is None:
+            raise RuntimeError("Protocol response handler not available")
+
+        response_event = asyncio.Event()
+        response_data: dict[str, Any] = {"success": False, "text": None, "parsed": {}}
+
+        def response_callback(success: bool, text: str, parsed_data: dict | None = None) -> None:
+            response_data["success"] = success
+            response_data["text"] = text
+            response_data["parsed"] = parsed_data or {}
+            response_event.set()
+
+        proto_handler.set_response_callback(contact_hash, response_callback)
+        try:
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=contact,
+                local_identity=self._identity,
+                protocol_code=protocol_code,
+                data=data,
+            )
+            await self._node.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=timeout)
+                timed_out = False
+            except TimeoutError:
+                timed_out = True
+
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+
+            if timed_out:
+                return {
+                    "success": False,
+                    "repeater": repeater_name,
+                    "command": f"protocol_0x{protocol_code:02X}",
+                    "protocol_code": protocol_code,
+                    "response": None,
+                    "parsed_data": {},
+                    "rtt_ms": rtt_ms,
+                    "ack_received": False,
+                    "reason": f"Protocol 0x{protocol_code:02X} timeout",
+                }
+
+            return {
+                "success": response_data["success"],
+                "repeater": repeater_name,
+                "command": f"protocol_0x{protocol_code:02X}",
+                "protocol_code": protocol_code,
+                "response": response_data["text"],
+                "parsed_data": response_data["parsed"],
+                "rtt_ms": rtt_ms,
+                "ack_received": False,
+                "reason": (
+                    f"Protocol 0x{protocol_code:02X} "
+                    + ("successful" if response_data["success"] else "failed")
+                ),
+            }
+        finally:
+            proto_handler.clear_response_callback(contact_hash)
+
+    async def _send_telemetry_request(
+        self,
+        contact_name: str,
+        want_base: bool = True,
+        want_location: bool = True,
+        want_environment: bool = True,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_telemetry_request(); rebuilt
+        here from the pre-1.0.10 implementation.
+        """
+        from pymc_core.protocol import PacketBuilder
+        from pymc_core.protocol.constants import REQ_TYPE_GET_TELEMETRY_DATA
+
+        contact = self._contact_store.get_by_name(contact_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {contact_name}")
+
+        start_time = time.time()
+        contact_hash = bytes.fromhex(contact.public_key)[0]
+
+        proto_handler = self._node.dispatcher.protocol_response_handler
+        if proto_handler is None:
+            raise RuntimeError("Protocol response handler not available")
+
+        response_event = asyncio.Event()
+        response_data: dict[str, Any] = {"success": False, "text": None, "parsed": {}}
+
+        def response_callback(success: bool, text: str, parsed_data: dict | None = None) -> None:
+            response_data["success"] = success
+            response_data["text"] = text
+            response_data["parsed"] = parsed_data or {}
+            response_event.set()
+
+        proto_handler.set_response_callback(contact_hash, response_callback)
+        try:
+            inv = PacketBuilder._compute_inverse_perm_mask(
+                want_base, want_location, want_environment
+            )
+            pkt, _ = PacketBuilder.create_protocol_request(
+                contact=contact,
+                local_identity=self._identity,
+                protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
+                data=bytes([inv]),
+            )
+            await self._node.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=timeout)
+                timed_out = False
+            except TimeoutError:
+                timed_out = True
+
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+            requested = {
+                "base": want_base,
+                "location": want_location,
+                "environment": want_environment,
+            }
+
+            if timed_out:
+                return {
+                    "success": False,
+                    "contact": contact_name,
+                    "requested": requested,
+                    "telemetry_data": None,
+                    "rtt_ms": rtt_ms,
+                    "reason": f"Telemetry response timeout after {timeout}s",
+                }
+
+            return {
+                "success": response_data["success"],
+                "contact": contact_name,
+                "requested": requested,
+                "telemetry_data": response_data["parsed"],
+                "response_text": response_data["text"],
+                "rtt_ms": rtt_ms,
+                "reason": "Telemetry response received"
+                if response_data["success"]
+                else "Telemetry request failed",
+            }
+        finally:
+            proto_handler.clear_response_callback(contact_hash)
+
+    async def _send_trace_packet(
+        self,
+        contact_name: str,
+        tag: int,
+        auth_code: int,
+        flags: int = 0,
+        path: list[int] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """pymc_core >=1.0.10 dropped MeshNode.send_trace_packet(); rebuilt here
+        from the pre-1.0.10 implementation using the dispatcher's trace_handler.
+        """
+        from pymc_core.protocol import PacketBuilder
+
+        contact = self._contact_store.get_by_name(contact_name) if self._contact_store else None
+        if not contact:
+            raise RuntimeError(f"Contact not found: {contact_name}")
+
+        start_time = time.time()
+        target_node_id = bytes.fromhex(contact.public_key)[0]
+        trace_path = path if path else [target_node_id]
+
+        pkt = PacketBuilder.create_trace(tag, auth_code, flags, path=trace_path)
+        trace_data = {"tag": tag, "auth_code": auth_code, "flags": flags, "path": trace_path}
+
+        handler = self._node.dispatcher.trace_handler
+        if not handler:
+            return {
+                "success": False,
+                "contact": contact_name,
+                "reason": "No trace handler available",
+            }
+
+        contact_hash = target_node_id
+        response_event = asyncio.Event()
+        response_data: dict[str, Any] = {"success": True, "text": None, "parsed": {}}
+
+        def response_callback(success: bool, text: str, parsed_data: dict | None = None) -> None:
+            response_data["success"] = success
+            response_data["text"] = text
+            response_data["parsed"] = parsed_data or {}
+            response_event.set()
+
+        handler.set_response_callback(contact_hash, response_callback)
+        try:
+            await self._node.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=timeout)
+                timed_out = False
+            except TimeoutError:
+                timed_out = True
+
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+
+            if timed_out:
+                return {
+                    "success": False,
+                    "contact": contact_name,
+                    "trace_data": trace_data,
+                    "response": None,
+                    "rtt_ms": rtt_ms,
+                    "reason": f"Timeout after {timeout}s",
+                }
+
+            return {
+                "success": response_data["success"],
+                "contact": contact_name,
+                "trace_data": trace_data,
+                "response": response_data["text"],
+                "parsed_data": response_data["parsed"],
+                "rtt_ms": rtt_ms,
+                "reason": "Response received",
+            }
+        except Exception as e:
+            rtt_ms = round((time.time() - start_time) * 1000, 2)
+            logger.error("Trace error: %s", e)
+            return {
+                "success": False,
+                "contact": contact_name,
+                "trace_data": trace_data,
+                "response": None,
+                "rtt_ms": rtt_ms,
+                "reason": f"Error: {e}",
+            }
+        finally:
+            handler.clear_response_callback(contact_hash)
 
     async def req_status_sync(
         self,
@@ -764,7 +1256,7 @@ class SpiBackend(RadioBackend):
 
         raw_stats: dict[str, Any] | None = None
         try:
-            proto_result = await self._node.send_protocol_request(contact_name, protocol_code, b"")
+            proto_result = await self._send_protocol_request(contact_name, protocol_code, b"")
             if isinstance(proto_result, dict) and proto_result.get("success") is True:
                 # Different pymc_core versions may use slightly different field
                 # names for the parsed payload.
@@ -832,7 +1324,7 @@ class SpiBackend(RadioBackend):
             return _Event(EventType.STATUS_RESPONSE, mapped)
 
         # Last-resort fallback: use the helper on the pymc_core node object.
-        result = await self._node.send_status_request(contact_name)
+        result = await self._send_repeater_command(contact_name, "status")
         return _Event(EventType.STATUS_RESPONSE, result)
 
     async def req_telemetry_sync(
@@ -848,7 +1340,7 @@ class SpiBackend(RadioBackend):
         contact_name = self._resolve_name(public_key)
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
-        result = await self._node.send_telemetry_request(contact_name, timeout=timeout)
+        result = await self._send_telemetry_request(contact_name, timeout=timeout)
         return _Event(EventType.TELEMETRY_RESPONSE, result)
 
     async def fetch_all_neighbours(
@@ -870,7 +1362,7 @@ class SpiBackend(RadioBackend):
             return {"error": "Contact not found"}
 
         try:
-            result = await self._node.send_repeater_command(contact_name, "neighbors")
+            result = await self._send_repeater_command(contact_name, "neighbors")
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("SPI neighbours command failed")
             return {"error": str(exc)}
@@ -936,7 +1428,7 @@ class SpiBackend(RadioBackend):
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found for trace"})
 
-        result = await self._node.send_trace_packet(contact_name, tag, auth_code=0)
+        result = await self._send_trace_packet(contact_name, tag, auth_code=0)
         return _Event(EventType.TRACE_DATA, result)
 
     async def wait_for_event(

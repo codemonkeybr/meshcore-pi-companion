@@ -24,7 +24,7 @@ where = ["."]
 include = ["app*"]
 
 [project.optional-dependencies]
-spi = ["pymc_core[hardware]>=1.0.7,<1.0.10"]
+spi = ["pymc_core[hardware]>=1.0.12"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
