@@ -138,6 +138,10 @@ SPI config defaults to **`data/config.yaml`** (see `python -m app.setup_cli --he
 
 For deployment (troubleshooting, service, identity), see [docs/PI_DEPLOYMENT.md](docs/PI_DEPLOYMENT.md).
 
+### Running on ClockworkPi uConsole (HackerGadgets AIO v2)
+
+The `uconsole` hardware profile drives the SX1262 on a [HackerGadgets AIO v2](https://hackergadgets.com/products/uconsole-aio-v2) board over SPI1. This setup has real quirks (SPI1 boot config, a required DIO2/DIO3 radio setting, and a conflict with `meshtasticd` if it's also installed) that aren't obvious from the hardware alone — see [docs/UCONSOLE_DEPLOYMENT.md](docs/UCONSOLE_DEPLOYMENT.md) for the full walkthrough and troubleshooting.
+
 ## Development
 
 ### Backend
