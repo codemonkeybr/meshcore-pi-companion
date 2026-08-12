@@ -970,6 +970,16 @@ class SpiBackend(RadioBackend):
         if not contact_name:
             return _Event(EventType.ERROR, {"error": "Contact not found"})
         result = await self._send_login(contact_name, password)
+
+        # Callers (e.g. repeaters.py's prepare_repeater_connection) subscribe to
+        # LOGIN_SUCCESS/LOGIN_FAILED filtered by pubkey_prefix *before* calling
+        # send_login and await that event rather than this return value directly
+        # (matching how ClientBackend's fire-and-forget send_login works). Emit
+        # it here so that flow resolves instead of always timing out.
+        pubkey_prefix = public_key[:12].lower()
+        event_type = EventType.LOGIN_SUCCESS if result.get("success") else EventType.LOGIN_FAILED
+        await self._event_bus.emit(event_type, {"pubkey_prefix": pubkey_prefix, **result})
+
         return _Event(EventType.LOGIN_SUCCESS, result)
 
     async def _send_protocol_request(
@@ -1231,13 +1241,14 @@ class SpiBackend(RadioBackend):
         timeout: int = 10,
         min_timeout: int = 5,
     ) -> Any:
-        from meshcore import EventType
-
+        # Matches meshcore's own req_status_sync: returns the plain payload
+        # dict (or None on failure), not an _Event wrapper -- callers (e.g.
+        # repeaters.py) call .get() directly on the return value.
         if not self._node:
-            return _Event(EventType.ERROR, {"error": "Not connected"})
+            return None
         contact_name = self._resolve_name(public_key)
         if not contact_name:
-            return _Event(EventType.ERROR, {"error": "Contact not found"})
+            return None
         # Prefer a binary REQ protocol request here. If we rely on higher-level
         # helpers that may be implemented as text/CLI on some pymc_core
         # versions/firmware builds, the repeater may respond with:
@@ -1321,11 +1332,10 @@ class SpiBackend(RadioBackend):
                 "direct_dups": raw_stats.get("n_direct_dups", 0),
                 "full_evts": raw_stats.get("err_events", 0),
             }
-            return _Event(EventType.STATUS_RESPONSE, mapped)
+            return mapped
 
         # Last-resort fallback: use the helper on the pymc_core node object.
-        result = await self._send_repeater_command(contact_name, "status")
-        return _Event(EventType.STATUS_RESPONSE, result)
+        return await self._send_repeater_command(contact_name, "status")
 
     async def req_telemetry_sync(
         self,
@@ -1333,15 +1343,19 @@ class SpiBackend(RadioBackend):
         timeout: int = 10,
         min_timeout: int = 5,
     ) -> Any:
-        from meshcore import EventType
-
+        # Matches meshcore's own req_telemetry_sync: returns the list of
+        # decoded CayenneLPP sensor entries directly (or None), not an _Event
+        # wrapper -- callers (e.g. repeaters.py) iterate the return value.
         if not self._node:
-            return _Event(EventType.ERROR, {"error": "Not connected"})
+            return None
         contact_name = self._resolve_name(public_key)
         if not contact_name:
-            return _Event(EventType.ERROR, {"error": "Contact not found"})
+            return None
         result = await self._send_telemetry_request(contact_name, timeout=timeout)
-        return _Event(EventType.TELEMETRY_RESPONSE, result)
+        telemetry_data = result.get("telemetry_data")
+        if isinstance(telemetry_data, dict):
+            return telemetry_data.get("sensors")
+        return None
 
     async def fetch_all_neighbours(
         self,
@@ -1494,8 +1508,22 @@ class SpiBackend(RadioBackend):
     # Events / subscriptions
     # ------------------------------------------------------------------
 
-    def subscribe(self, event_type: Any, handler: Any) -> Any:
-        return self._event_bus.subscribe(event_type, handler)
+    def subscribe(
+        self,
+        event_type: Any,
+        handler: Any,
+        attribute_filters: dict[str, Any] | None = None,
+    ) -> Any:
+        if not attribute_filters:
+            return self._event_bus.subscribe(event_type, handler)
+
+        def _filtered_handler(event: _Event) -> Any:
+            for key, val in attribute_filters.items():
+                if event.payload.get(key) != val:
+                    return None
+            return handler(event)
+
+        return self._event_bus.subscribe(event_type, _filtered_handler)
 
     # ------------------------------------------------------------------
     # Backend-specific helpers
