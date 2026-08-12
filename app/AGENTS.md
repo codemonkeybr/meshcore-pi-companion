@@ -24,16 +24,19 @@ Keep it aligned with `app/` source files and router behavior.
 ```text
 app/
 ├── main.py              # App startup/lifespan, router registration, static frontend mounting
+├── api_docs.py          # OpenAPI description/tag metadata and docs route registration
 ├── config.py            # Env-driven runtime settings
 ├── database.py          # SQLite connection + base schema + migration runner
 ├── migrations.py        # Schema migrations (SQLite user_version)
 ├── models.py            # Pydantic request/response models and typed write contracts (for example ContactUpsert)
-├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout)
+├── version_info.py      # Unified version/build metadata resolution for debug + startup surfaces
+├── repository/          # Data access layer (contacts, channels, messages, raw_packets, settings, fanout, push_subscriptions, repeater_telemetry, contact_telemetry)
 ├── services/            # Shared orchestration/domain services
 │   ├── messages.py              # Shared message creation, dedup, ACK application
 │   ├── message_send.py          # Direct send, channel send, resend workflows
 │   ├── dm_ack_tracker.py        # Pending DM ACK state
 │   ├── contact_reconciliation.py # Prefix-claim, sender-key backfill, name-history wiring
+│   ├── flood_scope.py           # Firmware-version-aware flood-scope set/clear command seam
 │   ├── radio_lifecycle.py       # Post-connect setup and reconnect/setup helpers
 │   ├── radio_commands.py        # Radio config/private-key command workflows
 │   └── radio_runtime.py         # Router/dependency seam over the global RadioManager
@@ -51,6 +54,7 @@ app/
 ├── dependencies.py      # Shared FastAPI dependency providers
 ├── path_utils.py        # Path hex rendering and hop-width helpers
 ├── region_scope.py      # Normalize/validate regional flood-scope values
+├── region_resolver.py   # Recompute transport codes per known region to name a packet's region
 ├── keystore.py          # Ephemeral private/public key storage for DM decryption
 ├── frontend_static.py   # Mount/serve built frontend (production)
 ├── spi_config_file.py  # Load/save SPI config (data/config.yaml)
@@ -116,12 +120,61 @@ app/
 ### Read/unread state
 
 - Server is source of truth (`contacts.last_read_at`, `channels.last_read_at`).
-- `GET /api/read-state/unreads` returns counts, mention flags, and `last_message_times`.
+- `GET /api/read-state/unreads` returns counts, mention flags, `last_message_times`, `last_read_ats`, and `first_unread_ids`.
+- `first_unread_ids` maps stateKey -> id of the oldest unread message, so the client can anchor the unread divider (and jump to it) without paging back through history. It is computed with `ROW_NUMBER() OVER (PARTITION BY type, conversation_key ORDER BY received_at, id)` — deliberately not `MIN(received_at)` with a bare id, because sender timestamps are whole seconds and same-second ties are routine, and not `MIN(id)`, because historical decryption inserts old messages with new ids.
+
+### DM ingest + ACKs
+
+- `services/dm_ingest.py` is the one place that should decide fallback-context resolution, DM dedup/reconciliation, and packet-linked vs. content-based storage behavior.
+- `CONTACT_MSG_RECV` is a fallback path, not a parallel source of truth. If you change DM storage behavior, trace both `event_handlers.py` and `packet_processor.py`.
+- DM ACK tracking is an in-memory pending/buffered map in `services/dm_ack_tracker.py`, with periodic expiry from `radio_sync.py`.
+- Outgoing DMs send once inline, store/broadcast immediately after the first successful `MSG_SENT`, then may retry up to 2 more times in the background only when the initial `MSG_SENT` result includes an expected ACK code and the message remains unacked.
+- DM retry timing follows the firmware-provided `suggested_timeout` from `PACKET_MSG_SENT`; do not replace it with a fixed app timeout unless you intentionally want more aggressive duplicate-prone retries.
+- Direct-message send behavior is intended to emulate `meshcore_py.commands.send_msg_with_retry(...)` when the radio provides an expected ACK code: stage the effective contact route on the radio, send, wait for ACK, and on the final retry force flood via `reset_path(...)`.
+- Non-final DM attempts use the contact's effective route (`override > direct > flood`). The final retry is intentionally sent as flood even when a routing override exists.
+- DM ACK state is terminal on first ACK. Retry attempts may register multiple expected ACK codes for the same message, but sibling pending codes are cleared once one ACK wins so a DM should not accrue multiple delivery confirmations from retries.
+- ACKs are delivery state, not routing state. Bundled ACKs inside PATH packets still satisfy pending DM sends, but ACK history does not feed contact route learning.
+- DM ACKs are matched from two independent radio emissions, so confirmation does not depend on the radio surfacing a host control frame: (1) the `EventType.ACK`/`SEND_CONFIRMED` host frame via `event_handlers.on_ack`, and (2) the raw RF packet itself via `packet_processor.process_raw_packet`. The packet processor extracts ACK codes both from PATH-return packets (flood replies, ACK embedded in `extra`) and from standalone `PayloadType.ACK` packets (direct replies, 4-byte cleartext payload), feeding both into `apply_dm_ack_code`. This matters for companion firmwares (e.g. pyMC over TCP) that do not reliably emit a separate host ACK frame for direct-routed replies.
+
+### Server login route escalation
+
+`prepare_authenticated_contact_connection` (`routers/server_control.py`, shared by repeater and room login) sends one login over the contact's effective route. If that draws **no reply at all**, it calls `reset_path(...)` and retries exactly once as flood.
+
+This is intentionally *more* than the reference implementations do — do not "correct" it back to single-shot:
+- Firmware `BaseChatMesh::sendLogin` picks flood only when `out_path_len == OUT_PATH_UNKNOWN` and never retries; `CMD_SEND_LOGIN` calls it once.
+- `meshcore_py` has `send_msg_with_retry` (with `flood_after` + `reset_path`) but no login equivalent — `send_login`/`send_login_sync` are single-shot.
+- Firmware only clears a stale path when the *host* asks (`CMD_RESET_PATH`); client-side path learning is otherwise passive via `onContactPathRecv`.
+
+Escalating is still correct because the **server** side treats an inbound flood as its cue to relearn the return path (`simple_repeater`/`simple_room_server`: `if (is_flood) client->out_path_len = OUT_PATH_UNKNOWN`). A flood login is therefore what repairs a broken route in both directions, and login gates the whole repeater dashboard.
+
+Escalation is bounded to one extra attempt and only fires when:
+- the first attempt **timed out**. `LOGIN_FAILED` means the server heard us and refused, so the route is fine and retrying only hammers it with bad credentials; a send error is a local radio problem a different route will not fix.
+- the contact was **not already on flood** (`effective_route_source != "flood"`), since the retry would otherwise be byte-identical.
+
+The retry deliberately does not re-run `_ensure_on_radio` — re-adding the contact would restore the route just cleared. `reset_path` clears the route on the radio only; the stored contact route is untouched, so the next `add_contact` re-stages it. That mirrors the DM retry and keeps one bad login from discarding a route that may be fine.
 
 ### Echo/repeat dedup
 
 - Message uniqueness: `(type, conversation_key, text, sender_timestamp)`.
 - Duplicate insert is treated as an echo/repeat: the new path (if any) is appended, and the ACK count is incremented **only for outgoing messages**. Incoming repeats add path data but do not change the ACK count.
+
+### Region scope decoding (transport codes)
+
+- `ROUTE_TYPE_TRANSPORT_FLOOD`/`ROUTE_TYPE_TRANSPORT_DIRECT` packets carry a 4-byte transport-code block; `parse_packet_envelope` exposes it as `transport_codes = (code_1, code_2)` (little-endian uint16s; `code_2` is reserved/0).
+- `code_1` is a keyed MAC over the payload, not a stable per-region id: `code = HMAC-SHA256(SHA256("#" + region_name)[:16], payload_type || payload)[:2]` (firmware `TransportKeyStore.cpp`; reserved values `0x0000`/`0xFFFF` are nudged to `0x0001`/`0xFFFE`). There is **no** reverse lookup table — to name a packet's region you recompute the code per candidate region and check for a match (`app/region_resolver.py`).
+- Candidate region names come from `app_settings.known_regions` (user-editable, seeded by migration 063 from `flood_scope` + channel `flood_scope_override`).
+- Channel messages persist `messages.transport_code` (uint16, NULL = unscoped plain flood) and `messages.region` (resolved name, NULL = scoped but no list match) at ingest, so the chat region badge survives raw-packet purge. The packet inspector (`GET /packets/{id}` and the `raw_packet` WS broadcast) resolves region on the fly against the current list since it still holds the raw payload.
+
+### Region-scope adoption stats (`region_scope_24h`)
+
+`GET /statistics` reports regional flood-scope uptake as two views with different denominators that intentionally will not agree:
+
+- **Traffic** (`bucket_region_scope` in `path_utils.py`) counts flood-routed (`route_type` 0/1) GroupText packets across all channels, including undecryptable ones. Zero-hop/direct sends are excluded because firmware reaches them through the non-transport `sendZeroHop`/`sendDirect` overloads and they can never carry transport codes.
+- **Senders** (`StatisticsRepository._region_scope_senders_24h`) counts distinct senders with at least one scoped message. Attribution requires decryption, so it only covers channels we hold keys for — narrower, but self-validating (a decrypted packet is provably not a corrupt capture) and immune to one chatty node skewing the result. Identity is `sender_key` falling back to `sender_name`; scoping reads `messages.transport_code`, falling back to the linked raw packet for rows stored before region tagging existed.
+
+`false_positive_floor` exists because corrupt RF captures land in `raw_packets` with effectively random headers and a share of them claim `TRANSPORT_FLOOD`. That garbage spreads near-uniformly across payload-type buckets, so it is measured directly from payload types the protocol does not define (`0x0C`/`0x0D`/`0x0E`) and averaged per bucket. **A `scoped_messages` count at or below the floor is not evidence of adoption**; surface the two together and never show the percentage alone. Do not "fix" the floor by removing it — without it the metric reads several times higher than reality.
+
+Both traffic buckets come from one 24h raw-packet scan (`_packet_shape_24h`) shared with `path_hash_width_24h`, so adding region stats costs no extra query or parse pass.
 
 ### Raw packet dedup policy
 
@@ -149,7 +202,19 @@ app/
 - `broadcast_event()` in `websocket.py` dispatches to the fanout manager for `message` and `raw_packet` events.
 - Each integration is a `FanoutModule` with scope-based filtering.
 - Community MQTT publishes raw packets only, but its derived `path` field for direct packets is emitted as comma-separated hop identifiers, not flat path bytes.
-- See `app/fanout/AGENTS_fanout.md` for full architecture details.
+- See `app/fanout/AGENTS_fanout.md` for full architecture details and event payload shapes.
+
+### Web Push notifications
+
+Web Push is a standalone subsystem in `app/push/`, separate from the fanout module system. It sends browser push notifications for incoming messages even when the tab is closed.
+
+- **Not a fanout module** — Web Push manages per-browser subscriptions (N browsers, each with its own endpoint and delivery state), unlike fanout which is one-config-to-one-destination.
+- **VAPID keys**: auto-generated P-256 key pair on first startup, stored in `app_settings.vapid_private_key` / `vapid_public_key`. Cached in-module by `app/push/vapid.py`.
+- **VAPID subject**: the JWT `sub` claim comes from `get_vapid_claims()` in `app/push/vapid.py`, configurable via `MESHCORE_VAPID_SUBJECT` (default `mailto:noreply@meshcore.local`). Apple's APNs rejects `.local` subjects with `403 BadJwtToken`, so iOS/Safari deployments must set a real `mailto:`/`https:` contact.
+- **Dispatch**: `broadcast_event()` in `websocket.py` fires `push_manager.dispatch_message(data)` alongside fanout for `message` events. The manager checks the global `app_settings.push_conversations` list, then sends to all currently registered subscriptions via `pywebpush` (run in a thread executor).
+- **Stale cleanup**: HTTP 404/410 from the push service triggers immediate subscription deletion.
+- **Subscriptions stored** in `push_subscriptions` table with `UNIQUE(endpoint)` for upsert semantics.
+- Requires HTTPS (self-signed OK) and outbound internet to reach browser push services.
 
 ## API Surface (all under `/api`)
 
@@ -163,7 +228,10 @@ app/
 - `GET /radio/config` — includes `path_hash_mode`, `path_hash_mode_supported`, and advert-location on/off
 - `PATCH /radio/config` — may update `path_hash_mode` (`0..2`) when firmware supports it
 - `PUT /radio/private-key`
-- `POST /radio/advertise`
+- `POST /radio/advertise` — manual advert send; request body may set `mode` to `flood` or `zero_hop` (defaults to `flood`)
+- `POST /radio/discover` — short mesh discovery sweep for nearby repeaters/sensors
+- `POST /radio/discover-regions` — sweep nearby repeaters via the guest anon regions request; aggregates flood-allowed region names into a deduped union for merging into `known_regions` (direct-routed, so only in-range repeaters answer; optional `public_keys`, else recent repeaters)
+- `POST /radio/trace` — send a multi-hop trace loop through known repeaters and back to the local radio
 - `POST /radio/disconnect`
 - `POST /radio/reboot`
 - `POST /radio/reconnect`
@@ -178,15 +246,24 @@ app/
 - `POST /contacts/{public_key}/command`
 - `POST /contacts/{public_key}/routing-override`
 - `POST /contacts/{public_key}/trace`
-- `POST /contacts/{public_key}/repeater/login`
+- `POST /contacts/{public_key}/path-discovery` — discover forward/return paths, persist the learned direct route, and sync it back to the radio best-effort
+- `POST /contacts/{public_key}/repeater/login` — one attempt on the effective route, then one flood retry on timeout
 - `POST /contacts/{public_key}/repeater/status`
 - `POST /contacts/{public_key}/repeater/lpp-telemetry`
 - `POST /contacts/{public_key}/repeater/neighbors`
 - `POST /contacts/{public_key}/repeater/acl`
 - `POST /contacts/{public_key}/repeater/node-info`
 - `POST /contacts/{public_key}/repeater/radio-settings`
+- `POST /contacts/{public_key}/repeater/regions` — CLI region hierarchy, falling back to the guest anon flood-allowed names (`source`: `cli` or `anon`)
 - `POST /contacts/{public_key}/repeater/advert-intervals`
 - `POST /contacts/{public_key}/repeater/owner-info`
+- `GET /contacts/{public_key}/repeater/telemetry-history` — stored telemetry history for a repeater (read-only, no radio access)
+- `POST /contacts/{public_key}/telemetry` — on-demand CayenneLPP telemetry from any contact (persists in `contact_telemetry_history`)
+- `GET /contacts/{public_key}/telemetry-history` — stored LPP telemetry history for a contact (read-only)
+- `POST /contacts/{public_key}/room/login` — one attempt on the effective route, then one flood retry on timeout
+- `POST /contacts/{public_key}/room/status`
+- `POST /contacts/{public_key}/room/lpp-telemetry`
+- `POST /contacts/{public_key}/room/acl`
 
 ### Channels
 - `GET /channels`
@@ -205,11 +282,13 @@ app/
 
 ### Packets
 - `GET /packets/undecrypted/count`
+- `POST /packets/region-backfill` — re-resolve region scope for stored channel messages that still have a retained raw packet (region is otherwise only tagged at ingest); returns `{scanned, scoped, named}`
+- `GET /packets/{packet_id}` — fetch one stored raw packet by row ID for on-demand inspection
 - `POST /packets/decrypt/historical`
 - `POST /packets/maintenance`
 
 ### Read state
-- `GET /read-state/unreads`
+- `GET /read-state/unreads` — counts, mention flags, `last_message_times`, `last_read_ats`, and `first_unread_ids`
 - `POST /read-state/mark-all-read`
 
 ### Settings
@@ -227,7 +306,7 @@ app/
 - `DELETE /fanout/{id}` — delete fanout config (stops module)
 
 ### Statistics
-- `GET /statistics` — aggregated mesh network stats (entity counts, message/packet splits, activity windows, busiest channels)
+- `GET /statistics` — aggregated mesh network stats (entity counts, message/packet splits, activity windows, busiest channels, `region_scope_24h` regional adoption)
 
 ### WebSocket
 - `WS /ws`
@@ -275,7 +354,11 @@ Repository writes should prefer typed models such as `ContactUpsert` over ad hoc
 - `advert_interval`
 - `last_advert_time`
 - `flood_scope`
-- `blocked_keys`, `blocked_names`
+- `known_regions`
+- `blocked_keys`, `blocked_names`, `discovery_blocked_types`
+- `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`
+- `auto_resend_channel`
+- `telemetry_interval_hours`
 
 Note: MQTT, community MQTT, and bot configs were migrated to the `fanout_configs` table (migrations 36-38).
 
@@ -325,6 +408,7 @@ tests/
 ├── test_migrations.py          # Schema migration system
 ├── test_community_mqtt.py      # Community MQTT publisher (JWT, packet format, hash, broadcast)
 ├── test_mqtt.py                # MQTT publisher topic routing and lifecycle
+├── test_mqtt_ha.py             # Home Assistant MQTT Discovery fanout module
 ├── test_packet_pipeline.py     # End-to-end packet processing
 ├── test_packets_router.py      # Packets router endpoints (decrypt, maintenance)
 ├── test_radio.py               # RadioManager, serial detection
