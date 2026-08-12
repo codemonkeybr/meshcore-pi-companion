@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from pywebpush import WebPushException
 
 from app.push.send import send_push
-from app.push.vapid import get_vapid_private_key, get_vapid_public_key
+from app.push.vapid import get_vapid_claims, get_vapid_private_key, get_vapid_public_key
 from app.repository.push_subscriptions import PushSubscriptionRepository
 from app.repository.settings import AppSettingsRepository
 
@@ -123,7 +123,7 @@ async def test_push(subscription_id: str) -> dict:
                 },
                 payload=payload,
                 vapid_private_key=vapid_key,
-                vapid_claims={"sub": "mailto:noreply@meshcore.local"},
+                vapid_claims=get_vapid_claims(),
             )
         return {"status": "sent"}
     except TimeoutError:

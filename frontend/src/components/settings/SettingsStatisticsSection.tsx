@@ -13,10 +13,74 @@ import {
 } from 'recharts';
 import { Separator } from '../ui/separator';
 import { api } from '../../api';
-import type { StatisticsResponse } from '../../types';
+import type { RegionScopeStats, StatisticsResponse } from '../../types';
 
 function formatPercent(value: number): string {
   return `${value.toFixed(1)}%`;
+}
+
+/**
+ * Regional flood-scope adoption. Deliberately shows fractions rather than bare
+ * percentages: with adoption this sparse, "3 of 117" communicates the sample
+ * size that "2.6%" hides.
+ */
+function RegionScopeStatsPanel({ stats }: { stats: RegionScopeStats }) {
+  // Corrupt RF captures land in the packet table with random headers, some of
+  // which claim to be region-scoped. At or below the measured floor there is
+  // nothing to report but noise, so withhold the percentage and say so.
+  const floor = stats.false_positive_floor;
+  const withinNoise = stats.scoped_messages <= floor;
+  // Real-world scoping is currently rare enough that the share rounds to "0.0%",
+  // which reads as a broken widget. Below that resolution the fraction alone is
+  // the honest presentation.
+  const showTrafficPct = stats.total_messages > 0 && !withinNoise && stats.scoped_pct >= 0.05;
+
+  return (
+    <div>
+      <h3 className="text-base font-semibold tracking-tight mb-2">Region Scope (24h)</h3>
+      <p className="text-[0.8125rem] text-muted-foreground mb-3">
+        How much local traffic uses regional flood scoping. Traffic covers all channel messages
+        heard, including channels you have no key for; senders only counts channels you can decrypt,
+        so the two use different denominators and will not match.
+      </p>
+      <div className="space-y-2">
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-sm text-muted-foreground">Scoped messages</span>
+          <span className="font-medium text-right">
+            {stats.scoped_messages.toLocaleString()} of {stats.total_messages.toLocaleString()}
+            {showTrafficPct && (
+              <span className="text-muted-foreground"> ({formatPercent(stats.scoped_pct)})</span>
+            )}
+          </span>
+        </div>
+        <div className="flex justify-between items-center gap-4">
+          <span className="text-sm text-muted-foreground">Senders using regions</span>
+          <span className="font-medium text-right">
+            {stats.scoped_senders.toLocaleString()} of {stats.total_senders.toLocaleString()}
+            {stats.total_senders > 0 && (
+              <span className="text-muted-foreground">
+                {' '}
+                ({formatPercent(stats.scoped_senders_pct)})
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+      {floor > 0 && stats.scoped_messages > 0 && (
+        <p className="text-[0.8125rem] text-muted-foreground mt-2">
+          {withinNoise
+            ? `Scoped message count is at or below the estimated false-positive floor (${floor.toFixed(0)}) from corrupt packet captures, so it is not evidence of regional adoption.`
+            : `Includes an estimated ${floor.toFixed(0)} false positives from corrupt packet captures.`}{' '}
+          The sender count is unaffected — it requires successful decryption.
+        </p>
+      )}
+      {stats.total_messages === 0 && (
+        <p className="text-sm text-muted-foreground mt-2">
+          No channel messages heard in the last 24 hours.
+        </p>
+      )}
+    </div>
+  );
 }
 
 const CHANNEL_BAR_COLORS = ['#0ea5e9', '#10b981', '#f59e0b', '#f43f5e', '#8b5cf6'];
@@ -403,6 +467,11 @@ export function SettingsStatisticsSection({ className }: { className?: string })
               <p className="text-sm text-muted-foreground">No path data in the last 24 hours.</p>
             )}
           </div>
+
+          <Separator />
+
+          {/* Region Scope */}
+          <RegionScopeStatsPanel stats={stats.region_scope_24h} />
 
           {/* Busiest Channels */}
           {stats.busiest_channels_24h.length > 0 && (

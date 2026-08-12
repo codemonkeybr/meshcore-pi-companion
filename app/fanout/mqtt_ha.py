@@ -124,15 +124,89 @@ def _lpp_sensor_key(type_name: str, channel: int) -> str:
     return f"lpp_{type_name}_ch{channel}"
 
 
+def _is_geo_sensor(sensor: dict) -> bool:
+    """True for multi-value GPS/location readings whose value is a lat/lon dict.
+
+    These cannot be represented as a single numeric HA sensor (HA rejects the
+    nested object on a ``state_class: measurement`` entity). They are routed to
+    the contact ``device_tracker`` instead, so they are excluded from the flat
+    numeric-sensor key assignment below.
+    """
+    if sensor.get("type_name") == "gps":
+        return True
+    value = sensor.get("value")
+    return isinstance(value, dict) and "latitude" in value and "longitude" in value
+
+
+def _extract_gps_reading(lpp_sensors: list[dict]) -> dict | None:
+    """Return the first usable GPS reading as a device_tracker attributes payload.
+
+    Mirrors the ``on_contact`` advert-sourced GPS shape (``latitude``,
+    ``longitude``, ``gps_accuracy``, ``source_type``) and adds ``altitude`` when
+    the reading carries it. Returns ``None`` when there is no GPS sensor or the
+    coordinates are the ``(0, 0)`` "no fix" sentinel.
+    """
+    for sensor in lpp_sensors or []:
+        if not _is_geo_sensor(sensor):
+            continue
+        value = sensor.get("value")
+        if not isinstance(value, dict):
+            continue
+        lat = value.get("latitude")
+        lon = value.get("longitude")
+        if lat is None or lon is None or (lat == 0.0 and lon == 0.0):
+            continue
+        attrs: dict[str, Any] = {
+            "latitude": lat,
+            "longitude": lon,
+            "gps_accuracy": 0,
+            "source_type": "gps",
+        }
+        alt = value.get("altitude")
+        if alt is not None:
+            attrs["altitude"] = alt
+        return attrs
+    return None
+
+
+def _legacy_geo_sensor_topics(nid: str, lpp_sensors: list[dict]) -> list[str]:
+    """Discovery topics for GPS/location readings that older versions published
+    as numeric sensors before GPS was routed to the device_tracker.
+
+    These configs were published ``retain=True``, so after an upgrade they linger
+    in the broker and HA keeps recreating a dead ``sensor.*_gps_ch*`` entity whose
+    ``{{ value_json.lpp_gps_ch* }}`` template no longer resolves. We recompute the
+    topics from current telemetry — replicating the pre-filter ``_assign_lpp_keys``
+    numbering for geo sensors only — so they can be cleared even across a restart,
+    when the in-memory ``_discovery_topics`` history no longer remembers them.
+    """
+    counts: dict[str, int] = {}
+    topics: list[str] = []
+    for sensor in lpp_sensors or []:
+        if not _is_geo_sensor(sensor):
+            continue
+        base = _lpp_sensor_key(sensor.get("type_name", "unknown"), sensor.get("channel", 0))
+        n = counts.get(base, 0) + 1
+        counts[base] = n
+        key = base if n == 1 else f"{base}_{n}"
+        topics.append(f"homeassistant/sensor/meshcore_{nid}/{key}/config")
+    return topics
+
+
 def _assign_lpp_keys(lpp_sensors: list[dict]) -> list[tuple[dict, str, int]]:
     """Pair each LPP sensor dict with a disambiguated flat key and occurrence.
 
     First occurrence keeps the base key (``lpp_temperature_ch1``), occurrence=1;
     subsequent duplicates of the same (type_name, channel) get ``_2``, ``_3``, etc.
+
+    Multi-value GPS/location sensors are skipped here: they are surfaced through
+    the device_tracker (see ``_extract_gps_reading``), not as numeric sensors.
     """
     counts: dict[str, int] = {}
     result: list[tuple[dict, str, int]] = []
     for sensor in lpp_sensors:
+        if _is_geo_sensor(sensor):
+            continue
         base = _lpp_sensor_key(sensor.get("type_name", "unknown"), sensor.get("channel", 0))
         n = counts.get(base, 0) + 1
         counts[base] = n
@@ -559,6 +633,8 @@ class MqttHaModule(FanoutModule):
 
         configs: list[tuple[str, dict]] = []
         cached_repeater_states: list[tuple[str, dict[str, Any]]] = []
+        # Retained GPS-sensor configs published by older versions, to be cleared.
+        legacy_geo_topics: list[str] = []
 
         radio_name = self._radio_name or "MeshCore Radio"
         configs.extend(_radio_discovery_configs(self._prefix, self._radio_key, radio_name))
@@ -580,6 +656,7 @@ class MqttHaModule(FanoutModule):
                 configs.extend(
                     _lpp_discovery_configs(self._prefix, pub_key, device, lpp_sensors, state_topic)
                 )
+                legacy_geo_topics.extend(_legacy_geo_sensor_topics(nid, lpp_sensors))
             if latest_data:
                 cached_repeater_states.append(
                     (
@@ -607,6 +684,7 @@ class MqttHaModule(FanoutModule):
                         self._prefix, pub_key, ct_device, ct_lpp_sensors, ct_state_topic
                     )
                 )
+                legacy_geo_topics.extend(_legacy_geo_sensor_topics(ct_nid, ct_lpp_sensors))
             if latest_ct_data:
                 ct_payload = _contact_telemetry_payload(latest_ct_data)
                 cached_repeater_states.append(
@@ -616,7 +694,23 @@ class MqttHaModule(FanoutModule):
         # Message event entity (namespaced to this radio)
         configs.append(_message_event_discovery_config(self._prefix, self._radio_key, radio_name))
 
-        self._discovery_topics = [topic for topic, _ in configs]
+        # Clear any retained discovery configs we previously published but no
+        # longer generate (e.g. the legacy broken GPS numeric sensor, now routed
+        # to the device_tracker, or sensors from an untracked node). Without this
+        # the broker's retained config would keep recreating the dead entity.
+        #
+        # `_discovery_topics` only covers configs this process published, so it
+        # cannot reach a stale GPS sensor config left retained by an older
+        # version before the upgrade+restart. `legacy_geo_topics` recomputes
+        # those deterministically from current telemetry to close that gap.
+        new_topics = [topic for topic, _ in configs]
+        new_topic_set = set(new_topics)
+        stale_set = {t for t in self._discovery_topics if t not in new_topic_set}
+        stale_set.update(t for t in legacy_geo_topics if t not in new_topic_set)
+        stale = sorted(stale_set)
+        if stale:
+            await self._clear_retained_topics(stale)
+        self._discovery_topics = new_topics
 
         for topic, payload in configs:
             await self._publisher.publish(topic, payload, retain=True)
@@ -811,6 +905,14 @@ class MqttHaModule(FanoutModule):
             await self._publish_discovery()
 
         await self._publisher.publish(f"{self._prefix}/{nid}/telemetry", payload)
+
+        # Route any GPS/location reading to the contact device_tracker instead of
+        # a numeric sensor. Only tracked contacts have a device_tracker entity;
+        # repeaters expose no tracker, so their GPS readings are simply dropped.
+        if not is_repeater:
+            gps_attrs = _extract_gps_reading(lpp_sensors)
+            if gps_attrs is not None:
+                await self._publisher.publish(f"{self._prefix}/{nid}/gps", gps_attrs)
 
     async def on_message(self, data: dict) -> None:
         if not self._publisher.connected or not self._radio_key:

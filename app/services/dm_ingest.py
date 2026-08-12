@@ -154,6 +154,9 @@ async def _store_direct_message(
     update_last_contacted_key: str | None,
     best_effort_content_dedup: bool,
     linked_packet_dedup: bool,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
     message_repository=MessageRepository,
     contact_repository=ContactRepository,
     raw_packet_repository=RawPacketRepository,
@@ -212,6 +215,8 @@ async def _store_direct_message(
             outgoing=outgoing,
             sender_key=sender_key,
             sender_name=sender_name,
+            transport_code=transport_code,
+            region=region,
         )
         if msg_id is None:
             await handle_duplicate_message(
@@ -247,8 +252,12 @@ async def _store_direct_message(
             outgoing=outgoing,
             sender_name=sender_name,
             packet_id=packet_id,
+            transport_code=transport_code,
+            region=region,
         )
-        broadcast_message(message=message, broadcast_fn=broadcast_fn, realtime=realtime)
+        broadcast_message(
+            message=message, broadcast_fn=broadcast_fn, realtime=realtime, packet_hash=packet_hash
+        )
 
         if update_last_contacted_key:
             await contact_repository.update_last_contacted(update_last_contacted_key, received_at)
@@ -279,6 +288,9 @@ async def ingest_decrypted_direct_message(
     outgoing: bool = False,
     realtime: bool = True,
     broadcast_fn: BroadcastFn,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
     contact_repository=ContactRepository,
 ) -> Message | None:
     conversation_key = their_public_key.lower()
@@ -338,6 +350,9 @@ async def ingest_decrypted_direct_message(
         update_last_contacted_key=conversation_key,
         best_effort_content_dedup=outgoing,
         linked_packet_dedup=True,
+        packet_hash=packet_hash,
+        transport_code=transport_code,
+        region=region,
     )
     if message is None:
         return None

@@ -6,7 +6,10 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from meshcore import EventType
 from serial.serialutil import SerialException
+
+from app.services.flood_scope import FORCE_UNSCOPED_FRAME
 
 
 class TestRadioManagerConnect:
@@ -977,6 +980,12 @@ class TestPostConnectSetupOrdering:
         mock_mc = MagicMock()
         mock_mc.start_auto_message_fetching = AsyncMock()
         mock_mc.commands.set_flood_scope = AsyncMock()
+        mock_mc.commands.send = AsyncMock()
+        # Flood scope is applied after the device query, so report a protocol
+        # version that supports the mode-1 unscoped command (>= 12).
+        device_query = MagicMock()
+        device_query.payload = {"fw ver": 13}
+        mock_mc.commands.send_device_query = AsyncMock(return_value=device_query)
         rm._meshcore = mock_mc
 
         mock_settings = AppSettings(flood_scope="")
@@ -999,7 +1008,10 @@ class TestPostConnectSetupOrdering:
         ):
             await rm.post_connect_setup()
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("")
+        mock_mc.commands.send.assert_awaited_once_with(
+            FORCE_UNSCOPED_FRAME, [EventType.OK, EventType.ERROR]
+        )
+        mock_mc.commands.set_flood_scope.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_message_polling_starts_hourly_audit_by_default(self):

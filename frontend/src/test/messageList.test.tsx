@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MessageList } from '../components/MessageList';
+import { PathHopWidthProvider } from '../contexts/PathHopWidthContext';
 import { CONTACT_TYPE_ROOM, type Contact, type Message } from '../types';
 
 const scrollIntoViewMock = vi.fn();
@@ -60,6 +61,91 @@ describe('MessageList channel sender rendering', () => {
 
     expect(screen.getByText('<No name -- corrupt packet?>')).toBeInTheDocument();
     expect(screen.getByTestId('corrupt-avatar')).toBeInTheDocument();
+  });
+
+  it('renders a region badge for region-scoped channel messages', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ sender_name: 'Alice', region: 'nl-gr' })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('nl-gr')).toBeInTheDocument();
+    expect(screen.getByTitle('Regional scope: nl-gr')).toBeInTheDocument();
+  });
+
+  it('does not render a region badge for unscoped messages', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ sender_name: 'Alice', region: null })]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.queryByText('nl-gr')).not.toBeInTheDocument();
+  });
+
+  it('shows per-hop byte width in the path badge when the toggle is on', () => {
+    render(
+      <PathHopWidthProvider showPathHopWidth setShowPathHopWidth={() => {}}>
+        <MessageList
+          messages={[
+            createMessage({
+              sender_name: 'Alice',
+              // 8 hex chars over 2 hops = 2 bytes/hop.
+              paths: [{ path: 'AABBCCDD', path_len: 2, received_at: 1700000001 }],
+            }),
+          ]}
+          contacts={[]}
+          loading={false}
+        />
+      </PathHopWidthProvider>
+    );
+
+    expect(screen.getByText('(2 · 2B)')).toBeInTheDocument();
+    expect(screen.getByTitle('View message path (2B per hop)')).toBeInTheDocument();
+  });
+
+  it('hides the width by default (toggle off) and shows only the hop count', () => {
+    render(
+      <MessageList
+        messages={[
+          createMessage({
+            sender_name: 'Alice',
+            paths: [{ path: 'AABBCCDD', path_len: 2, received_at: 1700000001 }],
+          }),
+        ]}
+        contacts={[]}
+        loading={false}
+      />
+    );
+
+    expect(screen.getByText('(2)')).toBeInTheDocument();
+    expect(screen.queryByText('(2 · 2B)')).not.toBeInTheDocument();
+    expect(screen.getByTitle('View message path')).toBeInTheDocument();
+  });
+
+  it('omits the width for direct (0-hop) paths even when the toggle is on', () => {
+    render(
+      <PathHopWidthProvider showPathHopWidth setShowPathHopWidth={() => {}}>
+        <MessageList
+          messages={[
+            createMessage({
+              sender_name: 'Alice',
+              paths: [{ path: '', path_len: 0, received_at: 1700000001 }],
+            }),
+          ]}
+          contacts={[]}
+          loading={false}
+        />
+      </PathHopWidthProvider>
+    );
+
+    expect(screen.getByText('(d)')).toBeInTheDocument();
+    expect(screen.getByTitle('View message path')).toBeInTheDocument();
   });
 
   it('prefers stored sender_name for channel messages even when text is not sender-prefixed', () => {
@@ -238,6 +324,47 @@ describe('MessageList channel sender rendering', () => {
     expect(screen.getByText('TEST1: TEST2')).toBeInTheDocument();
   });
 
+  it('offers a jump instead of a divider when the unread boundary is not loaded', async () => {
+    const user = userEvent.setup();
+    const onNavigateToUnread = vi.fn();
+    // Boundary id 999 is not among the loaded messages: the real first-unread is
+    // further back than this window. The divider must not be invented at the top.
+    render(
+      <MessageList
+        messages={[
+          createMessage({ id: 1, received_at: 1700000001, text: 'Alice: older' }),
+          createMessage({ id: 2, received_at: 1700000010, text: 'Alice: newer' }),
+        ]}
+        contacts={[]}
+        loading={false}
+        unreadMarkerMessageId={999}
+        onNavigateToUnread={onNavigateToUnread}
+      />
+    );
+
+    expect(screen.queryByText('Unread messages')).not.toBeInTheDocument();
+
+    const jump = await screen.findByRole('button', { name: 'Jump to unread' });
+    await user.click(jump);
+
+    // Hands off to the jump-to-message path rather than scrolling to a wrong row.
+    expect(onNavigateToUnread).toHaveBeenCalledWith(999);
+  });
+
+  it('shows no unread affordance at all when nothing is unread', () => {
+    render(
+      <MessageList
+        messages={[createMessage({ id: 1, received_at: 1700000001, text: 'Alice: hi' })]}
+        contacts={[]}
+        loading={false}
+        unreadMarkerMessageId={null}
+      />
+    );
+
+    expect(screen.queryByText('Unread messages')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Jump to unread' })).not.toBeInTheDocument();
+  });
+
   it('renders and dismisses an unread marker at the first unread message boundary', async () => {
     const user = userEvent.setup();
     const messages = [
@@ -246,17 +373,15 @@ describe('MessageList channel sender rendering', () => {
     ];
 
     function DismissibleUnreadMarkerList() {
-      const [unreadMarkerLastReadAt, setUnreadMarkerLastReadAt] = useState<number | undefined>(
-        1700000005
-      );
+      const [unreadMarkerMessageId, setUnreadMarkerMessageId] = useState<number | undefined>(2);
 
       return (
         <MessageList
           messages={messages}
           contacts={[]}
           loading={false}
-          unreadMarkerLastReadAt={unreadMarkerLastReadAt}
-          onDismissUnreadMarker={() => setUnreadMarkerLastReadAt(undefined)}
+          unreadMarkerMessageId={unreadMarkerMessageId}
+          onDismissUnreadMarker={() => setUnreadMarkerMessageId(undefined)}
         />
       );
     }
@@ -281,12 +406,7 @@ describe('MessageList channel sender rendering', () => {
     ];
 
     render(
-      <MessageList
-        messages={messages}
-        contacts={[]}
-        loading={false}
-        unreadMarkerLastReadAt={1700000005}
-      />
+      <MessageList messages={messages} contacts={[]} loading={false} unreadMarkerMessageId={2} />
     );
 
     const jumpButton = screen.getByRole('button', { name: 'Jump to unread' });
@@ -308,12 +428,7 @@ describe('MessageList channel sender rendering', () => {
     ];
 
     render(
-      <MessageList
-        messages={messages}
-        contacts={[]}
-        loading={false}
-        unreadMarkerLastReadAt={1700000005}
-      />
+      <MessageList messages={messages} contacts={[]} loading={false} unreadMarkerMessageId={2} />
     );
 
     await user.click(screen.getByRole('button', { name: 'Dismiss jump to unread' }));
@@ -375,15 +490,28 @@ describe('MessageList channel sender rendering', () => {
     ];
 
     render(
-      <MessageList
-        messages={messages}
-        contacts={[]}
-        loading={false}
-        unreadMarkerLastReadAt={1700000005}
-      />
+      <MessageList messages={messages} contacts={[]} loading={false} unreadMarkerMessageId={2} />
     );
 
     expect(screen.getByText('Unread messages')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Jump to unread' })).not.toBeInTheDocument();
+  });
+  it('mounts only a window of rows for a long history', () => {
+    const messages = Array.from({ length: 500 }, (_, i) =>
+      createMessage({
+        id: i + 1,
+        text: `Alice: message ${i}`,
+        sender_timestamp: 1700000000 + i,
+        received_at: 1700000001 + i,
+      })
+    );
+
+    const { container } = render(<MessageList messages={messages} contacts={[]} loading={false} />);
+
+    // jsdom reports no layout, so the list falls back to a nominal viewport. The point
+    // is that the window is bounded: a 500-message history must not mount 500 rows.
+    const mounted = container.querySelectorAll('[data-message-id]').length;
+    expect(mounted).toBeGreaterThan(0);
+    expect(mounted).toBeLessThan(100);
   });
 });

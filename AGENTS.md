@@ -355,6 +355,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | PUT | `/api/radio/private-key` | Import private key to radio |
 | POST | `/api/radio/advertise` | Send advertisement (`mode`: `flood` or `zero_hop`, default `flood`) |
 | POST | `/api/radio/discover` | Run a short mesh discovery sweep for nearby repeaters/sensors |
+| POST | `/api/radio/discover-regions` | Sweep nearby repeaters (anon regions request) for flood-allowed region names to merge into `known_regions` |
 | POST | `/api/radio/trace` | Send a multi-hop trace loop through known repeaters and back to the local radio |
 | POST | `/api/radio/reboot` | Reboot radio or reconnect if disconnected |
 | POST | `/api/radio/disconnect` | Disconnect from radio and pause automatic reconnect attempts |
@@ -370,19 +371,20 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/contacts/{public_key}/routing-override` | Set or clear a forced routing override |
 | POST | `/api/contacts/{public_key}/trace` | Trace route to contact |
 | POST | `/api/contacts/{public_key}/path-discovery` | Discover forward/return paths and persist the learned direct route |
-| POST | `/api/contacts/{public_key}/repeater/login` | Log in to a repeater |
+| POST | `/api/contacts/{public_key}/repeater/login` | Log in to a repeater (escalates to one flood retry if the first attempt draws no reply) |
 | POST | `/api/contacts/{public_key}/repeater/status` | Fetch repeater status telemetry |
 | POST | `/api/contacts/{public_key}/repeater/lpp-telemetry` | Fetch CayenneLPP sensor data |
 | POST | `/api/contacts/{public_key}/repeater/neighbors` | Fetch repeater neighbors |
 | POST | `/api/contacts/{public_key}/repeater/acl` | Fetch repeater ACL |
 | POST | `/api/contacts/{public_key}/repeater/node-info` | Fetch repeater name, location, and clock via CLI |
 | POST | `/api/contacts/{public_key}/repeater/radio-settings` | Fetch repeater radio config via CLI |
+| POST | `/api/contacts/{public_key}/repeater/regions` | Fetch repeater region hierarchy via CLI, falling back to the guest anon flood-allowed region names (`source`: `cli` or `anon`) |
 | POST | `/api/contacts/{public_key}/repeater/advert-intervals` | Fetch advert intervals |
 | POST | `/api/contacts/{public_key}/repeater/owner-info` | Fetch owner info |
 | GET | `/api/contacts/{public_key}/repeater/telemetry-history` | Stored telemetry history for a repeater (read-only, no radio access) |
 | POST | `/api/contacts/{public_key}/telemetry` | Fetch CayenneLPP telemetry from any contact (single attempt, 10s timeout) |
 | GET | `/api/contacts/{public_key}/telemetry-history` | Stored LPP telemetry history for a contact (read-only, no radio access) |
-| POST | `/api/contacts/{public_key}/room/login` | Log in to a room server |
+| POST | `/api/contacts/{public_key}/room/login` | Log in to a room server (escalates to one flood retry if the first attempt draws no reply) |
 | POST | `/api/contacts/{public_key}/room/status` | Fetch room-server status telemetry |
 | POST | `/api/contacts/{public_key}/room/lpp-telemetry` | Fetch room-server CayenneLPP sensor data |
 | POST | `/api/contacts/{public_key}/room/acl` | Fetch room-server ACL entries |
@@ -401,9 +403,10 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | POST | `/api/messages/channel/{message_id}/resend` | Resend channel message (default: byte-perfect within 30s; `?new_timestamp=true`: fresh timestamp, no time limit, creates new message row) |
 | GET | `/api/packets/undecrypted/count` | Count of undecrypted packets |
 | GET | `/api/packets/{packet_id}` | Fetch one stored raw packet by row ID for on-demand inspection |
+| POST | `/api/packets/region-backfill` | Re-resolve region scope for stored channel messages with retained raw packets |
 | POST | `/api/packets/decrypt/historical` | Decrypt stored packets |
 | POST | `/api/packets/maintenance` | Delete old packets and vacuum |
-| GET | `/api/read-state/unreads` | Server-computed unread counts, mentions, last message times, and `last_read_ats` boundaries |
+| GET | `/api/read-state/unreads` | Server-computed unread counts, mentions, last message times, `last_read_ats` boundaries, and `first_unread_ids` (unread-divider anchor) |
 | POST | `/api/read-state/mark-all-read` | Mark all conversations as read |
 | GET | `/api/settings` | Get app settings |
 | PATCH | `/api/settings` | Update app settings |
@@ -420,7 +423,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 | PATCH | `/api/fanout/{id}` | Update fanout config (triggers module reload) |
 | DELETE | `/api/fanout/{id}` | Delete fanout config (stops module) |
 | POST | `/api/fanout/bots/disable-until-restart` | Stop bot fanout modules and keep bots disabled until the process restarts |
-| GET | `/api/statistics` | Aggregated mesh network statistics |
+| GET | `/api/statistics` | Aggregated mesh network statistics, including `region_scope_24h` regional flood-scope adoption |
 | GET | `/api/push/vapid-public-key` | VAPID public key for browser push subscription |
 | POST | `/api/push/subscribe` | Register/upsert a push subscription |
 | GET | `/api/push/subscriptions` | List all push subscriptions |
@@ -451,6 +454,7 @@ All endpoints are prefixed with `/api` (e.g., `/api/health`).
 
 - Stored as 32-character hex string (TEXT PRIMARY KEY)
 - Hashtag channels: `SHA256("#name")[:16]` converted to hex
+- Hashtag channel names are hashed **verbatim** (any character — `&`, capitals, spaces, accents — is valid), matching `meshcore_py` / meshcore-cli / meshcore.js, which impose no character restriction (firmware never validates or even sees the name; it only receives the precomputed secret). The New-Conversation UI defaults to normalizing names to lowercase `[a-z0-9-]`, but a "Permit capitals, whitespace, and extended characters" toggle hashes the name exactly as typed for cross-client interop. The only server-side limit is non-empty and ≤32 UTF-8 bytes including the leading `#` (the on-radio name field size).
 - Custom channels: User-provided or generated
 - Channels may also persist `flood_scope_override`; when set, channel sends temporarily switch the radio flood scope to that value for the duration of the send, then restore the global app setting.
 - Channels may persist `path_hash_mode_override` (0/1/2); when set, channel sends temporarily switch the radio path hash mode for the duration of the send, then restore the radio default.
@@ -467,7 +471,7 @@ Read state (`last_read_at`) is tracked **server-side** for consistency across de
 - Stored as Unix timestamp in `contacts.last_read_at` and `channels.last_read_at`
 - Updated via `POST /api/contacts/{public_key}/mark-read` and `POST /api/channels/{key}/mark-read`
 - Bulk update via `POST /api/read-state/mark-all-read`
-- Aggregated counts via `GET /api/read-state/unreads` (server-side computation of counts, mention flags, `last_message_times`, and `last_read_ats`)
+- Aggregated counts via `GET /api/read-state/unreads` (server-side computation of counts, mention flags, `last_message_times`, `last_read_ats`, and `first_unread_ids`)
 
 **State Tracking Keys (Frontend)**: Generated by `getStateKey()` for message times (sidebar sorting):
 - Channels: `channel-{channel_key}`
@@ -540,9 +544,11 @@ mc.subscribe(EventType.ACK, handler)
 | `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK` | `false` | Switch the always-on radio audit task from hourly checks to aggressive 10-second polling; the audit checks both missed message drift and channel-slot cache drift |
 | `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE` | `false` | Disable channel-slot reuse and force `set_channel(...)` before every channel send, even on serial/BLE |
 | `MESHCORE_LOAD_WITH_AUTOEVICT` | `false` | Enable autoevict contact loading: sets `AUTO_ADD_OVERWRITE_OLDEST` on the radio so adds never fail with TABLE_FULL, skips the removal phase during reconcile, and allows blind loading when `get_contacts` fails. Loaded contacts are not radio-favorited and may be evicted by new adverts when the table is full. |
+| `MESHCORE_SKIP_POST_CONNECT_SYNC` | `false` | Debug/diagnostic escape hatch: skip the contact/channel sync-and-offload, startup advertisement, and pending-message drain during post-connect setup, and do not start the periodic sync/advert/message-poll/telemetry background loops. Handler registration, key export, time sync, flood-scope apply, and auto message fetching still run. Useful when the radio's contact/channel state must be left untouched; not for normal operation. |
 | `MESHCORE_ENABLE_LOCAL_PRIVATE_KEY_EXPORT` | `false` | Enable `GET /api/radio/private-key` to return the in-memory private key as hex. Disabled by default; only enable on a trusted network where you need to retrieve the key (e.g. for backup or migration). |
+| `MESHCORE_VAPID_SUBJECT` | `mailto:noreply@meshcore.local` | Subject (`sub`) claim for Web Push VAPID tokens; must be a `mailto:` or `https:` contact. Apple's push service (APNs) rejects the default `.local` domain with `403 BadJwtToken`, so iOS/Safari operators must set this to a real address. Google FCM (Chrome/Android) accepts the default. |
 
-**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `advert_interval`, `last_advert_time`, `last_message_times`, `flood_scope`, `blocked_keys`, `blocked_names`, `discovery_blocked_types`, `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`, `auto_resend_channel`, and `telemetry_interval_hours`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
+**Note:** Runtime app settings are stored in the database (`app_settings` table), not environment variables. These include `max_radio_contacts`, `auto_decrypt_dm_on_advert`, `advert_interval`, `last_advert_time`, `last_message_times`, `flood_scope`, `known_regions`, `blocked_keys`, `blocked_names`, `discovery_blocked_types`, `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`, `auto_resend_channel`, and `telemetry_interval_hours`. `max_radio_contacts` is the configured radio contact capacity baseline used by background maintenance: favorites reload first, non-favorite fill targets about 80% of that value, and full offload/reload triggers around 95% occupancy. They are configured via `GET/PATCH /api/settings`. MQTT, bot, webhook, Apprise, and SQS configs are stored in the `fanout_configs` table, managed via `/api/fanout`. If the radio's channel slots appear unstable or another client is mutating them underneath this app, operators can force the old always-reconfigure send path with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`.
 
 Byte-perfect channel retries are user-triggered via `POST /api/messages/channel/{message_id}/resend` and are allowed for 30 seconds after the original send.
 

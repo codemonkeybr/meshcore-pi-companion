@@ -9,6 +9,7 @@ The path_len wire byte is packed as [hash_mode:2][hop_count:6]:
 Mode 3 (hash_size=4) is reserved and rejected.
 """
 
+import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -30,6 +31,12 @@ class ParsedPacketEnvelope:
     path: bytes
     payload: bytes
     payload_offset: int
+    transport_codes: tuple[int, int] | None = None
+    """Region transport codes (code_1, code_2) for TRANSPORT_* routes, else None.
+
+    Each is a little-endian uint16 read from the 4-byte transport-code block.
+    ``code_1`` is the region-scope code; ``code_2`` is currently reserved (0).
+    """
 
 
 def decode_path_byte(path_byte: int) -> tuple[int, int]:
@@ -90,9 +97,14 @@ def parse_packet_envelope(raw_packet: bytes) -> ParsedPacketEnvelope | None:
         payload_version = (header >> 6) & 0x03
 
         offset = 1
+        transport_codes: tuple[int, int] | None = None
         if route_type in (0x00, 0x03):
             if len(raw_packet) < offset + 4:
                 return None
+            transport_codes = (
+                int.from_bytes(raw_packet[offset : offset + 2], "little"),
+                int.from_bytes(raw_packet[offset + 2 : offset + 4], "little"),
+            )
             offset += 4
 
         if len(raw_packet) < offset + 1:
@@ -122,6 +134,7 @@ def parse_packet_envelope(raw_packet: bytes) -> ParsedPacketEnvelope | None:
             path=path,
             payload=raw_packet[offset:],
             payload_offset=offset,
+            transport_codes=transport_codes,
         )
     except (IndexError, ValueError):
         return None
@@ -289,3 +302,93 @@ def bucket_path_hash_widths(rows: Iterable) -> dict[str, int | float]:
         "double_byte_pct": (double_byte / total) * 100,
         "triple_byte_pct": (triple_byte / total) * 100,
     }
+
+
+# Payload types with no meaning in the MeshCore protocol. Any packet claiming one
+# is corrupt by definition, which makes them a usable gauge for how much RF garbage
+# is sitting in a given route-type bucket. See bucket_region_scope().
+UNDEFINED_PAYLOAD_TYPES = (0x0C, 0x0D, 0x0E)
+
+_PAYLOAD_TYPE_GROUP_TEXT = 0x05
+_FLOOD_ROUTE_TYPES = (0x00, 0x01)  # TRANSPORT_FLOOD, FLOOD
+
+
+def bucket_region_scope(rows: Iterable) -> dict[str, int | float]:
+    """Count flood-routed channel messages carrying a regional transport code.
+
+    *rows* must be an already-fetched list whose elements have a ``data`` column
+    containing raw packet bytes.
+
+    Only flood-routed packets are counted. Zero-hop and direct sends can never
+    carry transport codes (firmware reaches them through the non-transport
+    ``sendZeroHop``/``sendDirect`` overloads), so including them would silently
+    dilute the percentage.
+
+    ``false_positive_floor`` exists because corrupt RF captures still land in
+    ``raw_packets`` with effectively random header bytes, and a share of them
+    claim TRANSPORT_FLOOD. That garbage spreads near-uniformly across payload-type
+    buckets, so we measure it directly: count transport-routed packets claiming a
+    payload type the protocol does not define, and average per bucket. A
+    ``scoped_messages`` count at or below ``false_positive_floor`` is not evidence
+    of regional adoption, and callers should present the two together.
+    """
+    total = 0
+    scoped = 0
+    undefined_scoped = 0
+
+    for row in rows:
+        envelope = parse_packet_envelope(bytes(row["data"]))
+        if envelope is None:
+            continue
+
+        if (
+            envelope.route_type == 0x00
+            and envelope.payload_type in UNDEFINED_PAYLOAD_TYPES
+            and envelope.transport_codes is not None
+        ):
+            undefined_scoped += 1
+            continue
+
+        if envelope.payload_type != _PAYLOAD_TYPE_GROUP_TEXT:
+            continue
+        if envelope.route_type not in _FLOOD_ROUTE_TYPES:
+            continue
+
+        total += 1
+        if envelope.transport_codes is not None:
+            scoped += 1
+
+    noise_floor = undefined_scoped / len(UNDEFINED_PAYLOAD_TYPES)
+    return {
+        "total_messages": total,
+        "scoped_messages": scoped,
+        "scoped_pct": (scoped / total) * 100 if total else 0.0,
+        "false_positive_floor": noise_floor,
+    }
+
+
+def calculate_packet_hash(raw_bytes: bytes) -> str:
+    """Calculate packet hash matching MeshCore's Packet::calculatePacketHash().
+
+    Parses the packet structure to extract payload type and payload data,
+    then hashes: payload_type(1 byte) [+ path_len(2 bytes LE) for TRACE] + payload_data.
+    Returns first 16 hex characters (uppercase).
+    """
+    if not raw_bytes:
+        return "0" * 16
+
+    try:
+        envelope = parse_packet_envelope(raw_bytes)
+        if envelope is None:
+            return "0" * 16
+
+        hash_obj = hashlib.sha256()
+        hash_obj.update(bytes([envelope.payload_type]))
+        # TRACE hash uses the raw wire byte (not decoded hop count) to match firmware.
+        if envelope.payload_type == 9:  # PAYLOAD_TYPE_TRACE
+            hash_obj.update(envelope.path_byte.to_bytes(2, byteorder="little"))
+        hash_obj.update(envelope.payload)
+
+        return hash_obj.hexdigest()[:16].upper()
+    except Exception:
+        return "0" * 16

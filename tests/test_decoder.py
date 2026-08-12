@@ -675,6 +675,66 @@ class TestAdvertisementParsing:
         assert result is None
 
 
+class TestVerifyAdvertSignature:
+    """Ed25519 advertisement signature verification (mirrors firmware Mesh.cpp).
+
+    Uses a real captured advert as the golden compatibility vector: it was signed
+    by a genuine MeshCore device and accepted by firmware, so our verifier must
+    accept it. Corrupting any signed region (pubkey, body, or signature) must be
+    rejected — this is the phantom-contact bug in issue #315.
+    """
+
+    # Real advert packet (name decodes to "Lightless" + emoji), same vector used
+    # by test_parse_advertisement_extracts_public_key above.
+    REAL_ADVERT_PACKET = bytes.fromhex(
+        "1100AE92564C5C9884854F04F469BBB2BAB8871A078053AF6CF4AA2C014B18CE8A83"
+        "2DBF6669128E9476F36320F21D1B37FF1CF31680F50F4B17EDABCC7CF8C47D3C5E1D"
+        "F3AFD0C8721EA06A8078462EF241DEF80AD6922751F206E3BB121DFB604F4146D60D"
+        "913628D902602DB5F8466C696768746C657373F09FA59D"
+    )
+
+    def _payload(self) -> bytes:
+        from app.decoder import parse_packet
+
+        info = parse_packet(self.REAL_ADVERT_PACKET)
+        assert info is not None
+        return info.payload
+
+    def test_accepts_real_advert(self):
+        from app.decoder import verify_advert_signature
+
+        assert verify_advert_signature(self._payload()) is True
+
+    def test_rejects_corrupted_public_key(self):
+        from app.decoder import verify_advert_signature
+
+        payload = bytearray(self._payload())
+        payload[5] ^= 0x01  # flip a bit in the public key (bytes 0-31)
+        assert verify_advert_signature(bytes(payload)) is False
+
+    def test_rejects_corrupted_signed_body(self):
+        from app.decoder import verify_advert_signature
+
+        payload = bytearray(self._payload())
+        payload[110] ^= 0x01  # flip a bit in the app-data (after the signature)
+        assert verify_advert_signature(bytes(payload)) is False
+
+    def test_rejects_corrupted_signature(self):
+        from app.decoder import verify_advert_signature
+
+        payload = bytearray(self._payload())
+        payload[40] ^= 0x01  # flip a bit inside the 64-byte signature (bytes 36-99)
+        assert verify_advert_signature(bytes(payload)) is False
+
+    def test_rejects_truncated_payload(self):
+        from app.decoder import verify_advert_signature
+
+        # Anything shorter than pubkey(32)+timestamp(4)+signature(64)=100 bytes
+        # cannot be verified and must fail closed.
+        assert verify_advert_signature(b"") is False
+        assert verify_advert_signature(self._payload()[:99]) is False
+
+
 class TestPublicKeyDerivation:
     """Test deriving Ed25519 public key from MeshCore private key."""
 

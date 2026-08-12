@@ -11,6 +11,7 @@ import {
   resolvePath,
   formatDistance,
   formatHopCounts,
+  formatPathHopWidths,
 } from '../utils/pathUtils';
 import type { Contact, RadioConfig } from '../types';
 import { CONTACT_TYPE_REPEATER } from '../types';
@@ -814,5 +815,66 @@ describe('formatHopCounts', () => {
     expect(result.display).toBe('d/2/2');
     expect(result.allDirect).toBe(false);
     expect(result.hasMultiple).toBe(true);
+  });
+});
+
+describe('formatPathHopWidths', () => {
+  it('returns null for null or empty paths', () => {
+    expect(formatPathHopWidths(null)).toBeNull();
+    expect(formatPathHopWidths([])).toBeNull();
+  });
+
+  it('returns null for direct (0-hop) paths', () => {
+    expect(formatPathHopWidths([{ path: '', received_at: 1700000000 }])).toBeNull();
+  });
+
+  it('returns null for legacy paths without hop metadata', () => {
+    // No path_len -> width is not derivable, so we show nothing rather than guess.
+    expect(formatPathHopWidths([{ path: 'AABBCCDD', received_at: 1700000000 }])).toBeNull();
+  });
+
+  it('derives 1-byte width', () => {
+    expect(formatPathHopWidths([{ path: '1A2B', path_len: 2, received_at: 1700000000 }])).toBe(
+      '1B'
+    );
+  });
+
+  it('derives 2-byte width', () => {
+    expect(formatPathHopWidths([{ path: 'AABBCCDD', path_len: 2, received_at: 1700000000 }])).toBe(
+      '2B'
+    );
+  });
+
+  it('derives 3-byte width', () => {
+    expect(
+      formatPathHopWidths([{ path: 'AABBCCDDEEFF', path_len: 2, received_at: 1700000000 }])
+    ).toBe('3B');
+  });
+
+  it('dedupes identical widths across repeat paths', () => {
+    expect(
+      formatPathHopWidths([
+        { path: 'AABBCCDD', path_len: 2, received_at: 1700000000 },
+        { path: '11223344', path_len: 2, received_at: 1700000001 },
+      ])
+    ).toBe('2B');
+  });
+
+  it('ignores direct paths when other paths have a width', () => {
+    expect(
+      formatPathHopWidths([
+        { path: '', received_at: 1700000000 },
+        { path: 'AABBCCDD', path_len: 2, received_at: 1700000001 },
+      ])
+    ).toBe('2B');
+  });
+
+  it('joins mixed widths sorted ascending', () => {
+    expect(
+      formatPathHopWidths([
+        { path: 'AABBCCDD', path_len: 2, received_at: 1700000000 }, // 2-byte
+        { path: '1A2B', path_len: 2, received_at: 1700000001 }, // 1-byte
+      ])
+    ).toBe('1B/2B');
   });
 });

@@ -34,7 +34,7 @@ export function ConsolePane({
   const handleSubmit = useCallback(
     async (e: FormEvent) => {
       e.preventDefault();
-      const trimmed = input.trim();
+      const trimmed = input.trimStart();
       if (!trimmed || loading) return;
       setInput('');
       await onSend(trimmed);
@@ -80,7 +80,7 @@ export function ConsolePane({
           disabled={loading}
           className="flex-1 font-mono text-sm"
         />
-        <Button type="submit" size="sm" disabled={loading || !input.trim()}>
+        <Button type="submit" size="sm" disabled={loading || !input.trimStart()}>
           Send
         </Button>
       </form>

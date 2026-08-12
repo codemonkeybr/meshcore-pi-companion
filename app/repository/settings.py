@@ -7,7 +7,7 @@ import aiosqlite
 
 from app.database import db
 from app.models import AppSettings
-from app.path_utils import bucket_path_hash_widths
+from app.path_utils import bucket_path_hash_widths, bucket_region_scope, parse_packet_envelope
 from app.telemetry_interval import DEFAULT_TELEMETRY_INTERVAL_HOURS
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class AppSettingsRepository:
             """
             SELECT max_radio_contacts, auto_decrypt_dm_on_advert,
                    last_message_times,
-                   advert_interval, last_advert_time, flood_scope,
+                   advert_interval, last_advert_time, flood_scope, known_regions,
                    blocked_keys, blocked_names, discovery_blocked_types,
                    tracked_telemetry_repeaters, tracked_telemetry_contacts,
                    auto_resend_channel,
@@ -80,6 +80,15 @@ class AppSettingsRepository:
                 blocked_names = json.loads(row["blocked_names"])
             except (json.JSONDecodeError, TypeError):
                 blocked_names = []
+
+        # Parse known_regions JSON
+        known_regions: list[str] = []
+        try:
+            raw_regions = row["known_regions"]
+            if raw_regions:
+                known_regions = json.loads(raw_regions)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            known_regions = []
 
         # Parse discovery_blocked_types JSON
         discovery_blocked_types: list[int] = []
@@ -136,6 +145,7 @@ class AppSettingsRepository:
             advert_interval=row["advert_interval"] or 0,
             last_advert_time=row["last_advert_time"] or 0,
             flood_scope=row["flood_scope"] or "",
+            known_regions=known_regions,
             blocked_keys=blocked_keys,
             blocked_names=blocked_names,
             discovery_blocked_types=discovery_blocked_types,
@@ -156,6 +166,7 @@ class AppSettingsRepository:
         advert_interval: int | None = None,
         last_advert_time: int | None = None,
         flood_scope: str | None = None,
+        known_regions: list[str] | None = None,
         blocked_keys: list[str] | None = None,
         blocked_names: list[str] | None = None,
         discovery_blocked_types: list[int] | None = None,
@@ -196,6 +207,10 @@ class AppSettingsRepository:
         if flood_scope is not None:
             updates.append("flood_scope = ?")
             params.append(flood_scope)
+
+        if known_regions is not None:
+            updates.append("known_regions = ?")
+            params.append(json.dumps(known_regions))
 
         if blocked_keys is not None:
             updates.append("blocked_keys = ?")
@@ -251,6 +266,7 @@ class AppSettingsRepository:
         advert_interval: int | None = None,
         last_advert_time: int | None = None,
         flood_scope: str | None = None,
+        known_regions: list[str] | None = None,
         blocked_keys: list[str] | None = None,
         blocked_names: list[str] | None = None,
         discovery_blocked_types: list[int] | None = None,
@@ -270,6 +286,7 @@ class AppSettingsRepository:
                 advert_interval=advert_interval,
                 last_advert_time=last_advert_time,
                 flood_scope=flood_scope,
+                known_regions=known_regions,
                 blocked_keys=blocked_keys,
                 blocked_names=blocked_names,
                 discovery_blocked_types=discovery_blocked_types,
@@ -496,8 +513,12 @@ class StatisticsRepository:
         return [{"timestamp": row["hour_ts"], "count": row["count"]} for row in rows]
 
     @staticmethod
-    async def _path_hash_width_24h() -> dict[str, int | float]:
-        """Count parsed raw packets from the last 24h by hop hash width."""
+    async def _packet_shape_24h() -> tuple[dict[str, int | float], dict[str, int | float]]:
+        """Bucket the last 24h of raw packets by hop hash width and region scope.
+
+        Both buckets come from one fetch so the snapshot only scans the packet
+        table once. Returns ``(path_hash_width, region_scope)``.
+        """
         now = int(time.time())
         async with db.readonly() as conn:
             async with conn.execute(
@@ -505,7 +526,61 @@ class StatisticsRepository:
                 (now - SECONDS_24H,),
             ) as cursor:
                 rows = await cursor.fetchall()
-        return bucket_path_hash_widths(rows)
+        return bucket_path_hash_widths(rows), bucket_region_scope(rows)
+
+    @staticmethod
+    async def _region_scope_senders_24h() -> dict[str, int | float]:
+        """Count distinct channel-message senders who scoped at least one send.
+
+        Sender attribution requires having decrypted the message, so this only
+        covers channels we hold keys for — a narrower population than the
+        packet-level count, but a self-validating one: a message we decrypted is
+        provably not a corrupt capture, so this number needs no noise floor.
+
+        Scoping is read from ``messages.transport_code`` where present, falling
+        back to the linked raw packet for rows stored before region tagging
+        existed. Senders are keyed by ``sender_key`` where resolved, falling back
+        to ``sender_name`` — one physical operator may run several nodes, hence
+        "senders" rather than "users".
+        """
+        now = int(time.time())
+        async with db.readonly() as conn:
+            async with conn.execute(
+                """
+                SELECT m.id, m.sender_key, m.sender_name, m.transport_code, p.data
+                FROM messages m
+                LEFT JOIN raw_packets p ON p.message_id = m.id
+                WHERE m.type = 'CHAN' AND m.outgoing = 0 AND m.received_at >= ?
+                """,
+                (now - SECONDS_24H,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        senders: set[str] = set()
+        scoped_senders: set[str] = set()
+        for row in rows:
+            identity = row["sender_key"] or row["sender_name"]
+            if not identity:
+                continue
+            senders.add(identity)
+
+            if row["transport_code"] is not None:
+                scoped_senders.add(identity)
+                continue
+            raw = row["data"]
+            if raw is None:
+                continue
+            envelope = parse_packet_envelope(bytes(raw))
+            if envelope is not None and envelope.transport_codes is not None:
+                scoped_senders.add(identity)
+
+        total = len(senders)
+        scoped = len(scoped_senders)
+        return {
+            "total_senders": total,
+            "scoped_senders": scoped,
+            "scoped_senders_pct": (scoped / total) * 100 if total else 0.0,
+        }
 
     @staticmethod
     async def get_all() -> dict:
@@ -583,7 +658,8 @@ class StatisticsRepository:
         contacts_heard = await StatisticsRepository._activity_counts(contact_type=2, exclude=True)
         repeaters_heard = await StatisticsRepository._activity_counts(contact_type=2)
         known_channels_active = await StatisticsRepository._known_channels_active()
-        path_hash_width_24h = await StatisticsRepository._path_hash_width_24h()
+        path_hash_width_24h, region_scope = await StatisticsRepository._packet_shape_24h()
+        region_scope.update(await StatisticsRepository._region_scope_senders_24h())
         packets_per_hour_72h = await StatisticsRepository._packets_per_hour_72h()
 
         return {
@@ -601,5 +677,6 @@ class StatisticsRepository:
             "repeaters_heard": repeaters_heard,
             "known_channels_active": known_channels_active,
             "path_hash_width_24h": path_hash_width_24h,
+            "region_scope_24h": region_scope,
             "packets_per_hour_72h": packets_per_hour_72h,
         }

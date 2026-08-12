@@ -11,6 +11,8 @@ from enum import IntEnum
 
 import nacl.bindings
 from Crypto.Cipher import AES
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,7 @@ class PacketInfo:
     path: bytes  # The routing path bytes (empty if path_length is 0)
     payload: bytes
     path_hash_size: int = 1  # Bytes per hop: 1, 2, or 3
+    transport_codes: tuple[int, int] | None = None  # (code_1, code_2) for TRANSPORT_* routes
 
 
 def _is_valid_advert_location(lat: float, lon: float) -> bool:
@@ -146,6 +149,7 @@ def parse_packet(raw_packet: bytes) -> PacketInfo | None:
             path_hash_size=envelope.hash_size,
             path=envelope.path,
             payload=envelope.payload,
+            transport_codes=envelope.transport_codes,
         )
     except ValueError:
         return None
@@ -373,6 +377,56 @@ def parse_advertisement(
         lon=lon,
         device_role=device_role,
     )
+
+
+# Advertisement layout constants, mirroring firmware MeshCore.h / Mesh.cpp.
+# pub_key(32) || timestamp(4) || signature(64) || app_data(<= MAX_ADVERT_DATA_SIZE)
+_ADVERT_PUB_KEY_SIZE = 32
+_ADVERT_TIMESTAMP_SIZE = 4
+_ADVERT_SIGNATURE_SIZE = 64
+_ADVERT_MAX_APP_DATA_SIZE = 32  # firmware MAX_ADVERT_DATA_SIZE
+_ADVERT_HEADER_SIZE = _ADVERT_PUB_KEY_SIZE + _ADVERT_TIMESTAMP_SIZE + _ADVERT_SIGNATURE_SIZE  # 100
+
+
+def verify_advert_signature(payload: bytes) -> bool:
+    """Verify a MeshCore advertisement's Ed25519 signature.
+
+    Mirrors the firmware check in ``Mesh.cpp`` ``onRecvPacket()`` for
+    ``PAYLOAD_TYPE_ADVERT``: the signed message is
+    ``pub_key(32) || timestamp(4) || app_data``, where ``app_data`` is
+    everything following the 64-byte signature, clamped to
+    ``MAX_ADVERT_DATA_SIZE`` (32) bytes. The signature is verified against the
+    public key embedded in the advert itself, so a bit-flip in the key, the
+    signed body, or the signature all cause rejection.
+
+    ``payload`` must be the advert payload starting at the public key (i.e.
+    ``PacketInfo.payload`` for an ADVERT packet). Returns ``True`` only when the
+    signature is valid; any malformed input or verification failure returns
+    ``False`` so callers fail closed and never ingest a forged advert.
+    """
+    if len(payload) < _ADVERT_HEADER_SIZE:
+        return False
+
+    public_key = payload[0:_ADVERT_PUB_KEY_SIZE]
+    signature = payload[_ADVERT_PUB_KEY_SIZE + _ADVERT_TIMESTAMP_SIZE : _ADVERT_HEADER_SIZE]
+    app_data_len = min(len(payload) - _ADVERT_HEADER_SIZE, _ADVERT_MAX_APP_DATA_SIZE)
+
+    # pub_key || timestamp is the contiguous slice payload[0:36]; append app_data.
+    message = (
+        payload[0 : _ADVERT_PUB_KEY_SIZE + _ADVERT_TIMESTAMP_SIZE]
+        + payload[_ADVERT_HEADER_SIZE : _ADVERT_HEADER_SIZE + app_data_len]
+    )
+
+    try:
+        VerifyKey(public_key).verify(message, signature)
+        return True
+    except BadSignatureError:
+        return False
+    except Exception:
+        # Malformed/non-canonical public key or other unexpected failure — treat
+        # as invalid rather than propagating into the packet pipeline.
+        logger.warning("Advert signature verification errored; treating as invalid", exc_info=True)
+        return False
 
 
 # =============================================================================

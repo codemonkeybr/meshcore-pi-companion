@@ -13,6 +13,7 @@ from app.models import (
 )
 from app.repository import AmbiguousPublicKeyPrefixError, AppSettingsRepository, MessageRepository
 from app.services.message_send import (
+    SCOPE_UNSET,
     resend_channel_message_record,
     send_channel_message_to_channel,
     send_direct_message_to_contact,
@@ -154,6 +155,12 @@ async def send_channel_message(request: SendChannelMessageRequest) -> Message:
             status_code=400, detail=f"Invalid channel key format: {request.channel_key}"
         ) from None
 
+    # None field = no per-send override (fall back to the channel's persisted
+    # override). An explicit string (including "" for unscoped) overrides it.
+    flood_scope_override = (
+        SCOPE_UNSET if request.flood_scope_override is None else request.flood_scope_override
+    )
+
     return await send_channel_message_to_channel(
         channel=db_channel,
         channel_key_upper=request.channel_key.upper(),
@@ -164,6 +171,7 @@ async def send_channel_message(request: SendChannelMessageRequest) -> Message:
         error_broadcast_fn=broadcast_error,
         now_fn=time.time,
         temp_radio_slot=TEMP_RADIO_SLOT,
+        flood_scope_override=flood_scope_override,
         message_repository=MessageRepository,
     )
 

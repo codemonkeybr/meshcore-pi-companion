@@ -111,6 +111,38 @@ describe('NewMessageModal form reset', () => {
       await user.click(screen.getByRole('button', { name: 'Cancel' }));
       expect(onClose).toHaveBeenCalled();
     });
+
+    it('rejects extended characters when the extended toggle is off', async () => {
+      const user = userEvent.setup();
+      renderModal();
+      await switchToTab(user, 'Hashtag Channel');
+
+      await user.type(screen.getByPlaceholderText('channel-name'), 'Cats&Dogs');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      expect(onCreateHashtagChannel).not.toHaveBeenCalled();
+      expect(
+        screen.getByText('Use letters, numbers, and single dashes (no leading/trailing dashes)')
+      ).toBeTruthy();
+    });
+
+    it('hashes the name verbatim when the extended toggle is on', async () => {
+      const user = userEvent.setup();
+      renderModal();
+      await switchToTab(user, 'Hashtag Channel');
+
+      await user.click(
+        screen.getByRole('checkbox', {
+          name: /Permit capitals, whitespace, and extended characters/,
+        })
+      );
+      await user.type(screen.getByPlaceholderText('channel-name'), 'Cats&Dogs');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      await waitFor(() => {
+        expect(onCreateHashtagChannel).toHaveBeenCalledWith('#Cats&Dogs', false);
+      });
+    });
   });
 
   describe('bulk hashtag tab', () => {
@@ -157,6 +189,29 @@ describe('NewMessageModal form reset', () => {
 
       expect(onBulkAddHashtagChannels).not.toHaveBeenCalled();
       expect(screen.getByText('Invalid channel names: bad_room')).toBeTruthy();
+    });
+
+    it('accepts extended names split by lines when the toggle is on', async () => {
+      const user = userEvent.setup();
+      renderModal(true, { showBulkAddChannelTab: true });
+
+      await user.click(
+        screen.getByRole('checkbox', {
+          name: /Permit capitals, whitespace, and extended characters/,
+        })
+      );
+      await user.type(
+        screen.getByRole('textbox', { name: 'Bulk channel names' }),
+        '#Cats & Dogs{enter}Mesh Room'
+      );
+      await user.click(screen.getByRole('button', { name: 'Add Channels' }));
+
+      await waitFor(() => {
+        expect(onBulkAddHashtagChannels).toHaveBeenCalledWith(
+          ['#Cats & Dogs', '#Mesh Room'],
+          false
+        );
+      });
     });
   });
 

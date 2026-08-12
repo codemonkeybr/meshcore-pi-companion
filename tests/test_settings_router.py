@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from meshcore import EventType
 
 from app.models import CONTACT_TYPE_REPEATER, AppSettings, ContactUpsert
 from app.repository import AppSettingsRepository, ContactRepository
@@ -16,6 +17,7 @@ from app.routers.settings import (
     toggle_tracked_telemetry,
     update_settings,
 )
+from app.services.flood_scope import FORCE_UNSCOPED_FRAME
 
 
 class TestUpdateSettings:
@@ -82,6 +84,56 @@ class TestUpdateSettings:
         assert result.flood_scope == "#MyRegion"
 
     @pytest.mark.asyncio
+    async def test_known_regions_round_trip(self, test_db):
+        """Known regions should be saved and retrieved as a clean list."""
+        result = await update_settings(AppSettingsUpdate(known_regions=["nl-gr", "de-by"]))
+        assert result.known_regions == ["nl-gr", "de-by"]
+
+        fresh = await AppSettingsRepository.get()
+        assert fresh.known_regions == ["nl-gr", "de-by"]
+
+    @pytest.mark.asyncio
+    async def test_known_regions_default_empty(self, test_db):
+        """Fresh DB should have known_regions as an empty list."""
+        settings = await AppSettingsRepository.get()
+        assert settings.known_regions == []
+
+    @pytest.mark.asyncio
+    async def test_known_regions_cleaned_and_deduped(self, test_db):
+        """Leading hashes, whitespace, blanks, and case-insensitive dupes are normalized."""
+        result = await update_settings(
+            AppSettingsUpdate(known_regions=["  #nl-gr ", "", "nl-gr", "DE-BY", "de-by"])
+        )
+        assert result.known_regions == ["nl-gr", "DE-BY"]
+
+    @pytest.mark.asyncio
+    async def test_known_regions_change_triggers_backfill(self, test_db):
+        """Changing the region list schedules a background message re-tag."""
+        import asyncio
+
+        with patch(
+            "app.services.messages.backfill_message_regions", new_callable=AsyncMock
+        ) as mock_backfill:
+            await update_settings(AppSettingsUpdate(known_regions=["nl-gr", "de-by"]))
+            await asyncio.sleep(0)  # let the scheduled task run
+
+        mock_backfill.assert_awaited_once_with(["nl-gr", "de-by"])
+
+    @pytest.mark.asyncio
+    async def test_known_regions_unchanged_skips_backfill(self, test_db):
+        """Saving the same region list does not re-run the backfill."""
+        import asyncio
+
+        await update_settings(AppSettingsUpdate(known_regions=["nl-gr"]))
+        with patch(
+            "app.services.messages.backfill_message_regions", new_callable=AsyncMock
+        ) as mock_backfill:
+            await update_settings(AppSettingsUpdate(known_regions=["#nl-gr"]))  # same after cleanup
+            await asyncio.sleep(0)
+
+        mock_backfill.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_flood_scope_applies_to_radio(self, test_db):
         """When radio is connected, setting flood_scope calls set_flood_scope on radio."""
         mock_mc = AsyncMock()
@@ -90,6 +142,7 @@ class TestUpdateSettings:
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
         mock_rm.meshcore = mock_mc
+        mock_rm.firmware_ver_code = 13  # supports mode-1 unscoped
 
         from contextlib import asynccontextmanager
 
@@ -116,6 +169,7 @@ class TestUpdateSettings:
         mock_rm = AsyncMock()
         mock_rm.is_connected = True
         mock_rm.meshcore = mock_mc
+        mock_rm.firmware_ver_code = 13  # supports mode-1 unscoped
 
         from contextlib import asynccontextmanager
 
@@ -128,7 +182,10 @@ class TestUpdateSettings:
         with patch("app.radio.radio_manager", mock_rm):
             await update_settings(AppSettingsUpdate(flood_scope=""))
 
-        mock_mc.commands.set_flood_scope.assert_awaited_once_with("")
+        mock_mc.commands.send.assert_awaited_once_with(
+            FORCE_UNSCOPED_FRAME, [EventType.OK, EventType.ERROR]
+        )
+        mock_mc.commands.set_flood_scope.assert_not_awaited()
 
 
 class TestToggleFavorite:

@@ -28,6 +28,8 @@ export function OwnerInfoPane({
       ) : (
         <div className="space-y-1">
           <LabeledBlock label="Owner Info" value={data.owner_info ?? '—'} />
+          <KvRow label="Firmware" value={data.firmware_version ?? '—'} />
+          {data.name && <KvRow label="Name" value={data.name} />}
           <KvRow label="Guest Password" value={data.guest_password ?? '—'} />
         </div>
       )}

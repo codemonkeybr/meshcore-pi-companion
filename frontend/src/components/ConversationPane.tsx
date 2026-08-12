@@ -13,12 +13,10 @@ import type {
   HealthStatus,
   Message,
   PathDiscoveryResponse,
-  RawPacket,
   RadioConfig,
   RadioTraceHopRequest,
   RadioTraceResponse,
 } from '../types';
-import type { RawPacketStatsSessionState } from '../utils/rawPacketStats';
 import { CONTACT_TYPE_REPEATER, CONTACT_TYPE_ROOM } from '../types';
 import {
   getContactDisplayName,
@@ -38,8 +36,6 @@ interface ConversationPaneProps {
   activeConversation: Conversation | null;
   contacts: Contact[];
   channels: Channel[];
-  rawPackets: RawPacket[];
-  rawPacketStatsSession: RawPacketStatsSessionState;
   config: RadioConfig | null;
   health: HealthStatus | null;
   notificationsSupported: boolean;
@@ -50,7 +46,8 @@ interface ConversationPaneProps {
   messagesLoading: boolean;
   loadingOlder: boolean;
   hasOlderMessages: boolean;
-  unreadMarkerLastReadAt?: number | null;
+  unreadMarkerMessageId?: number | null;
+  onNavigateToUnread?: (messageId: number) => void;
   targetMessageId: number | null;
   hasNewerMessages: boolean;
   loadingNewer: boolean;
@@ -123,8 +120,6 @@ export function ConversationPane({
   activeConversation,
   contacts,
   channels,
-  rawPackets,
-  rawPacketStatsSession,
   config,
   health,
   notificationsSupported,
@@ -135,7 +130,8 @@ export function ConversationPane({
   messagesLoading,
   loadingOlder,
   hasOlderMessages,
-  unreadMarkerLastReadAt,
+  unreadMarkerMessageId,
+  onNavigateToUnread,
   targetMessageId,
   hasNewerMessages,
   loadingNewer,
@@ -213,7 +209,6 @@ export function ConversationPane({
             <MapView
               contacts={contacts}
               focusedKey={activeConversation.mapFocusKey}
-              rawPackets={rawPackets}
               config={config}
               onSelectContact={(contact) =>
                 onSelectConversation({
@@ -236,20 +231,13 @@ export function ConversationPane({
   if (activeConversation.type === 'visualizer') {
     return (
       <Suspense fallback={<LoadingPane label="Loading visualizer..." />}>
-        <VisualizerView packets={rawPackets} contacts={contacts} config={config} />
+        <VisualizerView contacts={contacts} channels={channels} config={config} />
       </Suspense>
     );
   }
 
   if (activeConversation.type === 'raw') {
-    return (
-      <RawPacketFeedView
-        packets={rawPackets}
-        rawPacketStatsSession={rawPacketStatsSession}
-        contacts={contacts}
-        channels={channels}
-      />
-    );
+    return <RawPacketFeedView contacts={contacts} channels={channels} />;
   }
 
   if (activeConversation.type === 'search') {
@@ -337,8 +325,11 @@ export function ConversationPane({
           loading={messagesLoading}
           loadingOlder={loadingOlder}
           hasOlderMessages={hasOlderMessages}
-          unreadMarkerLastReadAt={
-            activeConversation.type === 'channel' ? unreadMarkerLastReadAt : undefined
+          unreadMarkerMessageId={
+            activeConversation.type === 'channel' ? unreadMarkerMessageId : undefined
+          }
+          onNavigateToUnread={
+            activeConversation.type === 'channel' ? onNavigateToUnread : undefined
           }
           onDismissUnreadMarker={
             activeConversation.type === 'channel' ? onDismissUnreadMarker : undefined

@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 
-import { stripRegionScopePrefix } from '../utils/regionScope';
+import {
+  UNSCOPED_OVERRIDE_MARKER,
+  isUnscopedMarker,
+  stripRegionScopePrefix,
+} from '../utils/regionScope';
 import { Button } from './ui/button';
 import {
   Dialog,
@@ -34,10 +38,17 @@ export function ChannelFloodScopeOverrideModal({
     if (!open) {
       return;
     }
-    setRegion(stripRegionScopePrefix(currentOverride));
+    // The unscoped marker isn't a region name, so start the input blank for it.
+    setRegion(isUnscopedMarker(currentOverride) ? '' : stripRegionScopePrefix(currentOverride));
   }, [currentOverride, open]);
 
   const trimmedRegion = region.trim();
+
+  const currentOverrideLabel = isUnscopedMarker(currentOverride)
+    ? 'unscoped (plain flood)'
+    : currentOverride
+      ? stripRegionScopePrefix(currentOverride)
+      : 'inherit global setting';
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -46,7 +57,9 @@ export function ChannelFloodScopeOverrideModal({
           <DialogTitle>Regional Override</DialogTitle>
           <DialogDescription>
             Channel-level regional routing temporarily changes the radio flood scope before send and
-            restores it after. This can noticeably slow channel sends.
+            restores it after. This can noticeably slow channel sends. Choose one of three modes
+            below: scope to a region, force unscoped (plain flood, ignoring your global region), or
+            inherit the global setting.
           </DialogDescription>
         </DialogHeader>
 
@@ -54,8 +67,7 @@ export function ChannelFloodScopeOverrideModal({
           <div className="rounded-md border border-border bg-muted/20 p-3 text-sm">
             <div className="font-medium">{roomName}</div>
             <div className="mt-1 text-muted-foreground">
-              Current regional override:{' '}
-              {currentOverride ? stripRegionScopePrefix(currentOverride) : 'none'}
+              Current setting: {currentOverrideLabel}
             </div>
           </div>
 
@@ -83,8 +95,19 @@ export function ChannelFloodScopeOverrideModal({
               }}
             >
               {trimmedRegion.length > 0
-                ? `Use ${trimmedRegion} region for ${roomName}`
-                : `Use region for ${roomName}`}
+                ? `Scope ${roomName} to ${trimmedRegion}`
+                : `Scope ${roomName} to a region`}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={() => {
+                onSetOverride(UNSCOPED_OVERRIDE_MARKER);
+                onClose();
+              }}
+            >
+              Always send {roomName} unscoped (ignore global region)
             </Button>
             <Button
               type="button"
@@ -95,7 +118,7 @@ export function ChannelFloodScopeOverrideModal({
                 onClose();
               }}
             >
-              Do not use region routing for {roomName}
+              Use global region setting for {roomName}
             </Button>
           </div>
         </DialogFooter>

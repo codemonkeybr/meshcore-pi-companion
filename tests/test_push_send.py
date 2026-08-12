@@ -13,6 +13,7 @@ from app.push.send import (
     IPv4HTTPAdapter,
     send_push,
 )
+from app.push.vapid import get_vapid_claims
 
 
 @pytest.mark.asyncio
@@ -72,3 +73,14 @@ async def test_send_push_retries_with_ipv4_session_after_connect_timeout():
         IPV4_FALLBACK_CONNECT_TIMEOUT_SECONDS,
         DEFAULT_PUSH_READ_TIMEOUT_SECONDS,
     )
+
+
+def test_get_vapid_claims_defaults_to_meshcore_local():
+    """Default subject is unchanged so existing deployments behave identically."""
+    assert get_vapid_claims() == {"sub": "mailto:noreply@meshcore.local"}
+
+
+def test_get_vapid_claims_honors_configured_subject(monkeypatch):
+    """MESHCORE_VAPID_SUBJECT overrides the outgoing subject (required for APNs/iOS)."""
+    monkeypatch.setattr("app.config.settings.vapid_subject", "mailto:ops@example.net")
+    assert get_vapid_claims() == {"sub": "mailto:ops@example.net"}

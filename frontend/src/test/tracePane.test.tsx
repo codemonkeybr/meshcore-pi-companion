@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TracePane } from '../components/TracePane';
 import type { Contact, RadioConfig, RadioTraceResponse } from '../types';
@@ -45,6 +45,10 @@ const config: RadioConfig = {
 };
 
 describe('TracePane', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it('shows only full-key repeaters and filters by name or key', () => {
     render(
       <TracePane
@@ -112,7 +116,7 @@ describe('TracePane', () => {
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay alpha/i }));
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay beta/i }));
 
-    expect(screen.getByText('2 hops selected · 4-byte trace')).toBeInTheDocument();
+    expect(screen.getByText(/2 hops selected · 4-byte trace/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /move relay beta up/i }));
     fireEvent.click(screen.getByRole('button', { name: /send trace/i }));
@@ -129,9 +133,52 @@ describe('TracePane', () => {
     expect(screen.getByText('+5.0 dB')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /remove relay alpha/i }));
-    expect(screen.getByText('1 hop selected · 4-byte trace')).toBeInTheDocument();
+    expect(screen.getByText(/1 hop selected · 4-byte trace/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /remove relay beta/i }));
     expect(screen.getByText('No hops selected')).toBeInTheDocument();
+  });
+
+  it('reverse link appends the reversed hop chain to build a return path (issue #287)', async () => {
+    const relayA = makeContact('11'.repeat(32), 'Relay Alpha');
+    const relayB = makeContact('22'.repeat(32), 'Relay Beta');
+    const relayC = makeContact('33'.repeat(32), 'Relay Charlie');
+    const onRunTracePath = vi.fn(
+      async (): Promise<RadioTraceResponse> => ({
+        path_len: 0,
+        timeout_seconds: 6,
+        nodes: [],
+      })
+    );
+
+    render(
+      <TracePane
+        config={config}
+        onRunTracePath={onRunTracePath}
+        contacts={[relayA, relayB, relayC]}
+      />
+    );
+
+    // Single hop: Reverse link is a no-op (and disabled).
+    fireEvent.click(screen.getByRole('button', { name: /^add repeater relay alpha/i }));
+    expect(screen.getByRole('button', { name: /reverse link/i })).toBeDisabled();
+
+    // R1, R2, R3 -> append R2, R1 => R1, R2, R3, R2, R1.
+    fireEvent.click(screen.getByRole('button', { name: /^add repeater relay beta/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^add repeater relay charlie/i }));
+    fireEvent.click(screen.getByRole('button', { name: /reverse link/i }));
+
+    expect(screen.getByText(/5 hops selected · 4-byte trace/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /send trace/i }));
+    await waitFor(() => {
+      expect(onRunTracePath).toHaveBeenCalledWith(4, [
+        { public_key: relayA.public_key },
+        { public_key: relayB.public_key },
+        { public_key: relayC.public_key },
+        { public_key: relayB.public_key },
+        { public_key: relayA.public_key },
+      ]);
+    });
   });
 
   it('allows adding the same repeater multiple times from the picker row', () => {
@@ -142,7 +189,7 @@ describe('TracePane', () => {
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay alpha/i }));
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay alpha/i }));
 
-    expect(screen.getByText('2 hops selected · 4-byte trace')).toBeInTheDocument();
+    expect(screen.getByText(/2 hops selected · 4-byte trace/)).toBeInTheDocument();
     expect(screen.getByText('Added 2 times')).toBeInTheDocument();
   });
 
@@ -185,7 +232,7 @@ describe('TracePane', () => {
     fireEvent.change(screen.getByLabelText('Repeater prefix'), { target: { value: 'ae' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add custom hop' }));
 
-    expect(screen.getByText('1 hop selected · 1-byte trace')).toBeInTheDocument();
+    expect(screen.getByText(/1 hop selected · 1-byte trace/)).toBeInTheDocument();
     expect(screen.getByText('AE (1-byte)')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay alpha/i }));
@@ -202,6 +249,128 @@ describe('TracePane', () => {
     expect(screen.getByRole('button', { name: '2-byte' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '4-byte' })).toBeDisabled();
     expect(screen.getByText(/custom hops are locked to 1-byte prefixes/i)).toBeInTheDocument();
+  });
+
+  it('Traced lists only trace-used repeaters in MRU order, persisted locally (issue #286)', async () => {
+    const relayA = makeContact('11'.repeat(32), 'Relay Alpha');
+    const relayB = makeContact('22'.repeat(32), 'Relay Beta');
+    const relayC = makeContact('33'.repeat(32), 'Relay Charlie');
+    const onRunTracePath = vi.fn(
+      async (): Promise<RadioTraceResponse> => ({
+        path_len: 0,
+        timeout_seconds: 6,
+        nodes: [],
+      })
+    );
+
+    const { unmount } = render(
+      <TracePane
+        config={config}
+        onRunTracePath={onRunTracePath}
+        contacts={[relayA, relayB, relayC]}
+      />
+    );
+
+    const rowNames = () =>
+      screen
+        .queryAllByRole('button', { name: /^add repeater/i })
+        .map((row) => row.getAttribute('aria-label'));
+
+    // No history yet: Traced shows an explanatory empty state, not the full list.
+    fireEvent.click(screen.getByRole('button', { name: 'Traced' }));
+    expect(screen.getByText(/no repeaters have been used in traces yet/i)).toBeInTheDocument();
+    expect(rowNames()).toEqual([]);
+
+    // Build and run a trace with B from the A/Z list.
+    fireEvent.click(screen.getByRole('button', { name: 'A/Z' }));
+    fireEvent.click(screen.getByRole('button', { name: /^add repeater relay beta/i }));
+    fireEvent.click(screen.getByRole('button', { name: /send trace/i }));
+    await waitFor(() => expect(onRunTracePath).toHaveBeenCalledTimes(1));
+
+    // Traced lists only B; untraced A and C are filtered out.
+    fireEvent.click(screen.getByRole('button', { name: 'Traced' }));
+    expect(rowNames()).toEqual(['Add repeater Relay Beta']);
+
+    // A second trace with C bumps it above B.
+    fireEvent.click(screen.getByRole('button', { name: 'A/Z' }));
+    fireEvent.click(screen.getByRole('button', { name: /remove relay beta/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^add repeater relay charlie/i }));
+    fireEvent.click(screen.getByRole('button', { name: /send trace/i }));
+    await waitFor(() => expect(onRunTracePath).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Traced' }));
+    expect(rowNames()).toEqual(['Add repeater Relay Charlie', 'Add repeater Relay Beta']);
+
+    // Order persists across remounts via localStorage.
+    unmount();
+    render(
+      <TracePane
+        config={config}
+        onRunTracePath={onRunTracePath}
+        contacts={[relayA, relayB, relayC]}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Traced' }));
+    expect(rowNames()).toEqual(['Add repeater Relay Charlie', 'Add repeater Relay Beta']);
+  });
+
+  it('seeds Traced from stored recent traces when no usage history exists', () => {
+    const relayA = makeContact('11'.repeat(32), 'Relay Alpha');
+    const relayB = makeContact('22'.repeat(32), 'Relay Beta');
+    localStorage.setItem(
+      'remoteterm-recent-traces',
+      JSON.stringify([
+        {
+          ranAt: 1,
+          hops: [
+            { kind: 'repeater', publicKey: relayB.public_key, displayName: 'Relay Beta' },
+            { kind: 'custom', hopHex: 'ae', hopBytes: 1, displayName: 'AE (1B)' },
+          ],
+        },
+      ])
+    );
+
+    render(<TracePane config={config} onRunTracePath={vi.fn()} contacts={[relayA, relayB]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Traced' }));
+    expect(
+      screen
+        .getAllByRole('button', { name: /^add repeater/i })
+        .map((row) => row.getAttribute('aria-label'))
+    ).toEqual(['Add repeater Relay Beta']);
+  });
+
+  it('Dist. hides repeaters without a known distance when the radio has a location', () => {
+    const located = makeContact('11'.repeat(32), 'Relay Located', CONTACT_TYPE_REPEATER, {
+      lat: 10.1,
+      lon: 20.1,
+    });
+    const unlocated = makeContact('22'.repeat(32), 'Relay Mystery');
+
+    render(<TracePane config={config} onRunTracePath={vi.fn()} contacts={[located, unlocated]} />);
+
+    // A/Z shows both.
+    expect(screen.getByText('Relay Located')).toBeInTheDocument();
+    expect(screen.getByText('Relay Mystery')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dist.' }));
+    expect(screen.getByText('Relay Located')).toBeInTheDocument();
+    expect(screen.queryByText('Relay Mystery')).not.toBeInTheDocument();
+
+    // Without a local radio location, the filter is skipped (note explains instead).
+    fireEvent.change(screen.getByLabelText('Search repeaters'), { target: { value: 'mystery' } });
+    expect(screen.getByText(/no repeaters with a known distance matched/i)).toBeInTheDocument();
+  });
+
+  it('caps the rendered repeater list and reports the overflow', () => {
+    const contacts = Array.from({ length: 70 }, (_, i) =>
+      makeContact(i.toString(16).padStart(2, '0').repeat(32), `Relay ${String(i).padStart(3, '0')}`)
+    );
+
+    render(<TracePane config={config} onRunTracePath={vi.fn()} contacts={contacts} />);
+
+    expect(screen.getAllByRole('button', { name: /^add repeater/i })).toHaveLength(60);
+    expect(screen.getByText(/showing the first 60 of 70 repeaters/i)).toBeInTheDocument();
   });
 
   it('drops an in-flight result after the draft path changes', async () => {
@@ -228,7 +397,7 @@ describe('TracePane', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^add repeater relay beta/i }));
 
-    expect(screen.getByText('2 hops selected · 4-byte trace')).toBeInTheDocument();
+    expect(screen.getByText(/2 hops selected · 4-byte trace/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send trace/i })).toBeEnabled();
 
     await act(async () => {
@@ -256,8 +425,7 @@ describe('TracePane', () => {
 
     expect(screen.queryByRole('heading', { name: 'Results (6.0s)' })).not.toBeInTheDocument();
     expect(screen.queryByText('+7.5 dB')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('Send a trace to see the returned hop-by-hop SNR values.')
-    ).toBeInTheDocument();
+    // The Results section stays hidden entirely until a result or error lands.
+    expect(screen.queryByRole('heading', { name: /^results/i })).not.toBeInTheDocument();
   });
 });

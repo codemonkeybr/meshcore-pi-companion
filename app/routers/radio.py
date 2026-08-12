@@ -11,10 +11,14 @@ from pydantic import BaseModel, Field
 
 from app.models import (
     CONTACT_TYPE_REPEATER,
+    Contact,
     ContactUpsert,
     RadioDiscoveryRequest,
     RadioDiscoveryResponse,
     RadioDiscoveryResult,
+    RadioRegionDiscoveryRepeater,
+    RadioRegionDiscoveryRequest,
+    RadioRegionDiscoveryResponse,
     RadioTraceHopRequest,
     RadioTraceNode,
     RadioTraceRequest,
@@ -23,6 +27,7 @@ from app.models import (
 from app.radio_sync import send_advertisement as do_send_advertisement
 from app.radio_sync import sync_radio_time
 from app.repository import ContactRepository
+from app.routers.repeaters import request_anon_region_names
 from app.routers.server_control import _monotonic
 from app.services.contact_reconciliation import (
     promote_prefix_contacts_for_contact,
@@ -565,6 +570,95 @@ async def discover_mesh(request: RadioDiscoveryRequest) -> RadioDiscoveryRespons
     return RadioDiscoveryResponse(
         target=request.target,
         duration_seconds=DISCOVERY_WINDOW_SECONDS,
+        results=results,
+    )
+
+
+def _dedupe_region_names(names: list[str]) -> list[str]:
+    """Dedupe region names case-insensitively, preserving first-seen order.
+
+    Drops the wildcard ``*`` (means "allows unscoped flood", not a nameable
+    region) and blanks so the result is safe to merge into ``known_regions``.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = (raw or "").strip()
+        if not name or name == "*" or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        out.append(name)
+    return out
+
+
+async def _resolve_region_discovery_targets(request: RadioRegionDiscoveryRequest) -> list[Contact]:
+    """Resolve the repeater contacts to sweep for regions.
+
+    Explicit ``public_keys`` win (filtered to known repeaters); otherwise fall
+    back to the most recently seen repeater contacts. Capped at
+    ``max_repeaters`` either way.
+    """
+    if request.public_keys:
+        targets: list[Contact] = []
+        seen: set[str] = set()
+        for raw in request.public_keys:
+            key = (raw or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            contact = await ContactRepository.get_by_key(key)
+            if contact is None or contact.type != CONTACT_TYPE_REPEATER:
+                continue
+            targets.append(contact)
+            if len(targets) >= request.max_repeaters:
+                break
+        return targets
+    return await ContactRepository.get_repeaters_by_recent(limit=request.max_repeaters)
+
+
+@router.post("/discover-regions", response_model=RadioRegionDiscoveryResponse)
+async def discover_regions(
+    request: RadioRegionDiscoveryRequest,
+) -> RadioRegionDiscoveryResponse:
+    """Sweep nearby repeaters for their flood-allowed region names.
+
+    Sends the guest-accessible anon regions request to each target repeater and
+    aggregates the flood-allowed names into a deduplicated union that the
+    operator can merge into ``known_regions``. The request is direct-routed, so
+    only repeaters in range answer; unreachable ones are reported as
+    ``answered=false``. This is the radio-wide companion to the per-repeater
+    admin regions pane (issue #309).
+    """
+    radio_manager.require_connected()
+
+    targets = await _resolve_region_discovery_targets(request)
+    if not targets:
+        return RadioRegionDiscoveryResponse(
+            repeaters_queried=0, repeaters_answered=0, regions=[], results=[]
+        )
+
+    results: list[RadioRegionDiscoveryRepeater] = []
+    # One radio_operation for the whole sweep: keeps polling paused once and
+    # runs the per-repeater anon requests serially behind the single radio lock.
+    async with radio_manager.radio_operation(
+        "discover_regions", pause_polling=True, suspend_auto_fetch=True
+    ) as mc:
+        for contact in targets:
+            names = await request_anon_region_names(mc, contact)
+            results.append(
+                RadioRegionDiscoveryRepeater(
+                    public_key=contact.public_key,
+                    name=contact.name,
+                    answered=names is not None,
+                    regions=_dedupe_region_names(names or []),
+                )
+            )
+
+    union = _dedupe_region_names([name for result in results for name in result.regions])
+    return RadioRegionDiscoveryResponse(
+        repeaters_queried=len(targets),
+        repeaters_answered=sum(1 for result in results if result.answered),
+        regions=union,
         results=results,
     )
 

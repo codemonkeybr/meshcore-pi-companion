@@ -66,6 +66,11 @@ class BaseMqttPublisher(ABC):
         self.integration_name: str = ""
         self._last_error: str | None = None
         self._error_notified: bool = False
+        # Set when the loop tears down a healthy connection for a planned,
+        # self-healing reconnect (e.g. community-MQTT JWT renewal). The next
+        # successful connect then skips the "connected" success toast so these
+        # expected reconnects don't spam notifications. See issue #305.
+        self._suppress_next_connect_toast: bool = False
 
     def set_integration_name(self, name: str) -> None:
         """Attach the configured fanout-module name for operator-facing logs."""
@@ -106,6 +111,7 @@ class BaseMqttPublisher(ABC):
         self.connected = False
         self._last_error = None
         self._error_notified = False
+        self._suppress_next_connect_toast = False
 
     async def restart(self, settings: object) -> None:
         """Called when settings change — stop + start."""
@@ -222,8 +228,13 @@ class BaseMqttPublisher(ABC):
                     self._error_notified = False
                     backoff = _BACKOFF_MIN
 
-                    title, detail = self._on_connected(settings)
-                    broadcast_success(title, detail)
+                    if self._suppress_next_connect_toast:
+                        # Planned/self-healing reconnect — health still updates,
+                        # but skip the redundant "connected" toast.
+                        self._suppress_next_connect_toast = False
+                    else:
+                        title, detail = self._on_connected(settings)
+                        broadcast_success(title, detail)
                     await self._on_connected_async(settings)
                     _broadcast_health()
 
@@ -238,6 +249,10 @@ class BaseMqttPublisher(ABC):
                             elapsed = time.monotonic() - connect_time
                             await self._on_periodic_wake(elapsed)
                             if self._should_break_wait(elapsed):
+                                # Expected, self-healing reconnect surfaced by the
+                                # periodic wake (e.g. community-MQTT JWT renewal),
+                                # so don't toast "connected" when it comes back.
+                                self._suppress_next_connect_toast = True
                                 break
                             continue
 

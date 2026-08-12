@@ -99,15 +99,48 @@ class MqttCommunityModule(FanoutModule):
 
     @property
     def status(self) -> str:
+        if self.last_error:
+            return "error"
         if self._publisher._is_configured():
-            if self._publisher.last_error:
-                return "error"
             return "connected" if self._publisher.connected else "disconnected"
         return "disconnected"
 
     @property
     def last_error(self) -> str | None:
-        return self._publisher.last_error
+        if self._publisher.last_error:
+            return self._publisher.last_error
+        return self._key_unavailable_reason()
+
+    def _key_unavailable_reason(self) -> str | None:
+        """Explain a silent "disconnected" caused by a missing radio key.
+
+        Community MQTT can only authenticate (and derive its topic/identity)
+        with the radio's own key, which is exported from the radio on connect.
+        When the radio is fully connected and set up but the keystore is still
+        empty, the key export was refused or never answered -- typically
+        firmware without ENABLE_PRIVATE_KEY_EXPORT, or a proxy transport
+        (e.g. Meshmonitor) that does not forward the key-export command.
+
+        Surfacing this as the module's ``last_error`` promotes the fanout status
+        to "error" and lights up the existing per-card error detail, instead of
+        leaving the operator staring at a bare "Disconnected". See issue #321.
+
+        Gated on ``is_setup_complete`` so we do not falsely accuse the radio
+        during the normal connect/key-export window.
+        """
+        from app.keystore import get_public_key
+        from app.services.radio_runtime import radio_runtime as radio_manager
+
+        if get_public_key() is not None:
+            return None
+        if not (radio_manager.is_connected and radio_manager.is_setup_complete):
+            return None
+        return (
+            "Community MQTT needs the radio's private key to authenticate, but it "
+            "isn't available. Your radio firmware may not support key export "
+            "(ENABLE_PRIVATE_KEY_EXPORT=1), or you're connecting through a proxy "
+            "that doesn't forward the key-export command."
+        )
 
 
 async def _publish_community_packet(

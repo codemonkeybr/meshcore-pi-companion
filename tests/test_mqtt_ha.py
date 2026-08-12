@@ -8,8 +8,12 @@ import pytest
 from app.fanout.mqtt_ha import (
     MqttHaModule,
     _assign_lpp_keys,
+    _contact_telemetry_payload,
     _contact_tracker_discovery_config,
     _device_payload,
+    _extract_gps_reading,
+    _is_geo_sensor,
+    _legacy_geo_sensor_topics,
     _lpp_discovery_configs,
     _lpp_sensor_key,
     _message_event_discovery_config,
@@ -252,6 +256,208 @@ class TestMqttHaFiltering:
         assert payload["battery_volts"] == 4.1
         assert payload["uptime_seconds"] == 86400
         assert mod._publisher.publish.call_args.kwargs.get("retain") is not True
+
+
+class TestLppGpsHandling:
+    """GPS/location LPP readings route to the device_tracker, not numeric sensors."""
+
+    _GPS_SENSOR = {
+        "channel": 1,
+        "type_name": "gps",
+        "value": {"latitude": 21.0021, "longitude": -21.0021, "altitude": 125.3},
+    }
+
+    def test_is_geo_sensor_detects_gps_type(self):
+        assert _is_geo_sensor(self._GPS_SENSOR) is True
+
+    def test_is_geo_sensor_detects_dict_value(self):
+        assert (
+            _is_geo_sensor(
+                {
+                    "channel": 1,
+                    "type_name": "location",
+                    "value": {"latitude": 1.0, "longitude": 2.0},
+                }
+            )
+            is True
+        )
+
+    def test_is_geo_sensor_false_for_scalar(self):
+        assert _is_geo_sensor({"channel": 1, "type_name": "voltage", "value": 4.03}) is False
+
+    def test_assign_lpp_keys_skips_gps(self):
+        sensors = [
+            {"channel": 1, "type_name": "voltage", "value": 4.03},
+            self._GPS_SENSOR,
+            {"channel": 1, "type_name": "temperature", "value": 24.5},
+        ]
+        keys = [key for _, key, _ in _assign_lpp_keys(sensors)]
+        assert keys == ["lpp_voltage_ch1", "lpp_temperature_ch1"]
+
+    def test_lpp_discovery_skips_gps(self):
+        topics = [
+            topic
+            for topic, _ in _lpp_discovery_configs(
+                "meshcore", "ccdd11223344", {}, [self._GPS_SENSOR], "t"
+            )
+        ]
+        assert topics == []
+
+    def test_contact_telemetry_payload_excludes_gps(self):
+        payload = _contact_telemetry_payload(
+            {
+                "lpp_sensors": [
+                    {"channel": 1, "type_name": "voltage", "value": 4.03},
+                    self._GPS_SENSOR,
+                ]
+            }
+        )
+        assert payload == {"lpp_voltage_ch1": 4.03}
+        assert "lpp_gps_ch1" not in payload
+
+    def test_extract_gps_reading(self):
+        attrs = _extract_gps_reading([self._GPS_SENSOR])
+        assert attrs == {
+            "latitude": 21.0021,
+            "longitude": -21.0021,
+            "gps_accuracy": 0,
+            "source_type": "gps",
+            "altitude": 125.3,
+        }
+
+    def test_extract_gps_reading_skips_zero_fix(self):
+        assert (
+            _extract_gps_reading(
+                [{"channel": 1, "type_name": "gps", "value": {"latitude": 0.0, "longitude": 0.0}}]
+            )
+            is None
+        )
+
+    def test_extract_gps_reading_none_without_gps(self):
+        assert _extract_gps_reading([{"channel": 1, "type_name": "voltage", "value": 4.03}]) is None
+
+    @pytest.mark.asyncio
+    async def test_on_telemetry_routes_contact_gps_to_tracker(self):
+        key = "ccdd11223344"
+        mod = MqttHaModule("test", _base_config(tracked_contacts=[key]))
+        mod._publisher = MagicMock()
+        mod._publisher.connected = True
+        mod._publisher.publish = AsyncMock()
+
+        await mod.on_telemetry(
+            {
+                "public_key": key,
+                "lpp_sensors": [
+                    {"channel": 1, "type_name": "voltage", "value": 4.03},
+                    self._GPS_SENSOR,
+                ],
+            }
+        )
+
+        topics = {c[0][0]: c[0][1] for c in mod._publisher.publish.call_args_list}
+        # Numeric telemetry still published, without the GPS object.
+        assert f"meshcore/{_node_id(key)}/telemetry" in topics
+        assert "lpp_gps_ch1" not in topics[f"meshcore/{_node_id(key)}/telemetry"]
+        # GPS routed to the device_tracker attributes topic.
+        gps_payload = topics[f"meshcore/{_node_id(key)}/gps"]
+        assert gps_payload["latitude"] == 21.0021
+        assert gps_payload["longitude"] == -21.0021
+        assert gps_payload["altitude"] == 125.3
+
+    @pytest.mark.asyncio
+    async def test_on_telemetry_repeater_does_not_publish_gps(self):
+        key = "ccdd11223344"
+        mod = MqttHaModule("test", _base_config(tracked_repeaters=[key]))
+        mod._publisher = MagicMock()
+        mod._publisher.connected = True
+        mod._publisher.publish = AsyncMock()
+
+        await mod.on_telemetry(
+            {"public_key": key, "battery_volts": 4.1, "lpp_sensors": [self._GPS_SENSOR]}
+        )
+
+        topics = [c[0][0] for c in mod._publisher.publish.call_args_list]
+        assert f"meshcore/{_node_id(key)}/gps" not in topics
+
+
+class TestStaleDiscoveryCleanup:
+    @pytest.mark.asyncio
+    async def test_publish_discovery_clears_removed_topics(self):
+        mod = MqttHaModule("test", _base_config())
+        mod._radio_key = "aabbccddeeff"
+        mod._publisher = MagicMock()
+        mod._publisher.connected = True
+        mod._publisher.publish = AsyncMock()
+        mod._clear_retained_topics = AsyncMock()
+        # Simulate a previously-published topic that the new run no longer emits.
+        stale_topic = "homeassistant/sensor/meshcore_aabbccddeeff/lpp_gps_ch1/config"
+        mod._discovery_topics = [stale_topic]
+
+        await mod._publish_discovery()
+
+        cleared = mod._clear_retained_topics.call_args[0][0]
+        assert stale_topic in cleared
+        assert stale_topic not in mod._discovery_topics
+
+    def test_legacy_geo_sensor_topics_for_gps(self):
+        nid = "ccdd11223344"
+        topics = _legacy_geo_sensor_topics(
+            nid,
+            [
+                {"channel": 1, "type_name": "gps", "value": {"latitude": 1.0, "longitude": 2.0}},
+                {"channel": 2, "type_name": "temperature", "value": 23.5},
+            ],
+        )
+        assert topics == [f"homeassistant/sensor/meshcore_{nid}/lpp_gps_ch1/config"]
+
+    def test_legacy_geo_sensor_topics_disambiguates_duplicates(self):
+        nid = "ccdd11223344"
+        gps = {"channel": 1, "type_name": "gps", "value": {"latitude": 1.0, "longitude": 2.0}}
+        topics = _legacy_geo_sensor_topics(nid, [gps, gps])
+        assert topics == [
+            f"homeassistant/sensor/meshcore_{nid}/lpp_gps_ch1/config",
+            f"homeassistant/sensor/meshcore_{nid}/lpp_gps_ch1_2/config",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_publish_discovery_clears_legacy_gps_sensor_after_restart(self):
+        """A retained GPS sensor config from an older version must be cleared even
+        when this process never published it (in-memory history is empty)."""
+        contact_key = "ccdd11223344"
+        mod = MqttHaModule("test", _base_config(tracked_contacts=[contact_key]))
+        mod._radio_key = "aabbccddeeff"
+        mod._radio_name = "MyRadio"
+        mod._publisher = MagicMock()
+        mod._publisher.connected = True
+        mod._publisher.publish = AsyncMock()
+        mod._clear_retained_topics = AsyncMock()
+        # Fresh process after upgrade: nothing remembered from a prior run.
+        mod._discovery_topics = []
+        mod._resolve_contact_name = AsyncMock(return_value="MCRadio2")
+        mod._resolve_latest_contact_telemetry = AsyncMock(
+            return_value={
+                "timestamp": 1234,
+                "data": {
+                    "lpp_sensors": [
+                        {
+                            "channel": 1,
+                            "type_name": "gps",
+                            "value": {"latitude": 21.0, "longitude": -21.0},
+                        },
+                    ],
+                },
+            }
+        )
+
+        await mod._publish_discovery()
+
+        nid = _node_id(contact_key)
+        legacy_topic = f"homeassistant/sensor/meshcore_{nid}/lpp_gps_ch1/config"
+        cleared = mod._clear_retained_topics.call_args[0][0]
+        assert legacy_topic in cleared
+        # The dead GPS sensor config must not be re-published.
+        published = [c.args[0] for c in mod._publisher.publish.call_args_list]
+        assert legacy_topic not in published
 
 
 class TestMqttHaHealth:

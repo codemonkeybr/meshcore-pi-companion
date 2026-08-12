@@ -6,6 +6,7 @@ import { api } from '../api';
 import { toast } from './ui/sonner';
 import { cn } from '@/lib/utils';
 import { extractPacketPayloadHex } from '../utils/pathUtils';
+import { useRawPackets } from '../stores/rawPacketStore';
 
 interface CrackedChannel {
   channelName: string;
@@ -23,7 +24,6 @@ interface QueueItem {
 }
 
 export interface CrackerPanelProps {
-  packets: RawPacket[];
   channels: Channel[];
   onChannelCreate: (name: string, key: string) => Promise<void>;
   onRunningChange?: (running: boolean) => void;
@@ -31,12 +31,12 @@ export interface CrackerPanelProps {
 }
 
 export function CrackerPanel({
-  packets,
   channels,
   onChannelCreate,
   onRunningChange,
   visible = false,
 }: CrackerPanelProps) {
+  const packets = useRawPackets();
   const [isRunning, setIsRunning] = useState(false);
   const [maxLength, setMaxLength] = useState(6);
   const [maxLengthInput, setMaxLengthInput] = useState('6');

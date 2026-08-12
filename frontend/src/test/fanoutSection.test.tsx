@@ -105,6 +105,7 @@ beforeEach(() => {
     advert_interval: 0,
     last_advert_time: 0,
     flood_scope: '',
+    known_regions: [],
     blocked_keys: [],
     blocked_names: [],
     discovery_blocked_types: [],
@@ -557,6 +558,107 @@ describe('SettingsFanoutSection', () => {
         config: { url: '', method: 'POST', headers: {}, hmac_secret: '', hmac_header: '' },
         scope: { messages: 'all', raw_packets: 'none' },
         enabled: false,
+      })
+    );
+  });
+
+  it('creates Apprise with outgoing forwarding disabled by default', async () => {
+    const createdApprise: FanoutConfig = {
+      id: 'ap-new',
+      type: 'apprise',
+      name: 'Apprise #1',
+      enabled: true,
+      config: {
+        urls: '',
+        preserve_identity: true,
+        include_outgoing: false,
+        markdown_format: true,
+        body_format_dm: '**DM:** {sender_name}: {text} **via:** [{hops_backticked}]',
+        body_format_channel:
+          '**{channel_name}:** {sender_name}: {text} **via:** [{hops_backticked}]',
+      },
+      scope: { messages: 'all', raw_packets: 'none' },
+      sort_order: 0,
+      created_at: 2000,
+    };
+    mockedApi.createFanoutConfig.mockResolvedValue(createdApprise);
+    mockedApi.getFanoutConfigs.mockResolvedValueOnce([]).mockResolvedValueOnce([createdApprise]);
+
+    renderSection();
+    await openCreateIntegrationDialog();
+    selectCreateIntegration('Apprise');
+    confirmCreateIntegration();
+    await waitFor(() => expect(screen.getByText('← Back to list')).toBeInTheDocument());
+
+    expect(screen.getByLabelText(/Forward RemoteTerm-sent messages/)).not.toBeChecked();
+    expect(
+      screen.getByText(/Outgoing messages carry no routing path or signal data/)
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save as Enabled' }));
+
+    await waitFor(() =>
+      expect(mockedApi.createFanoutConfig).toHaveBeenCalledWith({
+        type: 'apprise',
+        name: 'Apprise #1',
+        config: {
+          urls: '',
+          preserve_identity: true,
+          include_outgoing: false,
+          markdown_format: true,
+          body_format_dm: '**DM:** {sender_name}: {text} **via:** [{hops_backticked}]',
+          body_format_channel:
+            '**{channel_name}:** {sender_name}: {text} **via:** [{hops_backticked}]',
+        },
+        scope: { messages: 'all', raw_packets: 'none' },
+        enabled: true,
+      })
+    );
+  });
+
+  it('can enable outgoing forwarding for an existing Apprise integration', async () => {
+    const appriseConfig: FanoutConfig = {
+      id: 'ap-1',
+      type: 'apprise',
+      name: 'Apprise Feed',
+      enabled: true,
+      config: {
+        urls: 'discord://abc',
+        preserve_identity: true,
+        markdown_format: true,
+      },
+      scope: { messages: 'all', raw_packets: 'none' },
+      sort_order: 0,
+      created_at: 1000,
+    };
+    mockedApi.getFanoutConfigs.mockResolvedValue([appriseConfig]);
+    mockedApi.updateFanoutConfig.mockResolvedValue({
+      ...appriseConfig,
+      config: { ...appriseConfig.config, include_outgoing: true },
+    });
+
+    renderSection();
+    await waitFor(() => expect(screen.getByText('Apprise Feed')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await waitFor(() => expect(screen.getByText('← Back to list')).toBeInTheDocument());
+
+    const includeOutgoing = screen.getByLabelText(/Forward RemoteTerm-sent messages/);
+    expect(includeOutgoing).not.toBeChecked();
+    fireEvent.click(includeOutgoing);
+    fireEvent.click(screen.getByRole('button', { name: 'Save as Enabled' }));
+
+    await waitFor(() =>
+      expect(mockedApi.updateFanoutConfig).toHaveBeenCalledWith('ap-1', {
+        name: 'Apprise Feed',
+        config: {
+          urls: 'discord://abc',
+          preserve_identity: true,
+          markdown_format: true,
+          include_outgoing: true,
+        },
+        scope: { messages: 'all', raw_packets: 'none' },
+        enabled: true,
       })
     );
   });
@@ -1046,6 +1148,7 @@ describe('SettingsFanoutSection', () => {
       advert_interval: 0,
       last_advert_time: 0,
       flood_scope: '',
+      known_regions: [],
       blocked_keys: [],
       blocked_names: [],
       discovery_blocked_types: [],

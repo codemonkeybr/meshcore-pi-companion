@@ -37,8 +37,10 @@ test.describe('Channel info pane', () => {
     await page.goto(`/#channel/${channelKey}/flightless`);
     await expect(page.getByRole('status', { name: 'Radio OK' })).toBeVisible();
 
-    // Wait for messages to load
-    await expect(page.getByText('seed-0')).toBeVisible({ timeout: 15_000 });
+    // Wait for messages to load. Assert on the newest seeded message, not the
+    // oldest: the list is virtualized, so it opens at the bottom and only the
+    // visible window is in the DOM — seed-0 is 30 rows up and legitimately absent.
+    await expect(page.getByText(`seed-${SEED_COUNT - 1}`)).toBeVisible({ timeout: 15_000 });
 
     // Click the channel name in the header to open info pane
     const headerTitle = page.locator('h2').filter({ hasText: '#flightless' });

@@ -11,6 +11,7 @@ import logging
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from py_vapid import Vapid
 
+from app.config import settings
 from app.repository.settings import AppSettingsRepository
 
 logger = logging.getLogger(__name__)
@@ -58,3 +59,14 @@ def get_vapid_public_key() -> str:
 def get_vapid_private_key() -> str:
     """Return the cached VAPID private key (base64url). Must call ensure_vapid_keys() first."""
     return _cached_private_key
+
+
+def get_vapid_claims() -> dict[str, str]:
+    """VAPID JWT claims for Web Push.
+
+    The ``sub`` (subject) claim is configurable via ``MESHCORE_VAPID_SUBJECT``.
+    Apple's push service (APNs) rejects subjects on reserved TLDs such as
+    ``.local`` with ``403 BadJwtToken``, so iOS/Safari operators must set this
+    to a real ``mailto:`` or ``https:`` contact.
+    """
+    return {"sub": settings.vapid_subject}

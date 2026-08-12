@@ -4,6 +4,7 @@ import { Star } from 'lucide-react';
 import { api } from '../api';
 import { formatTime } from '../utils/messageParser';
 import { handleKeyboardActivate } from '../utils/a11y';
+import { useEntranceSettled } from '../hooks/useEntranceSettled';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { toast } from './ui/sonner';
 import type { Channel, ChannelDetail, PathHashWidthStats } from '../types';
@@ -27,6 +28,10 @@ export function ChannelInfoPane({
 
   // Get live channel data from channels array (real-time via WS)
   const liveChannel = channelKey ? (channels.find((c) => c.key === channelKey) ?? null) : null;
+
+  // Defer mounting the Recharts pie until the pane's slide-in animation settles;
+  // mounting it mid-transform crashes Safari (React #185). See #317.
+  const chartReady = useEntranceSettled(channelKey !== null);
 
   useEffect(() => {
     setShowKey(false);
@@ -181,7 +186,7 @@ export function ChannelInfoPane({
             {detail && detail.path_hash_width_24h.total_packets > 0 && (
               <div className="px-5 py-3 border-b border-border">
                 <SectionLabel>Hop Byte Widths (24h)</SectionLabel>
-                <HopWidthChart stats={detail.path_hash_width_24h} />
+                <HopWidthChart stats={detail.path_hash_width_24h} ready={chartReady} />
               </div>
             )}
 
@@ -249,7 +254,7 @@ const TOOLTIP_STYLE = {
   },
 } as const;
 
-function HopWidthChart({ stats }: { stats: PathHashWidthStats }) {
+function HopWidthChart({ stats, ready }: { stats: PathHashWidthStats; ready: boolean }) {
   const data = useMemo(
     () =>
       HOP_WIDTH_SEGMENTS.map(({ key, label, color }) => ({
@@ -263,32 +268,35 @@ function HopWidthChart({ stats }: { stats: PathHashWidthStats }) {
   return (
     <div className="flex items-center gap-3">
       <div className="flex-shrink-0" style={{ width: 90, height: 90 }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={data}
-              dataKey="value"
-              cx="50%"
-              cy="50%"
-              innerRadius={22}
-              outerRadius={40}
-              strokeWidth={1.5}
-              stroke="hsl(var(--background))"
-            >
-              {data.map((d) => (
-                <Cell key={d.name} fill={d.color} />
-              ))}
-            </Pie>
-            <RechartsTooltip
-              {...TOOLTIP_STYLE}
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              formatter={(value: any, name: any) => {
-                const v = typeof value === 'number' ? value : Number(value);
-                return [`${v.toLocaleString()} pkt${v !== 1 ? 's' : ''}`, name];
-              }}
-            />
-          </PieChart>
-        </ResponsiveContainer>
+        {/* Reserve the box while the pane animates in (see #317). */}
+        {ready && (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={data}
+                dataKey="value"
+                cx="50%"
+                cy="50%"
+                innerRadius={22}
+                outerRadius={40}
+                strokeWidth={1.5}
+                stroke="hsl(var(--background))"
+              >
+                {data.map((d) => (
+                  <Cell key={d.name} fill={d.color} />
+                ))}
+              </Pie>
+              <RechartsTooltip
+                {...TOOLTIP_STYLE}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(value: any, name: any) => {
+                  const v = typeof value === 'number' ? value : Number(value);
+                  return [`${v.toLocaleString()} pkt${v !== 1 ? 's' : ''}`, name];
+                }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        )}
       </div>
 
       <div className="flex-1 space-y-1">

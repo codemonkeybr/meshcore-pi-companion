@@ -132,7 +132,7 @@ function createProps(overrides: Partial<React.ComponentProps<typeof Conversation
     messagesLoading: false,
     loadingOlder: false,
     hasOlderMessages: false,
-    unreadMarkerLastReadAt: undefined,
+    unreadMarkerMessageId: undefined,
     targetMessageId: null,
     hasNewerMessages: false,
     loadingNewer: false,
@@ -311,7 +311,7 @@ describe('ConversationPane', () => {
             id: channel.key,
             name: channel.name,
           },
-          unreadMarkerLastReadAt: 1700000000,
+          unreadMarkerMessageId: 4242,
         })}
       />
     );
@@ -324,7 +324,7 @@ describe('ConversationPane', () => {
       mocks.messageList.mock.calls.length - 1
     ] as unknown[] | undefined;
     const channelCall = channelCallArgs?.[0] as Record<string, unknown> | undefined;
-    expect(channelCall?.unreadMarkerLastReadAt).toBe(1700000000);
+    expect(channelCall?.unreadMarkerMessageId).toBe(4242);
     expect(channelCall?.onDismissUnreadMarker).toBeTypeOf('function');
 
     render(
@@ -335,7 +335,7 @@ describe('ConversationPane', () => {
             id: 'cc'.repeat(32),
             name: 'Alice',
           },
-          unreadMarkerLastReadAt: 1700000000,
+          unreadMarkerMessageId: 4242,
         })}
       />
     );

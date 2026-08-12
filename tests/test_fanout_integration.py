@@ -1256,8 +1256,8 @@ class TestFanoutAppriseIntegration:
         assert "#general" in body_text
 
     @pytest.mark.asyncio
-    async def test_apprise_skips_outgoing(self, apprise_capture_server, integration_db):
-        """Apprise should NOT deliver outgoing messages."""
+    async def test_apprise_skips_outgoing_by_default(self, apprise_capture_server, integration_db):
+        """Apprise should NOT deliver outgoing messages unless explicitly enabled."""
         cfg = await FanoutConfigRepository.create(
             config_type="apprise",
             name="No Outgoing",
@@ -1288,6 +1288,45 @@ class TestFanoutAppriseIntegration:
             await manager.stop_all()
 
         assert len(apprise_capture_server.received) == 0
+
+    @pytest.mark.asyncio
+    async def test_apprise_delivers_outgoing_when_enabled(
+        self, apprise_capture_server, integration_db
+    ):
+        """Apprise can opt in to delivering RemoteTerm-originated messages."""
+        cfg = await FanoutConfigRepository.create(
+            config_type="apprise",
+            name="Include Outgoing",
+            config={
+                "urls": f"json://127.0.0.1:{apprise_capture_server.port}",
+                "include_outgoing": True,
+            },
+            scope={"messages": "all", "raw_packets": "none"},
+            enabled=True,
+        )
+
+        manager = FanoutManager()
+        try:
+            await manager.load_from_db()
+            assert cfg["id"] in manager._modules
+
+            await manager.broadcast_message(
+                {
+                    "type": "PRIV",
+                    "conversation_key": "pk1",
+                    "text": "my outgoing",
+                    "sender_name": "Me",
+                    "outgoing": True,
+                }
+            )
+
+            results = await apprise_capture_server.wait_for(1)
+        finally:
+            await manager.stop_all()
+
+        assert len(results) >= 1
+        body_text = str(results[0])
+        assert "my outgoing" in body_text
 
     @pytest.mark.asyncio
     async def test_apprise_disabled_no_delivery(self, apprise_capture_server, integration_db):
@@ -1718,6 +1757,45 @@ class TestBotModuleLifecycle:
 
         assert mod._active is False
         assert len(mod._tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_channel_message_region_reaches_bot_kwargs(self):
+        """A scoped channel message's resolved region flows to bot **kwargs (#300)."""
+        from unittest.mock import AsyncMock, patch
+
+        from app.fanout.bot import BotModule
+
+        mod = BotModule(
+            "bot1",
+            {"code": "def bot(**k): return f\"region={k.get('region')}\""},
+            name="Test Bot",
+        )
+        mod._active = True
+
+        captured: dict = {}
+
+        async def capture(response, is_dm, sender_key, channel_key):
+            captured["response"] = response
+
+        with (
+            patch("app.fanout.bot.asyncio.sleep", new_callable=AsyncMock),
+            patch("app.fanout.bot_exec.process_bot_response", side_effect=capture),
+        ):
+            await mod.on_message(
+                {
+                    "type": "CHAN",
+                    "conversation_key": "AABBCCDD",
+                    "text": "Alice: hi",
+                    "sender_name": "Alice",
+                    "channel_name": "#general",
+                    "outgoing": False,
+                    "region": "EU",
+                }
+            )
+            if mod._tasks:
+                await asyncio.gather(*mod._tasks, return_exceptions=True)
+
+        assert captured.get("response") == "region=EU"
 
 
 # ---------------------------------------------------------------------------

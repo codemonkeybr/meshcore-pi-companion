@@ -384,6 +384,8 @@ class TestContactMessageCLIFiltering:
             "sender_name",
             "channel_name",
             "packet_id",
+            "transport_code",
+            "region",
         }
 
         with patch("app.event_handlers.broadcast_event") as mock_broadcast:

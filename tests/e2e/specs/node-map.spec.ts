@@ -7,8 +7,10 @@ test.describe('Node Map page', () => {
     // Verify heading (also appears in sidebar, so scope to main)
     await expect(page.getByRole('main').getByText('Node Map')).toBeVisible({ timeout: 10_000 });
 
-    // Verify legend elements
-    await expect(page.getByText('<1h')).toBeVisible();
-    await expect(page.getByText('<1d')).toBeVisible();
+    // Verify legend elements. Scoped to the legend group: the "Since" filter
+    // chips carry the same bucket names, so an unscoped text match is ambiguous.
+    const legend = page.getByRole('group', { name: 'Marker recency legend' });
+    await expect(legend.getByText('<1h')).toBeVisible();
+    await expect(legend.getByText('<1d')).toBeVisible();
   });
 });

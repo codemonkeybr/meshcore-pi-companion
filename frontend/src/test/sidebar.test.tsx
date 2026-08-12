@@ -597,6 +597,49 @@ describe('Sidebar section summaries', () => {
     expect(repeaterRows).toEqual(['Fresh Advert Relay', 'Stale Message Relay']);
   });
 
+  it('sorts a favorite repeater by its displayed last_seen, not an inflated last_advert', () => {
+    const publicChannel = makeChannel(PUBLIC_CHANNEL_KEY, 'Public');
+    // Radio contact sync overwrites last_advert with the radio's sender-clock
+    // value, which can land far ahead of (or in the future relative to) the
+    // server's last_seen. The sidebar shows last_seen as "Last heard", so the
+    // recency sort must follow last_seen rather than the skewed last_advert.
+    const skewedRelay = makeContact('44'.repeat(32), 'Skewed Relay', CONTACT_TYPE_REPEATER, {
+      last_seen: 100,
+      last_advert: 9_999_999,
+      favorite: true,
+    });
+    const recentRelay = makeContact('55'.repeat(32), 'Recent Relay', CONTACT_TYPE_REPEATER, {
+      last_seen: 500,
+      favorite: true,
+    });
+
+    render(
+      <Sidebar
+        contacts={[skewedRelay, recentRelay]}
+        channels={[publicChannel]}
+        activeConversation={null}
+        onSelectConversation={vi.fn()}
+        onNewMessage={vi.fn()}
+        lastMessageTimes={{}}
+        unreadCounts={{}}
+        mentions={{}}
+        showCracker={false}
+        crackerRunning={false}
+        onToggleCracker={vi.fn()}
+        onMarkAllRead={vi.fn()}
+      />
+    );
+
+    const repeaterRows = screen
+      .getAllByText(/Relay$/)
+      .map((node) => node.textContent)
+      .filter((text): text is string => Boolean(text));
+
+    // Recent Relay was actually heard more recently (last_seen 500 > 100), so it
+    // sorts above the relay with the inflated last_advert.
+    expect(repeaterRows).toEqual(['Recent Relay', 'Skewed Relay']);
+  });
+
   it('pins only the canonical Public channel to the top of channel sorting', () => {
     const publicChannel = makeChannel(PUBLIC_CHANNEL_KEY, 'Public');
     const fakePublic = makeChannel('DD'.repeat(16), 'Public');
@@ -671,6 +714,60 @@ describe('Sidebar section summaries', () => {
     expect(getFavoritesOrder()).toEqual(['Amy', 'Zed']);
   });
 
+  it('cycles favorites through the four sort orders, grouping by type', () => {
+    // Mixed-type favorites: a channel (rank 0), two clients (rank 1), a repeater
+    // (rank 3). Names are chosen so plain-alpha and type-grouped orders differ.
+    const chan = makeChannel('cd'.repeat(16), 'Zulu');
+    const alpha = makeContact('11'.repeat(32), 'Alpha', 1, { favorite: true });
+    const bravo = makeContact('22'.repeat(32), 'Bravo', 1, { favorite: true });
+    const yankee = makeContact('33'.repeat(32), 'Yankee', 2, { favorite: true }); // repeater
+    const favChannel = { ...chan, favorite: true };
+
+    const props = {
+      contacts: [alpha, bravo, yankee],
+      channels: [favChannel],
+      activeConversation: null,
+      onSelectConversation: vi.fn(),
+      onNewMessage: vi.fn(),
+      lastMessageTimes: {
+        [getStateKey('contact', alpha.public_key)]: 100,
+        [getStateKey('contact', bravo.public_key)]: 300, // Bravo more recent than Alpha
+      },
+      unreadCounts: {},
+      mentions: {},
+      showCracker: false,
+      crackerRunning: false,
+      onToggleCracker: vi.fn(),
+      onMarkAllRead: vi.fn(),
+    };
+
+    const getFavoritesOrder = () =>
+      screen
+        .getAllByText(/^(Alpha|Bravo|Yankee|Zulu)$/)
+        .map((node) => node.textContent)
+        .filter((text): text is string => Boolean(text));
+
+    render(<Sidebar {...props} />);
+
+    // recent -> alpha: pure name order regardless of type.
+    fireEvent.click(screen.getByRole('button', { name: 'Sort Favorites alphabetically' }));
+    expect(getFavoritesOrder()).toEqual(['Alpha', 'Bravo', 'Yankee', 'Zulu']);
+
+    // alpha -> type-recent: group by type (channel, clients, repeater); within the
+    // client group, more-recent Bravo precedes Alpha.
+    fireEvent.click(screen.getByRole('button', { name: 'Sort Favorites by type, then recent' }));
+    expect(getFavoritesOrder()).toEqual(['Zulu', 'Bravo', 'Alpha', 'Yankee']);
+
+    // type-recent -> type-alpha: same grouping, clients now A-Z (Alpha before Bravo).
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Sort Favorites by type, then alphabetically' })
+    );
+    expect(getFavoritesOrder()).toEqual(['Zulu', 'Alpha', 'Bravo', 'Yankee']);
+
+    // type-alpha -> recent: cycle wraps back to the recency sort.
+    expect(screen.getByRole('button', { name: 'Sort Favorites by recent' })).toBeInTheDocument();
+  });
+
   it('seeds favorites sort from the legacy global sort order when section prefs are missing', () => {
     localStorage.setItem('remoteterm-sortOrder', 'alpha');
 
@@ -703,6 +800,10 @@ describe('Sidebar section summaries', () => {
       .filter((text): text is string => Boolean(text));
 
     expect(favoriteRows).toEqual(['Amy', 'Zed']);
-    expect(screen.getByRole('button', { name: 'Sort Favorites by recent' })).toBeInTheDocument();
+    // Favorites now cycles recent -> alpha -> type-recent -> type-alpha, so the
+    // next order after the seeded 'alpha' is the type-grouped recency sort.
+    expect(
+      screen.getByRole('button', { name: 'Sort Favorites by type, then recent' })
+    ).toBeInTheDocument();
   });
 });

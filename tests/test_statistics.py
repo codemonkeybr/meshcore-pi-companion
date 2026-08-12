@@ -43,6 +43,15 @@ class TestStatisticsEmpty:
             "double_byte_pct": 0.0,
             "triple_byte_pct": 0.0,
         }
+        assert result["region_scope_24h"] == {
+            "total_messages": 0,
+            "scoped_messages": 0,
+            "scoped_pct": 0.0,
+            "false_positive_floor": 0.0,
+            "total_senders": 0,
+            "scoped_senders": 0,
+            "scoped_senders_pct": 0.0,
+        }
         assert result["packets_per_hour_72h"] == []
 
 
@@ -378,15 +387,196 @@ class TestPathHashWidthStats:
             hash_size = hash_sizes.get(raw_packet)
             if hash_size is None:
                 return None
-            return SimpleNamespace(hash_size=hash_size)
+            # The scan is shared with the region-scope bucketer, so the stub has
+            # to carry the envelope fields that one reads too. Plain flood
+            # GroupText keeps it out of the region counters' way.
+            return SimpleNamespace(
+                hash_size=hash_size,
+                route_type=0x01,
+                payload_type=0x05,
+                transport_codes=None,
+            )
 
         with patch("app.path_utils.parse_packet_envelope", side_effect=fake_parse):
-            breakdown = await StatisticsRepository._path_hash_width_24h()
+            breakdown, _region_scope = await StatisticsRepository._packet_shape_24h()
 
         assert breakdown["total_packets"] == 3
         assert breakdown["single_byte"] == 1
         assert breakdown["double_byte"] == 1
         assert breakdown["triple_byte"] == 1
+
+
+class TestRegionScopeStats:
+    """Regional flood-scope adoption counters.
+
+    Packet fixtures are built by hand so the header bits are explicit:
+    header = (payload_type << 2) | route_type, then a 4-byte transport-code
+    block for TRANSPORT_* routes, then the packed path byte, then payload.
+    """
+
+    # GROUP_TEXT (0x05) flood (0x01) -> header 0x15; path byte 0x00 = 0 hops, 1-byte hashes
+    UNSCOPED_GROUP_TEXT = bytes.fromhex("1500AA")
+    # GROUP_TEXT (0x05) transport-flood (0x00) -> header 0x14, + codes AABB/0000
+    SCOPED_GROUP_TEXT = bytes.fromhex("14AABB000000AA")
+    # Undefined payload type 0x0C, transport-flood -> header 0x30. Corrupt by
+    # definition, so it feeds the false-positive floor rather than the counts.
+    SCOPED_UNDEFINED_TYPE = bytes.fromhex("30AABB000000AA")
+    # GROUP_TEXT direct (0x02) -> header 0x16. Direct sends can never be scoped.
+    DIRECT_GROUP_TEXT = bytes.fromhex("1600AA")
+
+    async def _insert_packet(self, conn, data: bytes, tag: bytes, timestamp: int):
+        await conn.execute(
+            "INSERT INTO raw_packets (timestamp, data, payload_hash) VALUES (?, ?, ?)",
+            (timestamp, data, tag * 32),
+        )
+
+    @pytest.mark.asyncio
+    async def test_counts_scoped_flood_group_text_only(self, test_db):
+        """Only flood-routed GroupText packets count; direct sends are excluded."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        await self._insert_packet(conn, self.SCOPED_GROUP_TEXT, b"\x11", now)
+        await self._insert_packet(conn, self.UNSCOPED_GROUP_TEXT, b"\x22", now)
+        await self._insert_packet(conn, self.DIRECT_GROUP_TEXT, b"\x33", now)
+        # Outside the 24h window
+        await self._insert_packet(conn, self.SCOPED_GROUP_TEXT, b"\x44", now - 90000)
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        # Direct + stale packets excluded, so 2 in the denominator
+        assert stats["total_messages"] == 2
+        assert stats["scoped_messages"] == 1
+        assert stats["scoped_pct"] == pytest.approx(50.0)
+
+    @pytest.mark.asyncio
+    async def test_undefined_payload_types_feed_false_positive_floor(self, test_db):
+        """Corrupt packets claiming an undefined type estimate the noise floor."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        await self._insert_packet(conn, self.UNSCOPED_GROUP_TEXT, b"\x11", now)
+        # Three corrupt transport-routed packets across the undefined-type buckets
+        for i, header in enumerate(("30", "34", "38")):  # types 0x0C, 0x0D, 0x0E
+            await self._insert_packet(
+                conn, bytes.fromhex(f"{header}AABB000000AA"), bytes([0x20 + i]), now
+            )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        # Garbage must not inflate the real counts...
+        assert stats["total_messages"] == 1
+        assert stats["scoped_messages"] == 0
+        # ...but should surface as the floor: 3 packets over 3 undefined buckets
+        assert stats["false_positive_floor"] == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_counts_distinct_senders_who_scoped(self, test_db):
+        """Sender adoption is per distinct sender, not per message."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        # One chatty scoping sender, one quiet scoping sender, one unscoped sender.
+        # Traffic share would read 4/5; sender share should read 2/3.
+        rows = [
+            ("alice_key", "Alice", 0xAABB),
+            ("alice_key", "Alice", 0xAABB),
+            ("alice_key", "Alice", 0xAABB),
+            ("bob_key", "Bob", 0xCCDD),
+            ("carol_key", "Carol", None),
+        ]
+        for i, (sender_key, sender_name, code) in enumerate(rows):
+            await conn.execute(
+                """INSERT INTO messages
+                   (type, conversation_key, text, received_at, outgoing,
+                    sender_key, sender_name, transport_code)
+                   VALUES ('CHAN', ?, ?, ?, 0, ?, ?, ?)""",
+                ("EE" * 16, f"msg{i}", now, sender_key, sender_name, code),
+            )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        assert stats["total_senders"] == 3
+        assert stats["scoped_senders"] == 2
+        assert stats["scoped_senders_pct"] == pytest.approx(200 / 3, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_sender_scoping_falls_back_to_linked_raw_packet(self, test_db):
+        """Rows predating region tagging are resolved via their retained packet."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        async with conn.execute(
+            """INSERT INTO messages
+               (type, conversation_key, text, received_at, outgoing, sender_key, sender_name)
+               VALUES ('CHAN', ?, 'legacy', ?, 0, 'dave_key', 'Dave')""",
+            ("EE" * 16, now),
+        ) as cursor:
+            message_id = cursor.lastrowid
+        # transport_code is NULL, but the linked packet still shows the scoping
+        await conn.execute(
+            """INSERT INTO raw_packets (timestamp, data, payload_hash, message_id)
+               VALUES (?, ?, ?, ?)""",
+            (now, self.SCOPED_GROUP_TEXT, b"\x99" * 32, message_id),
+        )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        assert stats["total_senders"] == 1
+        assert stats["scoped_senders"] == 1
+
+    @pytest.mark.asyncio
+    async def test_senders_fall_back_to_name_without_resolved_key(self, test_db):
+        """sender_key is only ~69% resolved, so name is the fallback identity."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        for i, code in enumerate((0xAABB, None)):
+            await conn.execute(
+                """INSERT INTO messages
+                   (type, conversation_key, text, received_at, outgoing,
+                    sender_key, sender_name, transport_code)
+                   VALUES ('CHAN', ?, ?, ?, 0, NULL, ?, ?)""",
+                ("EE" * 16, f"msg{i}", now, f"NamedOnly{i}", code),
+            )
+        # No identity at all -> not counted in either side of the fraction
+        await conn.execute(
+            """INSERT INTO messages
+               (type, conversation_key, text, received_at, outgoing, sender_key, sender_name)
+               VALUES ('CHAN', ?, 'anon', ?, 0, NULL, NULL)""",
+            ("EE" * 16, now),
+        )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        assert stats["total_senders"] == 2
+        assert stats["scoped_senders"] == 1
+
+    @pytest.mark.asyncio
+    async def test_outgoing_messages_excluded_from_sender_counts(self, test_db):
+        """Our own sends are not evidence of anyone else's adoption."""
+        now = int(time.time())
+        conn = test_db.conn
+
+        await conn.execute(
+            """INSERT INTO messages
+               (type, conversation_key, text, received_at, outgoing,
+                sender_key, sender_name, transport_code)
+               VALUES ('CHAN', ?, 'ours', ?, 1, 'me_key', 'Me', ?)""",
+            ("EE" * 16, now, 0xAABB),
+        )
+        await conn.commit()
+
+        stats = (await StatisticsRepository.get_all())["region_scope_24h"]
+
+        assert stats["total_senders"] == 0
+        assert stats["scoped_senders"] == 0
+        assert stats["scoped_senders_pct"] == 0.0
 
 
 class TestPacketsPerHour:

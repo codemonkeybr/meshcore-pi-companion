@@ -24,6 +24,8 @@ interface UseUnreadCountsResult {
   mentions: Record<string, boolean>;
   lastMessageTimes: ConversationTimes;
   unreadLastReadAts: Record<string, number | null>;
+  /** stateKey -> id of the oldest unread message, for placing the unread divider. */
+  firstUnreadIds: Record<string, number | null>;
   recordMessageEvent: (args: {
     msg: Message;
     activeConversation: boolean;
@@ -45,6 +47,7 @@ export function useUnreadCounts(
   const [mentions, setMentions] = useState<Record<string, boolean>>({});
   const [lastMessageTimes, setLastMessageTimes] = useState<ConversationTimes>(getLastMessageTimes);
   const [unreadLastReadAts, setUnreadLastReadAts] = useState<Record<string, number | null>>({});
+  const [firstUnreadIds, setFirstUnreadIds] = useState<Record<string, number | null>>({});
 
   // Track active conversation via ref so applyUnreads can filter without
   // destabilizing the callback chain (avoids re-creating fetchUnreads on
@@ -71,6 +74,7 @@ export function useUnreadCounts(
     }
 
     setUnreadLastReadAts(data.last_read_ats);
+    setFirstUnreadIds(data.first_unread_ids ?? {});
 
     if (Object.keys(data.last_message_times).length > 0) {
       for (const [key, ts] of Object.entries(data.last_message_times)) {
@@ -160,18 +164,29 @@ export function useUnreadCounts(
     }
   }, [activeConversation]);
 
-  const incrementUnread = useCallback((stateKey: string, hasMention?: boolean) => {
-    setUnreadCounts((prev) => ({
-      ...prev,
-      [stateKey]: (prev[stateKey] || 0) + 1,
-    }));
-    if (hasMention) {
-      setMentions((prev) => ({
+  const incrementUnread = useCallback(
+    (stateKey: string, messageId: number, hasMention?: boolean) => {
+      setUnreadCounts((prev) => ({
         ...prev,
-        [stateKey]: true,
+        [stateKey]: (prev[stateKey] || 0) + 1,
       }));
-    }
-  }, []);
+      // Counts move live over the socket, but first_unread_ids only arrives with a
+      // full /unreads fetch. Without seeding it here, a conversation that goes from
+      // read to unread while the app is open has a count but no boundary, and the
+      // divider silently never renders. Only the transition matters: once a
+      // boundary exists, later messages are not the *first* unread.
+      setFirstUnreadIds((prev) =>
+        prev[stateKey] != null ? prev : { ...prev, [stateKey]: messageId }
+      );
+      if (hasMention) {
+        setMentions((prev) => ({
+          ...prev,
+          [stateKey]: true,
+        }));
+      }
+    },
+    []
+  );
 
   const recordMessageEvent = useCallback(
     ({
@@ -201,7 +216,7 @@ export function useUnreadCounts(
       setLastMessageTimes(updated);
 
       if (!isActiveConversation && !msg.outgoing && isNewMessage) {
-        incrementUnread(stateKey, hasMention);
+        incrementUnread(stateKey, msg.id, hasMention);
       }
     },
     [incrementUnread]
@@ -226,6 +241,14 @@ export function useUnreadCounts(
       return next;
     });
 
+    setFirstUnreadIds((prev) => {
+      if (!(oldStateKey in prev)) return prev;
+      const next = { ...prev };
+      next[newStateKey] = next[newStateKey] ?? next[oldStateKey];
+      delete next[oldStateKey];
+      return next;
+    });
+
     setLastMessageTimes(renameConversationTimeKey(oldStateKey, newStateKey));
   }, []);
 
@@ -237,6 +260,12 @@ export function useUnreadCounts(
       return next;
     });
     setMentions((prev) => {
+      if (!(stateKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[stateKey];
+      return next;
+    });
+    setFirstUnreadIds((prev) => {
       if (!(stateKey in prev)) return prev;
       const next = { ...prev };
       delete next[stateKey];
@@ -257,6 +286,7 @@ export function useUnreadCounts(
     setUnreadCounts({});
     setMentions({});
     setUnreadLastReadAts({});
+    setFirstUnreadIds({});
 
     // Persist to server with single bulk request
     api.markAllRead().catch((err) => {
@@ -269,6 +299,7 @@ export function useUnreadCounts(
     mentions,
     lastMessageTimes,
     unreadLastReadAts,
+    firstUnreadIds,
     recordMessageEvent,
     renameConversationState,
     removeConversationState,

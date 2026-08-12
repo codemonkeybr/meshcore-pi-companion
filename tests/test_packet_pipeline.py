@@ -74,6 +74,12 @@ def _build_path_packet(
     return header + payload
 
 
+def _build_ack_packet(code: bytes, *, route_type: RouteType = RouteType.DIRECT) -> bytes:
+    """Build a standalone ACK packet whose cleartext payload is the 4-byte code."""
+    header = bytes([(PayloadType.ACK << 2) | route_type, 0x00])
+    return header + code
+
+
 class TestChannelMessagePipeline:
     """Test channel message flow: packet → decrypt → store → broadcast."""
 
@@ -363,7 +369,10 @@ class TestAdvertisementPipeline:
         short_packet_info.payload = b""
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -381,7 +390,10 @@ class TestAdvertisementPipeline:
         long_packet_info.payload = b""
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -433,7 +445,10 @@ class TestAdvertisementPipeline:
         skewed_shorter_packet_info.payload = b""
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -447,7 +462,10 @@ class TestAdvertisementPipeline:
                 )
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -495,7 +513,10 @@ class TestAdvertisementPipeline:
         packet_info.path_hash_size = 1
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -546,7 +567,10 @@ class TestAdvertisementPipeline:
         long_packet_info.payload = b""
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement") as mock_parse:
+            with (
+                patch("app.packet_processor.parse_advertisement") as mock_parse,
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 mock_parse.return_value = ParsedAdvertisement(
                     public_key=test_pubkey,
                     name="TestNode",
@@ -565,6 +589,45 @@ class TestAdvertisementPipeline:
             ("aabbccdd", 4),
             ("aa", 1),
         ]
+
+    @pytest.mark.asyncio
+    async def test_advertisement_with_forged_signature_creates_no_contact(
+        self, test_db, captured_broadcasts
+    ):
+        """A corrupted/forged advert must not be ingested as a phantom contact (#315).
+
+        The raw packet is still stored (so the debug feed sees it), but no contact
+        row is created and no `contact` event is broadcast — mirroring firmware,
+        which drops adverts that fail signature verification.
+        """
+        from app.decoder import parse_packet
+        from app.packet_processor import process_raw_packet
+
+        fixture = FIXTURES["advertisement_chat_node"]
+        packet_bytes = bytearray(bytes.fromhex(fixture["raw_packet_hex"]))
+        expected_pubkey = fixture["expected_ws_event"]["data"]["public_key"]
+
+        # Flip a bit inside the public key (payload byte 5) to simulate an
+        # over-the-air corrupted advert. Parsing still succeeds structurally, but
+        # the signature no longer matches the (now-mangled) key.
+        payload_start = len(packet_bytes) - len(parse_packet(bytes(packet_bytes)).payload)
+        packet_bytes[payload_start + 5] ^= 0x01
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            result = await process_raw_packet(bytes(packet_bytes), timestamp=1700000000)
+
+        # No contact created — neither under the original key nor the mangled one.
+        assert await ContactRepository.get_by_key_prefix(expected_pubkey[:12]) is None
+        all_contacts = await ContactRepository.get_all()
+        assert all_contacts == []
+
+        # No contact broadcast emitted.
+        assert [b for b in broadcasts if b["type"] == "contact"] == []
+
+        # The raw packet is still stored for the debug feed.
+        assert result["packet_id"] is not None
 
 
 class TestPathPacketPipeline:
@@ -762,6 +825,93 @@ class TestAckPipeline:
         assert "message_id" in broadcast["data"]
         assert "ack_count" in broadcast["data"]
         assert broadcast["data"]["ack_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_standalone_ack_packet_marks_message_acked(self, test_db, captured_broadcasts):
+        """A standalone ACK RF packet satisfies a pending DM ACK from the raw feed.
+
+        Direct-routed DMs are answered with a standalone PAYLOAD_TYPE_ACK packet
+        (vs. the PATH-embedded ACK used for flood). We must match it straight from
+        the raw packet so delivery confirmation does not depend on the radio also
+        emitting a separate EventType.ACK host control frame.
+        """
+        from app.packet_processor import process_raw_packet
+        from app.services import dm_ack_tracker
+
+        code = bytes.fromhex("01020304")
+        raw_packet = _build_ack_packet(code)
+
+        message_id = await MessageRepository.create(
+            msg_type="PRIV",
+            text="waiting for direct ack",
+            conversation_key=PATH_TEST_CONTACT_PUB.hex(),
+            sender_timestamp=1700000000,
+            received_at=1700000000,
+            outgoing=True,
+        )
+
+        prev_pending = dm_ack_tracker._pending_acks.copy()
+        prev_buffered = dm_ack_tracker._buffered_acks.copy()
+        dm_ack_tracker._pending_acks.clear()
+        dm_ack_tracker._buffered_acks.clear()
+        dm_ack_tracker.track_pending_ack(code.hex(), message_id, 30000)
+
+        broadcasts, mock_broadcast = captured_broadcasts
+        try:
+            with patch("app.packet_processor.broadcast_event", mock_broadcast):
+                result = await process_raw_packet(raw_packet, timestamp=1700000300)
+        finally:
+            dm_ack_tracker._pending_acks.clear()
+            dm_ack_tracker._pending_acks.update(prev_pending)
+            dm_ack_tracker._buffered_acks.clear()
+            dm_ack_tracker._buffered_acks.update(prev_buffered)
+
+        assert result["payload_type"] == "ACK"
+
+        messages = await MessageRepository.get_all(
+            msg_type="PRIV",
+            conversation_key=PATH_TEST_CONTACT_PUB.hex(),
+            limit=10,
+        )
+        assert len(messages) == 1
+        assert messages[0].acked == 1
+
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert len(ack_broadcasts) == 1
+        assert ack_broadcasts[0]["data"] == {"message_id": message_id, "ack_count": 1}
+
+    @pytest.mark.asyncio
+    async def test_standalone_ack_packet_with_no_pending_is_buffered(
+        self, test_db, captured_broadcasts
+    ):
+        """An unmatched standalone ACK is buffered (for late registration), not dropped."""
+        from app.packet_processor import process_raw_packet
+        from app.services import dm_ack_tracker
+
+        code = bytes.fromhex("aabbccdd")
+        raw_packet = _build_ack_packet(code)
+
+        prev_pending = dm_ack_tracker._pending_acks.copy()
+        prev_buffered = dm_ack_tracker._buffered_acks.copy()
+        dm_ack_tracker._pending_acks.clear()
+        dm_ack_tracker._buffered_acks.clear()
+
+        broadcasts, mock_broadcast = captured_broadcasts
+        try:
+            with patch("app.packet_processor.broadcast_event", mock_broadcast):
+                await process_raw_packet(raw_packet, timestamp=1700000300)
+            buffered_after = dm_ack_tracker._buffered_acks.copy()
+        finally:
+            dm_ack_tracker._pending_acks.clear()
+            dm_ack_tracker._pending_acks.update(prev_pending)
+            dm_ack_tracker._buffered_acks.clear()
+            dm_ack_tracker._buffered_acks.update(prev_buffered)
+
+        # Code is buffered so a slightly-later send registration still matches it.
+        assert code.hex() in buffered_after
+        # No message exists, so nothing should be marked acked / broadcast.
+        ack_broadcasts = [b for b in broadcasts if b["type"] == "message_acked"]
+        assert ack_broadcasts == []
 
 
 class TestCreateMessageFromDecrypted:
@@ -1247,6 +1397,53 @@ class TestCreateDMMessageFromDecrypted:
         assert len(broadcast["paths"]) == 1
         assert broadcast["paths"][0]["path"] == "aabbcc"
         assert broadcast["paths"][0]["received_at"] == 1700000001
+
+    @pytest.mark.asyncio
+    async def test_dm_includes_region_scope_in_broadcast(self, test_db, captured_broadcasts):
+        """A region-scoped (transport-routed) flood DM threads transport_code/region
+        into the stored row and the broadcast, so bots see `scoped`/`region` for DMs
+        (issue #300 DM half) and the UI can badge the scope."""
+        from app.decoder import DecryptedDirectMessage
+        from app.packet_processor import create_dm_message_from_decrypted
+
+        packet_id, _ = await RawPacketRepository.create(b"region_test_dm", 1700000000)
+
+        decrypted = DecryptedDirectMessage(
+            timestamp=1700000000,
+            flags=0,
+            message="Scoped DM",
+            dest_hash="fa",
+            src_hash="a1",
+        )
+
+        broadcasts, mock_broadcast = captured_broadcasts
+
+        with patch("app.packet_processor.broadcast_event", mock_broadcast):
+            msg_id = await create_dm_message_from_decrypted(
+                packet_id=packet_id,
+                decrypted=decrypted,
+                their_public_key=self.A1B2C3_PUB,
+                our_public_key=self.FACE12_PUB,
+                received_at=1700000001,
+                outgoing=False,
+                transport_code=0x1234,
+                region="#Esperance",
+            )
+
+        assert msg_id is not None
+
+        message_broadcasts = [b for b in broadcasts if b["type"] == "message"]
+        assert len(message_broadcasts) == 1
+        broadcast = message_broadcasts[0]["data"]
+        # Bots derive `scoped = transport_code is not None` and read `region`.
+        assert broadcast["transport_code"] == 0x1234
+        assert broadcast["region"] == "#Esperance"
+
+        # Persisted so the scope survives a raw-packet purge, mirroring channel msgs.
+        stored = await MessageRepository.get_by_id(msg_id)
+        assert stored is not None
+        assert stored.transport_code == 0x1234
+        assert stored.region == "#Esperance"
 
 
 class TestDMDecryptionFunction:
@@ -1917,7 +2114,10 @@ class TestProcessRawPacketIntegration:
         raw = b"\x11\x00" + b"\xee" * 30
 
         with patch("app.packet_processor.broadcast_event", mock_broadcast):
-            with patch("app.packet_processor.parse_advertisement", return_value=advert):
+            with (
+                patch("app.packet_processor.parse_advertisement", return_value=advert),
+                patch("app.packet_processor.verify_advert_signature", return_value=True),
+            ):
                 # First arrival: long path
                 with patch("app.packet_processor.parse_packet", return_value=long_path_info):
                     await process_raw_packet(raw, timestamp=5000)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowDown, ArrowUp, Plus, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 
 import type {
   Contact,
@@ -26,11 +26,14 @@ import {
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
 
-type TraceSortMode = 'alpha' | 'recent' | 'distance';
+type TraceSortMode = 'alpha' | 'recent' | 'distance' | 'traced';
 type CustomHopBytes = 1 | 2 | 4;
 
 const RECENT_TRACES_KEY = 'remoteterm-recent-traces';
 const MAX_RECENT_TRACES = 5;
+const RECENT_NODES_KEY = 'remoteterm-recent-trace-nodes';
+const MAX_RECENT_NODES = 30;
+const MAX_RENDERED_REPEATERS = 60;
 
 interface SavedTraceHop {
   kind: 'repeater' | 'custom';
@@ -66,6 +69,57 @@ function saveRecentTrace(trace: SavedTrace): void {
     );
     const updated = [trace, ...deduped].slice(0, MAX_RECENT_TRACES);
     localStorage.setItem(RECENT_TRACES_KEY, JSON.stringify(updated));
+  } catch {
+    // localStorage may be disabled
+  }
+}
+
+function repeaterKeysFromHops(hops: SavedTraceHop[]): string[] {
+  return [
+    ...new Set(
+      hops
+        .filter((hop) => hop.kind === 'repeater' && hop.publicKey)
+        .map((hop) => hop.publicKey as string)
+    ),
+  ];
+}
+
+function loadRecentNodeKeys(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_NODES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return [
+        ...new Set(
+          parsed
+            .map((entry) =>
+              typeof entry === 'string' ? entry : ((entry?.publicKey as string) ?? null)
+            )
+            .filter((key): key is string => typeof key === 'string' && key.length > 0)
+        ),
+      ].slice(0, MAX_RECENT_NODES);
+    }
+    // No usage history yet: seed from already-stored recent traces so the
+    // Recent Traced sort works immediately for users with existing history.
+    return repeaterKeysFromHops(loadRecentTraces().flatMap((trace) => trace.hops)).slice(
+      0,
+      MAX_RECENT_NODES
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentNodeKeys(hops: SavedTraceHop[]): void {
+  try {
+    // MRU order: repeaters from this trace first, then prior history.
+    const fresh = repeaterKeysFromHops(hops);
+    const rest = loadRecentNodeKeys().filter((key) => !fresh.includes(key));
+    localStorage.setItem(
+      RECENT_NODES_KEY,
+      JSON.stringify([...fresh, ...rest].slice(0, MAX_RECENT_NODES))
+    );
   } catch {
     // localStorage may be disabled
   }
@@ -136,49 +190,45 @@ function nextDraftHopId(prefix: string, currentLength: number): string {
 function TraceNodeRow({
   title,
   subtitle,
+  badge,
   meta,
-  note,
   fixed = false,
-  compact = false,
   actions,
   snr,
 }: {
   title: string;
   subtitle: string;
+  badge?: string;
   meta?: string | null;
-  note?: string | null;
   fixed?: boolean;
-  compact?: boolean;
   actions?: ReactNode;
   snr?: string | null;
 }) {
   return (
-    <div
-      className={cn(
-        'flex items-center rounded-md border border-border bg-background',
-        compact ? 'gap-2 px-2.5 py-2' : 'gap-3 px-3 py-3'
-      )}
-    >
+    <div className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5 py-2">
       <div
         className={cn(
-          'flex h-9 w-9 items-center justify-center rounded-full border text-[0.6875rem] font-semibold uppercase tracking-wide',
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-[0.625rem] font-semibold uppercase tracking-wide',
           fixed
             ? 'border-primary/30 bg-primary/10 text-primary'
             : 'border-border bg-muted text-muted-foreground'
         )}
       >
-        {fixed ? 'Self' : 'Hop'}
+        {fixed ? 'Self' : (badge ?? 'Hop')}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">{title}</div>
-        <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
-        {meta ? <div className="mt-1 text-[0.6875rem] text-muted-foreground">{meta}</div> : null}
-        {note ? <div className="mt-1 text-[0.6875rem] text-muted-foreground">{note}</div> : null}
+      <div className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span className="truncate text-sm font-medium">{title}</span>
+        <span className="truncate text-xs text-muted-foreground">{subtitle}</span>
+        {meta ? (
+          <span className="shrink-0 text-[0.6875rem] uppercase tracking-wide text-muted-foreground">
+            {meta}
+          </span>
+        ) : null}
       </div>
       {snr ? (
-        <div className="shrink-0 text-right">
-          <div className="text-[0.6875rem] text-muted-foreground">SNR</div>
-          <div className="font-mono text-sm">{snr}</div>
+        <div className="flex shrink-0 items-baseline gap-1">
+          <span className="text-[0.6875rem] text-muted-foreground">SNR</span>
+          <span className="font-mono text-sm">{snr}</span>
         </div>
       ) : null}
       {actions ? <div className="ml-1 flex items-center gap-1">{actions}</div> : null}
@@ -199,6 +249,8 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
   const [customHopHexDraft, setCustomHopHexDraft] = useState('');
   const [customHopError, setCustomHopError] = useState<string | null>(null);
   const [recentTraces, setRecentTraces] = useState<SavedTrace[]>(loadRecentTraces);
+  const [recentTracesOpen, setRecentTracesOpen] = useState(false);
+  const [recentNodeKeys, setRecentNodeKeys] = useState<string[]>(loadRecentNodeKeys);
   const activeRunTokenRef = useRef(0);
 
   const repeaters = useMemo(() => {
@@ -219,9 +271,16 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
     [repeaters]
   );
 
+  const tracedIndexByKey = useMemo(
+    () => new Map(recentNodeKeys.map((key, index) => [key, index])),
+    [recentNodeKeys]
+  );
+
+  const canSortByDistance = !!config && isValidLocation(config.lat, config.lon);
+
   const filteredRepeaters = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const matching = query
+    let matching = query
       ? repeaters.filter(
           (contact) =>
             (contact.name ?? '').toLowerCase().includes(query) ||
@@ -229,7 +288,27 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
         )
       : repeaters;
 
+    // Traced shows only repeaters actually used in traces; Dist. shows only
+    // repeaters with a computable distance (when the local radio has one).
+    if (sortMode === 'traced') {
+      matching = matching.filter((contact) => tracedIndexByKey.has(contact.public_key));
+    }
+    const distanceByKey =
+      sortMode === 'distance'
+        ? new Map(matching.map((contact) => [contact.public_key, getDistanceKm(contact, config)]))
+        : null;
+    if (distanceByKey && canSortByDistance) {
+      matching = matching.filter((contact) => distanceByKey.get(contact.public_key) !== null);
+    }
+
     return [...matching].sort((left, right) => {
+      if (sortMode === 'traced') {
+        const leftIndex = tracedIndexByKey.get(left.public_key) ?? Infinity;
+        const rightIndex = tracedIndexByKey.get(right.public_key) ?? Infinity;
+        if (leftIndex !== rightIndex) {
+          return leftIndex - rightIndex;
+        }
+      }
       if (sortMode === 'recent') {
         const leftTs = getHeardTimestamp(left);
         const rightTs = getHeardTimestamp(right);
@@ -237,9 +316,9 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
           return rightTs - leftTs;
         }
       }
-      if (sortMode === 'distance') {
-        const leftDistance = getDistanceKm(left, config);
-        const rightDistance = getDistanceKm(right, config);
+      if (distanceByKey) {
+        const leftDistance = distanceByKey.get(left.public_key) ?? null;
+        const rightDistance = distanceByKey.get(right.public_key) ?? null;
         if (leftDistance !== null && rightDistance !== null && leftDistance !== rightDistance) {
           return leftDistance - rightDistance;
         }
@@ -250,11 +329,15 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
         getContactDisplayName(right.name, right.public_key, right.last_advert)
       );
     });
-  }, [config, repeaters, searchQuery, sortMode]);
+  }, [canSortByDistance, config, repeaters, searchQuery, sortMode, tracedIndexByKey]);
+
+  const visibleRepeaters = useMemo(
+    () => filteredRepeaters.slice(0, MAX_RENDERED_REPEATERS),
+    [filteredRepeaters]
+  );
 
   const localRadioName = config?.name || 'Local radio';
   const localRadioKey = config?.public_key ?? null;
-  const canSortByDistance = !!config && isValidLocation(config.lat, config.lon);
   const customHopBytesLocked = useMemo(
     () => draftHops.find((hop) => hop.kind === 'custom')?.hopBytes ?? null,
     [draftHops]
@@ -317,6 +400,33 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
     clearPendingResult();
   };
 
+  // Append the reversed hop chain (minus the current endpoint) to build a return
+  // path, e.g. [R1, R2, R3] -> [R1, R2, R3, R2, R1]. A single hop is left as-is.
+  // See issue #287. Reverses every queued hop, including custom prefixes.
+  const handleReverseLink = () => {
+    setDraftHops((current) => {
+      if (current.length < 2) return current;
+      const returnHops = [...current]
+        .reverse()
+        .slice(1)
+        .map(
+          (hop, i): TraceDraftHop => ({
+            ...hop,
+            id: nextDraftHopId(hop.kind, current.length + i),
+          })
+        );
+      return [...current, ...returnHops];
+    });
+    clearPendingResult();
+  };
+
+  const recordTraceRun = (hops: SavedTraceHop[]) => {
+    saveRecentTrace({ hops, ranAt: Date.now() });
+    setRecentTraces(loadRecentTraces());
+    saveRecentNodeKeys(hops);
+    setRecentNodeKeys(loadRecentNodeKeys());
+  };
+
   const handleLoadRecentTrace = async (trace: SavedTrace) => {
     const hops: TraceDraftHop[] = trace.hops.map((h, i) => {
       if (h.kind === 'repeater' && h.publicKey) {
@@ -355,10 +465,8 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
       if (activeRunTokenRef.current !== runToken) return;
       setResult(traceResult);
 
-      // Re-save to bump this trace to the top of recents
-      const savedTrace: SavedTrace = { hops: trace.hops, ranAt: Date.now() };
-      saveRecentTrace(savedTrace);
-      setRecentTraces(loadRecentTraces());
+      // Re-save to bump this trace and its nodes to the top of recents
+      recordTraceRun(trace.hops);
     } catch (err) {
       if (activeRunTokenRef.current !== runToken) return;
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -405,9 +513,7 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
           displayName: `${hop.hopHex.toUpperCase()} (${hop.hopBytes}B)`,
         };
       });
-      const trace: SavedTrace = { hops: savedHops, ranAt: Date.now() };
-      saveRecentTrace(trace);
-      setRecentTraces(loadRecentTraces());
+      recordTraceRun(savedHops);
     } catch (err) {
       if (activeRunTokenRef.current !== runToken) {
         return;
@@ -469,16 +575,18 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
             <div className="mt-3 flex flex-wrap gap-2">
               {(
                 [
-                  ['alpha', 'Alpha'],
-                  ['recent', 'Recent Heard'],
-                  ['distance', 'Distance'],
+                  ['alpha', 'A/Z', 'Sort alphabetically'],
+                  ['recent', 'Heard', 'Most recently heard first'],
+                  ['traced', 'Traced', 'Most recently used in traces first'],
+                  ['distance', 'Dist.', 'Closest first'],
                 ] as const
-              ).map(([value, label]) => (
+              ).map(([value, label, description]) => (
                 <Button
                   key={value}
                   type="button"
                   size="sm"
                   variant={sortMode === value ? 'default' : 'outline'}
+                  title={description}
                   onClick={() => setSortMode(value)}
                 >
                   {label}
@@ -496,11 +604,17 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
           <div className="max-h-[40vh] overflow-y-auto p-2 lg:min-h-0 lg:max-h-none lg:flex-1">
             {filteredRepeaters.length === 0 ? (
               <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-                No repeaters matched this search.
+                {sortMode === 'traced' && recentNodeKeys.length === 0
+                  ? 'No repeaters have been used in traces yet. Run a trace and its repeaters will show up here.'
+                  : sortMode === 'traced'
+                    ? 'No known repeaters match your recent trace history.'
+                    : sortMode === 'distance' && canSortByDistance
+                      ? 'No repeaters with a known distance matched this search.'
+                      : 'No repeaters matched this search.'}
               </div>
             ) : (
               <div className="space-y-2">
-                {filteredRepeaters.map((contact) => {
+                {visibleRepeaters.map((contact) => {
                   const displayName = getContactDisplayName(
                     contact.name,
                     contact.public_key,
@@ -556,13 +670,19 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                     </div>
                   );
                 })}
+                {filteredRepeaters.length > MAX_RENDERED_REPEATERS ? (
+                  <p className="px-1 pt-1 text-center text-[0.6875rem] text-muted-foreground">
+                    Showing the first {MAX_RENDERED_REPEATERS} of {filteredRepeaters.length}{' '}
+                    repeaters. Search to narrow the list.
+                  </p>
+                ) : null}
               </div>
             )}
           </div>
         </section>
 
         <section className="flex flex-1 flex-col gap-4 lg:min-h-0 lg:overflow-hidden">
-          <div className="flex flex-col rounded-lg border border-border bg-card lg:min-h-0 lg:max-h-[50%]">
+          <div className="flex flex-col rounded-lg border border-border bg-card lg:min-h-0 lg:flex-1 lg:overflow-hidden">
             <div className="shrink-0 flex items-start justify-between gap-3 border-b border-border px-4 py-3">
               <div>
                 <h3 className="text-sm font-semibold">Trace Path</h3>
@@ -571,51 +691,75 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                 </p>
                 {recentTraces.length > 0 && (
                   <div className="mt-2">
-                    <div className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium mb-1">
-                      Rerun a recent trace:
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {recentTraces.map((trace, i) => {
-                        const label = trace.hops
-                          .map((h) => {
-                            if (h.kind === 'repeater' && h.publicKey) {
-                              const shortKey = h.publicKey.slice(0, 12);
-                              return h.displayName !== shortKey
-                                ? `${h.displayName} (${shortKey})`
-                                : shortKey;
-                            }
-                            return h.displayName;
-                          })
-                          .join(' → ');
-                        return (
-                          <button
-                            key={i}
-                            type="button"
-                            className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent transition-colors truncate max-w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                            disabled={loading}
-                            onClick={() => handleLoadRecentTrace(trace)}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    <button
+                      type="button"
+                      className="flex items-center gap-1 text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium hover:text-foreground transition-colors"
+                      onClick={() => setRecentTracesOpen((o) => !o)}
+                    >
+                      {recentTracesOpen ? (
+                        <ChevronDown className="h-3 w-3" />
+                      ) : (
+                        <ChevronRight className="h-3 w-3" />
+                      )}
+                      Recent traces ({recentTraces.length})
+                    </button>
+                    {recentTracesOpen && (
+                      <div className="mt-1.5 flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
+                        {recentTraces.map((trace, i) => {
+                          const label = trace.hops
+                            .map((h) => {
+                              if (h.kind === 'repeater' && h.publicKey) {
+                                const shortKey = h.publicKey.slice(0, 12);
+                                return h.displayName !== shortKey
+                                  ? `${h.displayName} (${shortKey})`
+                                  : shortKey;
+                              }
+                              return h.displayName;
+                            })
+                            .join(' → ');
+                          return (
+                            <button
+                              key={i}
+                              type="button"
+                              className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent transition-colors truncate max-w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                              disabled={loading}
+                              onClick={() => handleLoadRecentTrace(trace)}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
               {draftHops.length > 0 ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="shrink-0 text-muted-foreground"
-                  onClick={() => {
-                    setDraftHops([]);
-                    clearPendingResult();
-                  }}
-                >
-                  Clear
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground"
+                    onClick={handleReverseLink}
+                    disabled={draftHops.length < 2}
+                    title="Append the reversed hop chain to build a return path"
+                  >
+                    Reverse link
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground"
+                    onClick={() => {
+                      setDraftHops([]);
+                      clearPendingResult();
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
               ) : null}
             </div>
             <div className="space-y-2 p-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
@@ -624,7 +768,6 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                 subtitle={getShortKey(localRadioKey)}
                 meta="Origin"
                 fixed
-                compact
               />
               {draftHops.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
@@ -651,13 +794,7 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                       <TraceNodeRow
                         title={displayName}
                         subtitle={subtitle}
-                        meta={`Hop ${index + 1}`}
-                        note={
-                          index === draftHops.length - 1
-                            ? 'Note: you must be able to hear the final repeater in the trace for trace success.'
-                            : null
-                        }
-                        compact
+                        badge={String(index + 1)}
                         actions={
                           <>
                             <Button
@@ -704,14 +841,13 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                 subtitle={getShortKey(localRadioKey)}
                 meta="Terminal"
                 fixed
-                compact
               />
             </div>
             <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3">
-              <div className="text-xs text-muted-foreground">
+              <div className="min-w-0 flex-1 text-xs text-muted-foreground">
                 {draftHops.length === 0
                   ? 'No hops selected'
-                  : `${draftHops.length} hop${draftHops.length === 1 ? '' : 's'} selected · ${effectiveHopHashBytes}-byte trace`}
+                  : `${draftHops.length} hop${draftHops.length === 1 ? '' : 's'} selected · ${effectiveHopHashBytes}-byte trace · you must be able to hear the final repeater for trace success`}
               </div>
               <Button onClick={handleRunTrace} disabled={loading || draftHops.length === 0}>
                 {loading ? 'Tracing...' : 'Send trace'}
@@ -719,12 +855,12 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
             </div>
           </div>
 
-          <div className="flex flex-col rounded-lg border border-border bg-card lg:min-h-0 lg:flex-1">
-            <div className="shrink-0 flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-              <h3 className="text-sm font-semibold">
-                Results{result ? ` (${result.timeout_seconds.toFixed(1)}s)` : ''}
-              </h3>
-              {result || error ? (
+          {result || error ? (
+            <div className="flex flex-col rounded-lg border border-border bg-card lg:min-h-0 lg:flex-1">
+              <div className="shrink-0 flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+                <h3 className="text-sm font-semibold">
+                  Results{result ? ` (${result.timeout_seconds.toFixed(1)}s)` : ''}
+                </h3>
                 <Button
                   type="button"
                   size="sm"
@@ -737,60 +873,52 @@ export function TracePane({ contacts, config, onRunTracePath }: TracePaneProps) 
                 >
                   Clear
                 </Button>
-              ) : null}
+              </div>
+              <div className="min-h-0 flex-1 space-y-2 p-4 lg:overflow-y-auto">
+                {error ? (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {error}
+                  </div>
+                ) : null}
+                {result
+                  ? resultNodes.map((node, index) => {
+                      const title =
+                        node.name ||
+                        (node.role === 'custom'
+                          ? 'Custom hop'
+                          : node.role === 'local'
+                            ? localRadioName
+                            : getShortKey(node.public_key));
+                      const subtitle =
+                        node.role === 'custom'
+                          ? `Key prefix ${node.observed_hash?.toUpperCase() ?? 'unknown'}`
+                          : node.observed_hash &&
+                              node.public_key &&
+                              node.observed_hash.toLowerCase() !==
+                                getShortKey(node.public_key).toLowerCase()
+                            ? `${getShortKey(node.public_key)} · key prefix ${node.observed_hash.toUpperCase()}`
+                            : getShortKey(node.public_key);
+                      return (
+                        <div
+                          key={`${node.role}-${node.public_key ?? node.observed_hash ?? 'local'}-${index}`}
+                        >
+                          <TraceNodeRow
+                            title={title}
+                            subtitle={subtitle}
+                            badge={String(index)}
+                            meta={
+                              index === 0 ? 'Origin' : node.role === 'local' ? 'Terminal' : null
+                            }
+                            fixed={node.role === 'local'}
+                            snr={index === 0 ? null : formatSNR(node.snr)}
+                          />
+                        </div>
+                      );
+                    })
+                  : null}
+              </div>
             </div>
-            <div className="min-h-0 flex-1 space-y-3 p-4 lg:overflow-y-auto">
-              {error ? (
-                <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                  {error}
-                </div>
-              ) : null}
-              {!error && !result ? (
-                <div className="rounded-md border border-dashed border-border px-4 py-6 text-sm text-muted-foreground">
-                  Send a trace to see the returned hop-by-hop SNR values.
-                </div>
-              ) : null}
-              {result
-                ? resultNodes.map((node, index) => {
-                    const title =
-                      node.name ||
-                      (node.role === 'custom'
-                        ? 'Custom hop'
-                        : node.role === 'local'
-                          ? localRadioName
-                          : getShortKey(node.public_key));
-                    const subtitle =
-                      node.role === 'custom'
-                        ? `Key prefix ${node.observed_hash?.toUpperCase() ?? 'unknown'}`
-                        : node.observed_hash &&
-                            node.public_key &&
-                            node.observed_hash.toLowerCase() !==
-                              getShortKey(node.public_key).toLowerCase()
-                          ? `${getShortKey(node.public_key)} · key prefix ${node.observed_hash.toUpperCase()}`
-                          : getShortKey(node.public_key);
-                    return (
-                      <div
-                        key={`${node.role}-${node.public_key ?? node.observed_hash ?? 'local'}-${index}`}
-                      >
-                        <TraceNodeRow
-                          title={title}
-                          subtitle={subtitle}
-                          meta={
-                            index === 0
-                              ? 'Origin'
-                              : node.role === 'local'
-                                ? 'Terminal'
-                                : `Hop ${index}`
-                          }
-                          fixed={node.role === 'local'}
-                          snr={index === 0 ? null : formatSNR(node.snr)}
-                        />
-                      </div>
-                    );
-                  })
-                : null}
-            </div>
-          </div>
+          ) : null}
         </section>
       </div>
 

@@ -1017,7 +1017,7 @@ class TestAppriseModule:
         assert mod.status == "connected"
 
     @pytest.mark.asyncio
-    async def test_skips_outgoing_messages(self):
+    async def test_skips_outgoing_messages_by_default(self):
         from unittest.mock import patch as _patch
 
         from app.fanout.apprise_mod import AppriseModule
@@ -1026,6 +1026,19 @@ class TestAppriseModule:
         with _patch("app.fanout.apprise_mod._send_sync") as mock_send:
             await mod.on_message({"type": "PRIV", "text": "hi", "outgoing": True})
             mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sends_outgoing_messages_when_enabled(self):
+        from unittest.mock import patch as _patch
+
+        from app.fanout.apprise_mod import AppriseModule
+
+        mod = AppriseModule("test", {"urls": "json://localhost", "include_outgoing": True})
+        with _patch("app.fanout.apprise_mod._send_sync", return_value=True) as mock_send:
+            await mod.on_message(
+                {"type": "PRIV", "text": "hi", "outgoing": True, "sender_name": "Me"}
+            )
+            mock_send.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sends_for_incoming_messages(self):
@@ -1379,10 +1392,26 @@ class TestAppriseValidation:
         _validate_apprise_config(config)
         assert config["markdown_format"] is False
 
-    def test_validate_apprise_config_works_without_markdown_format(self):
+    def test_validate_apprise_config_defaults_markdown_format_true(self):
         from app.routers.fanout import _validate_apprise_config
 
-        _validate_apprise_config({"urls": "discord://123/abc"})
+        config: dict = {"urls": "discord://123/abc"}
+        _validate_apprise_config(config)
+        assert config["markdown_format"] is True
+
+    def test_validate_apprise_config_defaults_include_outgoing_false(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        config: dict = {"urls": "discord://123/abc"}
+        _validate_apprise_config(config)
+        assert config["include_outgoing"] is False
+
+    def test_validate_apprise_config_normalizes_include_outgoing(self):
+        from app.routers.fanout import _validate_apprise_config
+
+        config: dict = {"urls": "discord://123/abc", "include_outgoing": 1}
+        _validate_apprise_config(config)
+        assert config["include_outgoing"] is True
 
 
 class TestAppriseMarkdownFormat:

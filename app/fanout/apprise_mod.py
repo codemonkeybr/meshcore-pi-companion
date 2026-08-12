@@ -188,14 +188,15 @@ def _send_sync(urls_raw: str, body: str, *, preserve_identity: bool, markdown: b
 
 
 class AppriseModule(FanoutModule):
-    """Sends push notifications via Apprise for incoming messages."""
+    """Sends push notifications via Apprise for matched messages."""
 
     def __init__(self, config_id: str, config: dict, *, name: str = "") -> None:
         super().__init__(config_id, config, name=name)
 
     async def on_message(self, data: dict) -> None:
-        # Skip outgoing messages — only notify on incoming
-        if data.get("outgoing"):
+        # Skip outgoing messages by default. Operators can opt in when they
+        # want RemoteTerm-originated manual/bot sends mirrored to Apprise.
+        if data.get("outgoing") and not self.config.get("include_outgoing", False):
             return
 
         urls = self.config.get("urls", "")

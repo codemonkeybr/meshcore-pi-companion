@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RawPacketFeedView } from '../components/RawPacketFeedView';
+import { resetRawPacketStore, seedRawPacketStore } from '../stores/rawPacketStore';
 import type { RawPacketStatsSessionState } from '../utils/rawPacketStats';
 import type { Channel, Contact, RawPacket } from '../types';
 
@@ -108,17 +109,15 @@ function renderView({
   channels?: Channel[];
   rawPacketStatsSession?: RawPacketStatsSessionState;
 } = {}) {
-  return render(
-    <RawPacketFeedView
-      packets={packets}
-      rawPacketStatsSession={rawPacketStatsSession}
-      contacts={contacts}
-      channels={channels}
-    />
-  );
+  seedRawPacketStore({ packets, statsSession: rawPacketStatsSession });
+  return render(<RawPacketFeedView contacts={contacts} channels={channels} />);
 }
 
 describe('RawPacketFeedView', () => {
+  beforeEach(() => {
+    resetRawPacketStore();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -136,6 +135,16 @@ describe('RawPacketFeedView', () => {
     expect(screen.getByText('Hop Byte Width')).toBeInTheDocument();
     expect(screen.getByText('Most-Heard Neighbors')).toBeInTheDocument();
     expect(screen.getByText('Traffic Timeline')).toBeInTheDocument();
+  });
+
+  it('shows an Autoscroll toggle that is ticked by default and can be unchecked', () => {
+    renderView();
+
+    const autoscroll = screen.getByLabelText('Autoscroll') as HTMLInputElement;
+    expect(autoscroll.checked).toBe(true);
+
+    fireEvent.click(autoscroll);
+    expect((screen.getByLabelText('Autoscroll') as HTMLInputElement).checked).toBe(false);
   });
 
   it('analyzes a pasted raw packet without adding it to the live feed', () => {
@@ -215,7 +224,7 @@ describe('RawPacketFeedView', () => {
       ],
     });
 
-    const { rerender } = renderView({
+    renderView({
       packets: initialPackets,
       rawPacketStatsSession: initialSession,
       contacts: [],
@@ -226,14 +235,7 @@ describe('RawPacketFeedView', () => {
     expect(screen.getByText(/only covered for 10 sec/i)).toBeInTheDocument();
 
     vi.setSystemTime(new Date('2024-01-01T00:01:10Z'));
-    rerender(
-      <RawPacketFeedView
-        packets={nextPackets}
-        rawPacketStatsSession={initialSession}
-        contacts={[]}
-        channels={[]}
-      />
-    );
+    act(() => seedRawPacketStore({ packets: nextPackets, statsSession: initialSession }));
     expect(screen.getByText(/only covered for 50 sec/i)).toBeInTheDocument();
 
     vi.setSystemTime(new Date('2024-01-01T00:01:30Z'));
@@ -247,14 +249,7 @@ describe('RawPacketFeedView', () => {
         },
       ],
     };
-    rerender(
-      <RawPacketFeedView
-        packets={nextPackets}
-        rawPacketStatsSession={nextSession}
-        contacts={[]}
-        channels={[]}
-      />
-    );
+    act(() => seedRawPacketStore({ packets: nextPackets, statsSession: nextSession }));
     expect(screen.getByText(/only covered for 10 sec/i)).toBeInTheDocument();
 
     vi.useRealTimers();
@@ -364,6 +359,70 @@ describe('RawPacketFeedView', () => {
 
     expect(screen.getAllByText('Alpha').length).toBeGreaterThan(0);
     expect(screen.queryByText('Identity not resolvable')).not.toBeInTheDocument();
+  });
+
+  describe('hex filter', () => {
+    function makePacket(id: number, data: string): RawPacket {
+      return {
+        id,
+        observation_id: id,
+        timestamp: 1_700_000_000 + id,
+        data,
+        decrypted: false,
+        payload_type: 'Unknown',
+        rssi: null,
+        snr: null,
+        decrypted_info: null,
+      };
+    }
+
+    const HEX_FILTER_LABEL = 'Filter loaded packets by hex substring';
+
+    it('filters the feed to packets whose raw hex contains the query', () => {
+      renderView({ packets: [makePacket(1, 'aa11bb22'), makePacket(2, 'cc33dd44')] });
+
+      expect(screen.getByText('AA11BB22')).toBeInTheDocument();
+      expect(screen.getByText('CC33DD44')).toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText(HEX_FILTER_LABEL), { target: { value: 'aa11' } });
+
+      expect(screen.getByText('AA11BB22')).toBeInTheDocument();
+      expect(screen.queryByText('CC33DD44')).not.toBeInTheDocument();
+      expect(screen.getByText(/1\s*\/\s*2/)).toBeInTheDocument();
+    });
+
+    it('normalizes 0x prefix, colons, whitespace, and case in the query', () => {
+      renderView({ packets: [makePacket(1, 'aabbcc'), makePacket(2, 'ddeeff')] });
+
+      fireEvent.change(screen.getByLabelText(HEX_FILTER_LABEL), {
+        target: { value: '0xAA:BB CC' },
+      });
+
+      expect(screen.getByText('AABBCC')).toBeInTheDocument();
+      expect(screen.queryByText('DDEEFF')).not.toBeInTheDocument();
+    });
+
+    it('shows a hint and matches nothing for a non-hex query', () => {
+      renderView({ packets: [makePacket(1, 'aabbcc')] });
+
+      fireEvent.change(screen.getByLabelText(HEX_FILTER_LABEL), { target: { value: 'zzz' } });
+
+      expect(screen.getByText('Enter hex only')).toBeInTheDocument();
+      expect(screen.queryByText('AABBCC')).not.toBeInTheDocument();
+      expect(screen.getByText(/No packets received yet/i)).toBeInTheDocument();
+    });
+
+    it('restores the full feed when the filter is cleared', () => {
+      renderView({ packets: [makePacket(1, 'aabbcc'), makePacket(2, 'ddeeff')] });
+
+      fireEvent.change(screen.getByLabelText(HEX_FILTER_LABEL), { target: { value: 'aa' } });
+      expect(screen.queryByText('DDEEFF')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear hex filter' }));
+
+      expect(screen.getByText('AABBCC')).toBeInTheDocument();
+      expect(screen.getByText('DDEEFF')).toBeInTheDocument();
+    });
   });
 
   it('opens a packet detail modal from the raw feed and decrypts channel messages when a key is loaded', () => {

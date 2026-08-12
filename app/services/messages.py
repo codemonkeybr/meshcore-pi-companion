@@ -69,6 +69,8 @@ def build_message_model(
     sender_name: str | None = None,
     channel_name: str | None = None,
     packet_id: int | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> Message:
     """Build a Message model with the canonical backend payload shape."""
     return Message(
@@ -87,6 +89,8 @@ def build_message_model(
         sender_name=sender_name,
         channel_name=channel_name,
         packet_id=packet_id,
+        transport_code=transport_code,
+        region=region,
     )
 
 
@@ -95,9 +99,12 @@ def broadcast_message(
     message: Message,
     broadcast_fn: BroadcastFn,
     realtime: bool | None = None,
+    packet_hash: str | None = None,
 ) -> None:
     """Broadcast a message payload, preserving the caller's broadcast signature."""
     payload = message.model_dump()
+    if packet_hash is not None:
+        payload["packet_hash"] = packet_hash
     if realtime is None:
         broadcast_fn("message", payload)
     else:
@@ -272,6 +279,9 @@ async def create_message_from_decrypted(
     channel_name: str | None = None,
     realtime: bool = True,
     broadcast_fn: BroadcastFn,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> int | None:
     """Store and broadcast a decrypted channel message."""
     received = received_at or int(time.time())
@@ -296,6 +306,8 @@ async def create_message_from_decrypted(
         snr=snr,
         sender_name=sender,
         sender_key=resolved_sender_key,
+        transport_code=transport_code,
+        region=region,
     )
 
     if msg_id is None:
@@ -337,12 +349,48 @@ async def create_message_from_decrypted(
             sender_key=resolved_sender_key,
             channel_name=channel_name,
             packet_id=packet_id,
+            transport_code=transport_code,
+            region=region,
         ),
         broadcast_fn=broadcast_fn,
         realtime=realtime,
+        packet_hash=packet_hash,
     )
 
     return msg_id
+
+
+async def backfill_message_regions(known_regions: list[str]) -> dict[str, int]:
+    """Re-resolve region scope for stored channel messages that still have a raw packet.
+
+    Region is normally resolved at ingest, so messages stored before the feature
+    existed (or before a region was added to the list) carry no region. This walks
+    every CHAN message that still has a retained raw packet, recomputes its
+    transport code, and persists the resolved region.
+
+    Messages whose raw packet has been purged cannot be re-evaluated.
+
+    Returns counts: ``scanned`` (messages examined), ``scoped`` (transport-routed),
+    and ``named`` (matched a known region).
+    """
+    from app.path_utils import parse_packet_envelope
+    from app.region_resolver import resolve_region
+
+    scanned = scoped = named = 0
+    async for message_id, raw_bytes in MessageRepository.stream_chan_messages_with_raw():
+        scanned += 1
+        env = parse_packet_envelope(raw_bytes)
+        if env is None or env.transport_codes is None:
+            continue
+        scoped += 1
+        transport_code = env.transport_codes[0]
+        region = resolve_region(int(env.payload_type), env.payload, transport_code, known_regions)
+        if region:
+            named += 1
+        await MessageRepository.set_transport_scope(message_id, transport_code, region)
+
+    logger.info("Region backfill complete: scanned=%d scoped=%d named=%d", scanned, scoped, named)
+    return {"scanned": scanned, "scoped": scoped, "named": named}
 
 
 async def create_dm_message_from_decrypted(
@@ -359,6 +407,9 @@ async def create_dm_message_from_decrypted(
     outgoing: bool = False,
     realtime: bool = True,
     broadcast_fn: BroadcastFn,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> int | None:
     """Store and broadcast a decrypted direct message."""
     from app.services.dm_ingest import ingest_decrypted_direct_message
@@ -375,6 +426,9 @@ async def create_dm_message_from_decrypted(
         outgoing=outgoing,
         realtime=realtime,
         broadcast_fn=broadcast_fn,
+        packet_hash=packet_hash,
+        transport_code=transport_code,
+        region=region,
     )
     return message.id if message is not None else None
 
