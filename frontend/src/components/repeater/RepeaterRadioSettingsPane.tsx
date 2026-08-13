@@ -74,6 +74,11 @@ export function RadioSettingsPane({
           />
           <KvRow label="TX Power" value={data.tx_power != null ? `${data.tx_power} dBm` : '—'} />
           <KvRow label="Airtime Factor" value={data.airtime_factor ?? '—'} />
+          {/* Duty cycle limit is firmware >= 1.15 only; omit the row entirely on
+              older nodes rather than showing an empty placeholder. */}
+          {data.duty_cycle_limit != null && (
+            <KvRow label="Duty Cycle Limit" value={data.duty_cycle_limit} />
+          )}
           <KvRow label="Repeat Mode" value={data.repeat_enabled ?? '—'} />
           <KvRow label="Max Flood Hops" value={data.flood_max ?? '—'} />
         </div>

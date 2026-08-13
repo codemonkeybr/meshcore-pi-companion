@@ -9,13 +9,13 @@ NC='\033[0m'
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# vite 8 requires Node >= 20.19 (older Node lacks the global CustomEvent its CLI
+# uses), so Node 18 is intentionally no longer exercised.
 NODE_VERSIONS=("20" "22" "24")
 # Use explicit npm patch versions so resolver regressions are caught.
 NPM_VERSIONS=("9.1.1" "9.9.4" "10.9.5" "11.6.2")
 EXTRA_CASES=(
-    "18|9.1.1"
     "20|8.19.4"
-    "18|8.19.4"
     "24|11.12.0"
     "25|11.6.2"
     "25|11.12.0"

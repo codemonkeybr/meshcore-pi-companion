@@ -11,19 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import ssl
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import aiomqtt
 
 from app.fanout.mqtt_base import BaseMqttPublisher
 from app.keystore import ed25519_sign_expanded
-from app.path_utils import parse_packet_envelope, split_path_hex
+from app.path_utils import calculate_packet_hash, parse_packet_envelope, split_path_hex
 from app.version_info import get_app_build_info
 
 logger = logging.getLogger(__name__)
@@ -44,6 +43,12 @@ _STATS_MIN_CACHE_SECS = 60  # Don't re-fetch stats within 60s
 
 # Route type mapping: bottom 2 bits of first byte
 _ROUTE_MAP = {0: "F", 1: "F", 2: "D", 3: "T"}
+
+
+def _format_utc_timestamp(dt: datetime | None = None) -> str:
+    """Return an ISO-8601 UTC timestamp accepted by community observers."""
+    current = dt.astimezone(UTC) if dt is not None else datetime.now(UTC)
+    return current.isoformat().replace("+00:00", "Z")
 
 
 class CommunityMqttSettings(Protocol):
@@ -110,34 +115,6 @@ def _generate_jwt_token(
     return f"{header_b64}.{payload_b64}.{signature.hex()}"
 
 
-def _calculate_packet_hash(raw_bytes: bytes) -> str:
-    """Calculate packet hash matching MeshCore's Packet::calculatePacketHash().
-
-    Parses the packet structure to extract payload type and payload data,
-    then hashes: payload_type(1 byte) [+ path_len(2 bytes LE) for TRACE] + payload_data.
-    Returns first 16 hex characters (uppercase).
-    """
-    if not raw_bytes:
-        return "0" * 16
-
-    try:
-        envelope = parse_packet_envelope(raw_bytes)
-        if envelope is None:
-            return "0" * 16
-
-        # Hash: payload_type(1 byte) [+ path_byte as uint16_t LE for TRACE] + payload_data
-        # IMPORTANT: TRACE hash uses the raw wire byte (not decoded hop count) to match firmware.
-        hash_obj = hashlib.sha256()
-        hash_obj.update(bytes([envelope.payload_type]))
-        if envelope.payload_type == 9:  # PAYLOAD_TYPE_TRACE
-            hash_obj.update(envelope.path_byte.to_bytes(2, byteorder="little"))
-        hash_obj.update(envelope.payload)
-
-        return hash_obj.hexdigest()[:16].upper()
-    except Exception:
-        return "0" * 16
-
-
 def _decode_packet_fields(raw_bytes: bytes) -> tuple[str, str, str, list[str], int | None]:
     """Decode packet fields used by the community uploader payload format.
 
@@ -181,9 +158,9 @@ def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: s
     if route == "U":
         return None
 
-    # Reference format uses local "now" timestamp and derived time/date fields.
-    current_time = datetime.now()
-    ts_str = current_time.isoformat()
+    # Community observers clamp zone-less local timestamps; publish explicit UTC.
+    current_time = datetime.now(UTC)
+    ts_str = _format_utc_timestamp(current_time)
 
     # Keep numeric telemetry numeric so downstream analyzers can ingest it.
     # Preserve the existing "Unknown" fallback for missing values.
@@ -192,7 +169,7 @@ def _format_raw_packet(data: dict[str, Any], device_name: str, public_key_hex: s
     snr: float | str = float(snr_val) if snr_val is not None else "Unknown"
     rssi: int | str = int(rssi_val) if rssi_val is not None else "Unknown"
 
-    packet_hash = _calculate_packet_hash(raw_bytes)
+    packet_hash = calculate_packet_hash(raw_bytes)
 
     packet = {
         "origin": device_name or "MeshCore Device",
@@ -343,7 +320,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         offline_payload = json.dumps(
             {
                 "status": "offline",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": _format_utc_timestamp(),
                 "origin": device_name or "MeshCore Device",
                 "origin_id": pubkey_hex,
             }
@@ -507,7 +484,7 @@ class CommunityMqttPublisher(BaseMqttPublisher):
         status_topic = _build_status_topic(settings, pubkey_hex)
         payload: dict[str, Any] = {
             "status": "online",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _format_utc_timestamp(),
             "origin": device_name or "MeshCore Device",
             "origin_id": pubkey_hex,
             "model": device_info.get("model", "unknown"),

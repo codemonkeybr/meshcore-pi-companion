@@ -12,7 +12,7 @@ from meshcore import EventType
 from app.models import ResendChannelMessageResponse
 from app.radio import RadioOperationBusyError
 from app.radio_sync import _to_backend as _coerce_be
-from app.region_scope import normalize_region_scope
+from app.region_scope import is_unscoped, normalize_region_scope
 from app.repository import (
     AppSettingsRepository,
     ChannelRepository,
@@ -20,6 +20,7 @@ from app.repository import (
     MessageRepository,
 )
 from app.services import dm_ack_tracker
+from app.services.flood_scope import set_radio_flood_scope
 from app.services.messages import (
     BroadcastFn,
     broadcast_message,
@@ -30,6 +31,20 @@ from app.services.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ScopeUnset:
+    """Sentinel for "no per-send flood-scope override supplied".
+
+    Distinguishes "caller did not request a per-send scope, so use the channel's
+    persisted ``flood_scope_override``" from "caller explicitly requested unscoped
+    flood (empty string)". A bare ``None``/``""`` cannot express both states.
+    """
+
+    __slots__ = ()
+
+
+SCOPE_UNSET = _ScopeUnset()
 
 NO_RADIO_RESPONSE_AFTER_SEND_DETAIL = (
     "Send command was issued to the radio, but no response was heard back. "
@@ -136,36 +151,46 @@ async def send_channel_message_with_effective_scope(
     radio_manager,
     temp_radio_slot: int,
     error_broadcast_fn: BroadcastFn,
+    flood_scope_override: str | _ScopeUnset = SCOPE_UNSET,
     app_settings_repository=AppSettingsRepository,
 ) -> Any:
-    """Send a channel message, temporarily overriding flood scope and/or path hash mode."""
-    override_scope = normalize_region_scope(channel.flood_scope_override)
-    baseline_scope = ""
+    """Send a channel message, temporarily overriding flood scope and/or path hash mode.
 
-    if override_scope:
+    ``flood_scope_override`` lets a single send override the channel's persisted
+    ``flood_scope_override``: pass a region name to scope this send, an empty
+    string to force unscoped/plain flood, or leave it ``SCOPE_UNSET`` to fall
+    back to the channel's persisted override.
+    """
+    if isinstance(flood_scope_override, _ScopeUnset):
+        # Fall back to the channel's persisted override, which is tri-state:
+        #   None -> inherit the global scope (leave radio untouched)
+        #   unscoped marker ("*") -> force unscoped even over a scoped global
+        #   region name -> scope this channel
+        channel_override = channel.flood_scope_override
+        if channel_override is None:
+            desired_scope = ""
+            scope_explicit = False
+        elif is_unscoped(channel_override):
+            desired_scope = ""
+            scope_explicit = True
+        else:
+            desired_scope = normalize_region_scope(channel_override)
+            scope_explicit = True
+    else:
+        desired_scope = normalize_region_scope(flood_scope_override)
+        scope_explicit = True
+
+    # Fetch the radio's standing scope as the restore target whenever we might
+    # change it: a non-empty desired scope, or an explicit request to go unscoped.
+    baseline_scope = ""
+    if desired_scope or scope_explicit:
         settings = await app_settings_repository.get()
         baseline_scope = normalize_region_scope(settings.flood_scope)
 
-    if override_scope and override_scope != baseline_scope:
-        logger.info(
-            "Temporarily applying channel flood_scope override for %s: %r",
-            channel.name,
-            override_scope,
-        )
-        override_result = await be.set_flood_scope(override_scope)
-        if override_result is not None and override_result.type == EventType.ERROR:
-            logger.warning(
-                "Failed to apply channel flood_scope override for %s: %s",
-                channel.name,
-                override_result.payload,
-            )
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Failed to apply regional override {override_scope!r} before {action_label}: "
-                    f"{override_result.payload}"
-                ),
-            )
+    # Apply only when the desired scope differs from the radio's baseline. A blank
+    # desired scope forces unscoped only when explicitly requested; the implicit
+    # (channel-default) path leaves the radio untouched when no override is set.
+    apply_scope = desired_scope != baseline_scope and (bool(desired_scope) or scope_explicit)
 
     # Path hash mode per-channel override
     override_phm = channel.path_hash_mode_override
@@ -176,28 +201,59 @@ async def send_channel_message_with_effective_scope(
         and override_phm != baseline_phm
     )
 
-    if apply_phm:
-        logger.info(
-            "Temporarily applying channel path_hash_mode override for %s: %d",
-            channel.name,
-            override_phm,
-        )
-        phm_result = await be.set_path_hash_mode(override_phm)
-        if phm_result is not None and phm_result.type == EventType.ERROR:
-            logger.warning(
-                "Failed to apply channel path_hash_mode override for %s: %s",
-                channel.name,
-                phm_result.payload,
-            )
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Failed to apply path hash mode override before {action_label}: "
-                    f"{phm_result.payload}"
-                ),
-            )
-
+    # Apply the temporary overrides and send inside the try so the finally below
+    # always restores the radio's baseline scope/hash-mode -- even when applying an
+    # override raises (e.g. the radio rejects the scope, or the path-hash-mode apply
+    # fails) or the send itself throws. ``apply_scope``/``apply_phm`` are computed
+    # above so the finally can reference them regardless of where we fail, and
+    # restoring to baseline is idempotent, so forcing baseline back after an apply
+    # whose effect on the radio is unknown is safe.
     try:
+        if apply_scope:
+            logger.info(
+                "Temporarily applying flood_scope %s for %s",
+                desired_scope or "(unscoped)",
+                channel.name,
+            )
+            override_result = await set_radio_flood_scope(
+                be, desired_scope, fw_ver=radio_manager.firmware_ver_code
+            )
+            if override_result is not None and override_result.type == EventType.ERROR:
+                logger.warning(
+                    "Failed to apply flood_scope %r for %s: %s",
+                    desired_scope,
+                    channel.name,
+                    override_result.payload,
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Failed to apply regional override {desired_scope!r} before {action_label}: "
+                        f"{override_result.payload}"
+                    ),
+                )
+
+        if apply_phm:
+            logger.info(
+                "Temporarily applying channel path_hash_mode override for %s: %d",
+                channel.name,
+                override_phm,
+            )
+            phm_result = await be.set_path_hash_mode(override_phm)
+            if phm_result is not None and phm_result.type == EventType.ERROR:
+                logger.warning(
+                    "Failed to apply channel path_hash_mode override for %s: %s",
+                    channel.name,
+                    phm_result.payload,
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Failed to apply path hash mode override before {action_label}: "
+                        f"{phm_result.payload}"
+                    ),
+                )
+
         channel_slot, needs_configure, evicted_channel_key = radio_manager.plan_channel_send_slot(
             channel_key,
             preferred_slot=temp_radio_slot,
@@ -267,15 +323,21 @@ async def send_channel_message_with_effective_scope(
             )
             radio_manager.invalidate_cached_channel_slot(channel_key)
         else:
+            logger.debug(
+                "Radio send result for %s (%s): %r",
+                channel.name,
+                action_label,
+                send_result.payload,
+            )
             radio_manager.note_channel_slot_used(channel_key)
         return send_result
     finally:
-        if override_scope and override_scope != baseline_scope:
+        if apply_scope:
             restored = False
             for attempt in range(3):
                 try:
-                    restore_result = await be.set_flood_scope(
-                        baseline_scope if baseline_scope else ""
+                    restore_result = await set_radio_flood_scope(
+                        be, baseline_scope, fw_ver=radio_manager.firmware_ver_code
                     )
                     if restore_result is not None and restore_result.type == EventType.ERROR:
                         logger.warning(
@@ -606,6 +668,12 @@ async def send_direct_message_to_contact(
         if result.type == EventType.ERROR:
             raise HTTPException(status_code=422, detail=f"Failed to send message: {result.payload}")
 
+        logger.debug(
+            "Radio send result for direct message to %s: %r",
+            contact.public_key[:12],
+            result.payload,
+        )
+
         message = await create_outgoing_direct_message(
             conversation_key=contact.public_key.lower(),
             text=text,
@@ -755,9 +823,15 @@ async def send_channel_message_to_channel(
     error_broadcast_fn: BroadcastFn,
     now_fn: NowFn,
     temp_radio_slot: int,
+    flood_scope_override: str | _ScopeUnset = SCOPE_UNSET,
     message_repository=MessageRepository,
 ) -> Any:
-    """Send a channel message and persist/broadcast the outgoing row."""
+    """Send a channel message and persist/broadcast the outgoing row.
+
+    ``flood_scope_override`` is forwarded to the scoped send: a region name
+    scopes this send, an empty string forces unscoped flood, and ``SCOPE_UNSET``
+    falls back to the channel's persisted override.
+    """
     sent_at: int | None = None
     sender_timestamp: int | None = None
     radio_name = ""
@@ -811,6 +885,7 @@ async def send_channel_message_to_channel(
                 radio_manager=radio_manager,
                 temp_radio_slot=temp_radio_slot,
                 error_broadcast_fn=error_broadcast_fn,
+                flood_scope_override=flood_scope_override,
             )
 
             if result is None:

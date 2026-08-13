@@ -136,6 +136,13 @@ class BotModule(FanoutModule):
         if path_value is None and paths and isinstance(paths, list) and len(paths) > 0:
             path_value = paths[0].get("path") if isinstance(paths[0], dict) else None
         path_bytes_per_hop = _derive_path_bytes_per_hop(paths, path_value)
+        packet_hash = data.get("packet_hash")
+        # Resolved region name (None for unscoped flood or a transport code that
+        # matched no known region). `scoped` disambiguates None: a transport code
+        # was present iff the message carried a regional flood scope. This is set
+        # for scoped DMs too (flood-direct messages can carry a scope).
+        region = data.get("region")
+        scoped = data.get("transport_code") is not None
 
         # Wait for message to settle (allows retransmissions to be deduped)
         await asyncio.sleep(2)
@@ -161,6 +168,9 @@ class BotModule(FanoutModule):
                         path_value,
                         is_outgoing,
                         path_bytes_per_hop,
+                        packet_hash,
+                        region,
+                        scoped,
                     ),
                     timeout=BOT_EXECUTION_TIMEOUT,
                 )

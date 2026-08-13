@@ -21,6 +21,7 @@ import { NodeInfoPane } from './repeater/RepeaterNodeInfoPane';
 import { RadioSettingsPane } from './repeater/RepeaterRadioSettingsPane';
 import { LppTelemetryPane } from './repeater/RepeaterLppTelemetryPane';
 import { OwnerInfoPane } from './repeater/RepeaterOwnerInfoPane';
+import { RegionsPane } from './repeater/RepeaterRegionsPane';
 import { ActionsPane } from './repeater/RepeaterActionsPane';
 import { ConsolePane } from './repeater/RepeaterConsolePane';
 import { TelemetryHistoryPane } from './repeater/RepeaterTelemetryHistoryPane';
@@ -372,14 +373,22 @@ export function RepeaterDashboard({
               </div>
             </div>
 
-            {/* Remaining panes: ACL | Owner Info + Actions */}
+            {/* Remaining panes: ACL + Regions | Owner Info + Actions */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <AclPane
-                data={paneData.acl}
-                state={paneStates.acl}
-                onRefresh={() => refreshPane('acl')}
-                disabled={anyLoading}
-              />
+              <div className="flex flex-col gap-4">
+                <AclPane
+                  data={paneData.acl}
+                  state={paneStates.acl}
+                  onRefresh={() => refreshPane('acl')}
+                  disabled={anyLoading}
+                />
+                <RegionsPane
+                  data={paneData.regions}
+                  state={paneStates.regions}
+                  onRefresh={() => refreshPane('regions')}
+                  disabled={anyLoading}
+                />
+              </div>
               <div className="flex flex-col gap-4">
                 <OwnerInfoPane
                   data={paneData.ownerInfo}

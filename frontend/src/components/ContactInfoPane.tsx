@@ -39,6 +39,7 @@ import { LppSensorRow, formatLppLabel } from './repeater/repeaterPaneShared';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { toast } from './ui/sonner';
 import { useDistanceUnit } from '../contexts/DistanceUnitContext';
+import { useEntranceSettled } from '../hooks/useEntranceSettled';
 import { CONTACT_TYPE_REPEATER } from '../types';
 import type {
   Contact,
@@ -114,6 +115,10 @@ export function ContactInfoPane({
   // Get live contact data from contacts array (real-time via WS)
   const liveContact =
     contactKey && !isNameOnly ? (contacts.find((c) => c.public_key === contactKey) ?? null) : null;
+
+  // Defer mounting Recharts containers until the pane's slide-in animation
+  // settles; mounting them mid-transform crashes Safari (React #185). See #317.
+  const chartsReady = useEntranceSettled(contactKey !== null);
 
   useEffect(() => {
     if (!contactKey) {
@@ -297,7 +302,7 @@ export function ContactInfoPane({
               </div>
             )}
 
-            <ActivityChartsSection analytics={analytics} />
+            <ActivityChartsSection analytics={analytics} ready={chartsReady} />
 
             <MostActiveChannelsSection
               channels={analytics?.most_active_rooms ?? []}
@@ -601,7 +606,7 @@ export function ContactInfoPane({
                   channelMessageCount={analytics?.channel_message_count ?? 0}
                 />
 
-                <ActivityChartsSection analytics={analytics} />
+                <ActivityChartsSection analytics={analytics} ready={chartsReady} />
 
                 <MostActiveChannelsSection
                   channels={analytics?.most_active_rooms ?? []}
@@ -721,7 +726,13 @@ function MostActiveChannelsSection({
   );
 }
 
-function ActivityChartsSection({ analytics }: { analytics: ContactAnalytics | null }) {
+function ActivityChartsSection({
+  analytics,
+  ready,
+}: {
+  analytics: ContactAnalytics | null;
+  ready: boolean;
+}) {
   if (!analytics) {
     return null;
   }
@@ -741,6 +752,7 @@ function ActivityChartsSection({ analytics }: { analytics: ContactAnalytics | nu
         <div>
           <SectionLabel>Messages Per Hour</SectionLabel>
           <ActivityLineChart
+            ready={ready}
             ariaLabel="Messages per hour"
             points={analytics.hourly_activity}
             series={[
@@ -769,6 +781,7 @@ function ActivityChartsSection({ analytics }: { analytics: ContactAnalytics | nu
         <div>
           <SectionLabel>Messages Per Week</SectionLabel>
           <ActivityLineChart
+            ready={ready}
             ariaLabel="Messages per week"
             points={analytics.weekly_activity}
             series={[{ key: 'message_count', color: '#16a34a', label: 'Messages' }]}
@@ -805,7 +818,10 @@ const TOOLTIP_STYLE = {
   labelStyle: { color: 'hsl(var(--muted-foreground))' },
 } as const;
 
+const ACTIVITY_CHART_HEIGHT = 140;
+
 function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnalyticsWeeklyBucket>({
+  ready,
   ariaLabel,
   points,
   series,
@@ -813,6 +829,7 @@ function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnaly
   tickFormatter,
   valueFormatter,
 }: {
+  ready: boolean;
   ariaLabel: string;
   points: T[];
   series: Array<{ key: keyof T; color: string; label?: string }>;
@@ -820,6 +837,11 @@ function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnaly
   tickFormatter: (point: T) => string;
   valueFormatter: (value: number) => string;
 }) {
+  // Reserve the chart's height while the pane animates in (see #317).
+  if (!ready) {
+    return <div role="img" aria-label={ariaLabel} style={{ height: ACTIVITY_CHART_HEIGHT }} />;
+  }
+
   const data = points.map((point, i) => {
     const entry: Record<string, string | number> = { idx: i, tick: tickFormatter(point) };
     for (const s of series) {
@@ -839,7 +861,7 @@ function ActivityLineChart<T extends ContactAnalyticsHourlyBucket | ContactAnaly
 
   return (
     <div role="img" aria-label={ariaLabel}>
-      <ResponsiveContainer width="100%" height={140}>
+      <ResponsiveContainer width="100%" height={ACTIVITY_CHART_HEIGHT}>
         <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -16 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
           <XAxis

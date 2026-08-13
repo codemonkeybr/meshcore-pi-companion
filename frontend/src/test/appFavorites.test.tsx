@@ -104,6 +104,7 @@ vi.mock('../hooks', async (importOriginal) => {
       mentions: {},
       lastMessageTimes: {},
       unreadLastReadAts: {},
+      firstUnreadIds: {},
       recordMessageEvent: mocks.hookFns.recordMessageEvent,
       renameConversationState: vi.fn(),
       markAllRead: mocks.hookFns.markAllRead,
@@ -220,6 +221,7 @@ const baseSettings = {
   advert_interval: 0,
   last_advert_time: 0,
   flood_scope: '',
+  known_regions: [],
   blocked_keys: [],
   blocked_names: [],
 };

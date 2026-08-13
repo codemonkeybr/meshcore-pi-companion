@@ -25,13 +25,20 @@ test.describe('Message pagination ordering/dedup', () => {
 
     const list = page.locator('div.h-full.overflow-y-auto').first();
 
-    // Scroll to top to trigger older fetch
-    await list.evaluate((el) => {
-      el.scrollTop = 0;
-    });
-
-    // Wait for oldest message to appear after pagination
-    await expect(page.getByText('seed-0')).toBeVisible({ timeout: 15_000 });
+    // Scroll to top repeatedly until the oldest message renders.
+    //
+    // One scroll is not enough with a virtualized list: reaching the top fetches
+    // the older page, and the list then anchors to the message that was on top so
+    // the reader keeps their place, which leaves seed-0 fifty rows further up and
+    // unmounted. A reader scrolls again to get there; so does this. (Before
+    // virtualization every loaded row was in the DOM, so a single scroll made
+    // seed-0 findable regardless of where the viewport actually was.)
+    await expect(async () => {
+      await list.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await expect(page.getByText('seed-0')).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 20_000 });
 
     // Spot-check ordering: seed-249 appears above seed-200; seed-50 above seed-10
     // Fetch from API to validate ordering and dedup

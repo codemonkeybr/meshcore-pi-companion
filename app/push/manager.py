@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pywebpush import WebPushException
 
 from app.push.send import send_push
-from app.push.vapid import get_vapid_private_key
+from app.push.vapid import get_vapid_claims, get_vapid_private_key
 from app.repository.channels import ChannelRepository
 from app.repository.push_subscriptions import PushSubscriptionRepository
 from app.repository.settings import AppSettingsRepository
@@ -21,7 +21,6 @@ from app.repository.settings import AppSettingsRepository
 logger = logging.getLogger(__name__)
 
 _SEND_TIMEOUT = 15  # seconds per push send
-_VAPID_CLAIMS = {"sub": "mailto:noreply@meshcore.local"}
 
 
 def _state_key_for_message(data: dict) -> str:
@@ -161,7 +160,7 @@ class PushManager:
                     subscription_info=_subscription_info(sub),
                     payload=payload,
                     vapid_private_key=vapid_key,
-                    vapid_claims=_VAPID_CLAIMS,
+                    vapid_claims=get_vapid_claims(),
                 )
             result.success = True
         except WebPushException as e:

@@ -12,7 +12,7 @@ import {
 import type { LatLngBoundsExpression, CircleMarker as LeafletCircleMarker } from 'leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import type { Contact, RadioConfig, RawPacket } from '../types';
+import type { Contact, RadioConfig } from '../types';
 import { formatTime } from '../utils/messageParser';
 import { isValidLocation } from '../utils/pathUtils';
 import { CONTACT_TYPE_REPEATER } from '../types';
@@ -23,13 +23,16 @@ import {
   dedupeConsecutive,
 } from '../utils/visualizerUtils';
 import { getRawPacketObservationKey } from '../utils/rawPacketIdentity';
+import { useRawPackets } from '../stores/rawPacketStore';
+import { cn } from '@/lib/utils';
 
 interface MapViewProps {
   contacts: Contact[];
   /** Public key of contact to focus on and open popup */
   focusedKey?: string | null;
-  rawPackets?: RawPacket[];
   config?: RadioConfig | null;
+  blockedKeys?: string[];
+  blockedNames?: string[];
   /** When provided, the contact name in each popup becomes a clickable link
    *  that opens the conversation for that contact (DM, repeater, or room). */
   onSelectContact?: (contact: Contact) => void;
@@ -164,6 +167,50 @@ const MAP_RECENCY_COLORS = {
 } as const;
 const MAP_MARKER_STROKE = '#0f172a';
 const MAP_REPEATER_RING = '#f8fafc';
+
+// --- "Heard since" filter ---
+// Relative presets mirror the marker recency legend so the chips and the dot
+// colors describe the same buckets. `seconds: null` means "no lower bound".
+const MAP_SINCE_PRESETS = [
+  { id: '1h', label: '<1h', windowLabel: '1 hour', seconds: 3600 },
+  { id: '1d', label: '<1d', windowLabel: '24 hours', seconds: 24 * 60 * 60 },
+  { id: '3d', label: '<3d', windowLabel: '3 days', seconds: 3 * 24 * 60 * 60 },
+  { id: '7d', label: '7d', windowLabel: '7 days', seconds: 7 * 24 * 60 * 60 },
+  { id: 'all', label: 'All', windowLabel: null, seconds: null },
+] as const;
+
+type MapSinceId = (typeof MAP_SINCE_PRESETS)[number]['id'] | 'custom';
+
+const DEFAULT_MAP_SINCE_ID: MapSinceId = '7d';
+const MAP_SINCE_STORAGE_KEY = 'remoteterm-map-since';
+
+/** Relative presets drift as time passes, so recompute the cutoff on this cadence. */
+const MAP_SINCE_TICK_MS = 60_000;
+
+function getSavedSinceId(): MapSinceId {
+  try {
+    const stored = localStorage.getItem(MAP_SINCE_STORAGE_KEY);
+    // 'custom' is deliberately not restored: a stale absolute timestamp from a
+    // previous session would silently filter the map on load.
+    if (stored && MAP_SINCE_PRESETS.some((p) => p.id === stored)) {
+      return stored as MapSinceId;
+    }
+  } catch {
+    // localStorage may be disabled; fall through to the default.
+  }
+  return DEFAULT_MAP_SINCE_ID;
+}
+
+/**
+ * Convert a `datetime-local` value (local wall clock, no offset) to epoch
+ * seconds. Per spec `new Date()` interprets the date-time form in the browser's
+ * local zone, which is what we want to compare against UTC-anchored `last_seen`.
+ */
+function localDateTimeToEpochSec(value: string): number | null {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms / 1000;
+}
 
 // --- Packet visualization constants ---
 const THREE_DAYS_SEC = 3 * 24 * 60 * 60;
@@ -494,11 +541,15 @@ function ParticleOverlay({ particles }: { particles: MapParticle[] }) {
 export function MapView({
   contacts,
   focusedKey,
-  rawPackets,
   config,
+  blockedKeys,
+  blockedNames,
   onSelectContact,
 }: MapViewProps) {
-  const [sevenDaysAgo] = useState(() => Date.now() / 1000 - 7 * 24 * 60 * 60);
+  const rawPackets = useRawPackets();
+  const [sinceId, setSinceId] = useState<MapSinceId>(getSavedSinceId);
+  const [customSince, setCustomSince] = useState('');
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
   const [selectedLayerId, setSelectedLayerId] = useState<string>(getSavedLayerId);
   const activeLayer = TILE_LAYERS.find((l) => l.id === selectedLayerId) ?? TILE_LAYERS[0];
 
@@ -558,38 +609,74 @@ export function MapView({
     return [config.lat, config.lon];
   }, [config]);
 
-  // Determine time window for packet visualization
+  // Determine time window for packet visualization. This bounds packet replay
+  // only; node visibility is governed by the "heard since" filter below.
   const threeDaysAgoSec = useMemo(() => Date.now() / 1000 - THREE_DAYS_SEC, []);
+
+  const activeSincePreset = MAP_SINCE_PRESETS.find((p) => p.id === sinceId) ?? null;
+  const sinceIsRelative = activeSincePreset != null && activeSincePreset.seconds != null;
+
+  // Only tick while a relative preset is active — "All" and absolute custom
+  // cutoffs are fixed, so re-rendering the map on a timer would be pure waste.
+  useEffect(() => {
+    if (!sinceIsRelative) return;
+    const timer = setInterval(() => setNowSec(Date.now() / 1000), MAP_SINCE_TICK_MS);
+    return () => clearInterval(timer);
+  }, [sinceIsRelative]);
+
+  useEffect(() => {
+    try {
+      if (sinceId === 'custom') return; // session-only; see getSavedSinceId
+      localStorage.setItem(MAP_SINCE_STORAGE_KEY, sinceId);
+    } catch {
+      // localStorage may be disabled; selection stays in memory only.
+    }
+  }, [sinceId]);
+
+  /** Epoch seconds; `null` means no lower bound (show everything ever heard). */
+  const sinceCutoffSec = useMemo(() => {
+    if (sinceId === 'custom') return localDateTimeToEpochSec(customSince);
+    if (!activeSincePreset || activeSincePreset.seconds == null) return null;
+    return nowSec - activeSincePreset.seconds;
+  }, [sinceId, customSince, activeSincePreset, nowSec]);
+
+  const isWithinSinceWindow = useCallback(
+    (lastSeen: number | null | undefined) => {
+      if (sinceCutoffSec == null) return true;
+      return lastSeen != null && lastSeen > sinceCutoffSec;
+    },
+    [sinceCutoffSec]
+  );
 
   // Filter contacts for map display
   const mappableContacts = useMemo(() => {
+    const isBlocked = (c: Contact) =>
+      (blockedKeys?.length && blockedKeys.includes(c.public_key.toLowerCase())) ||
+      (blockedNames?.length && c.name != null && blockedNames.includes(c.name));
+
     if (showPackets && discoveryMode) {
       // Discovery mode: only show nodes that have appeared in resolved packets
       return contacts.filter(
-        (c) => isValidLocation(c.lat, c.lon) && discoveredKeys.has(c.public_key)
+        (c) => isValidLocation(c.lat, c.lon) && discoveredKeys.has(c.public_key) && !isBlocked(c)
       );
     }
-    if (showPackets) {
-      // Packet mode: show only last 3 days
-      return contacts.filter(
-        (c) =>
-          isValidLocation(c.lat, c.lon) &&
-          (c.public_key === focusedKey || (c.last_seen != null && c.last_seen > threeDaysAgoSec))
-      );
-    }
+    // Both packet and normal mode honour the user's "heard since" filter. The
+    // focused contact is always shown so deep links never land on a blank map.
     return contacts.filter(
       (c) =>
         isValidLocation(c.lat, c.lon) &&
-        (c.public_key === focusedKey || (c.last_seen != null && c.last_seen > sevenDaysAgo))
+        !isBlocked(c) &&
+        (c.public_key === focusedKey || isWithinSinceWindow(c.last_seen))
     );
   }, [
     contacts,
     focusedKey,
-    sevenDaysAgo,
-    threeDaysAgoSec,
+    isWithinSinceWindow,
     showPackets,
     discoveryMode,
     discoveredKeys,
+    blockedKeys,
+    blockedNames,
   ]);
 
   // Resolve a path of hop tokens to geographic waypoints (only unambiguous + has GPS)
@@ -754,9 +841,7 @@ export function MapView({
   }, [focusedKey, mappableContacts]);
 
   const includesFocusedOutsideWindow =
-    focusedContact != null &&
-    (focusedContact.last_seen == null ||
-      focusedContact.last_seen <= (showPackets ? threeDaysAgoSec : sevenDaysAgo));
+    focusedContact != null && !isWithinSinceWindow(focusedContact.last_seen);
 
   // Track marker refs to open popup programmatically
   const markerRefs = useRef<Record<string, LeafletCircleMarker | null>>({});
@@ -801,11 +886,21 @@ export function MapView({
     return lines;
   }, [showPackets, particles]);
 
-  const timeWindowLabel = showPackets ? '3 days' : '7 days';
+  const sinceLabel = useMemo(() => {
+    if (sinceId === 'custom') {
+      return sinceCutoffSec == null
+        ? 'at any time'
+        : `since ${new Date(sinceCutoffSec * 1000).toLocaleString()}`;
+    }
+    if (!activeSincePreset || activeSincePreset.windowLabel == null) return 'at any time';
+    return `in the last ${activeSincePreset.windowLabel}`;
+  }, [sinceId, sinceCutoffSec, activeSincePreset]);
+
+  const contactCountLabel = `${mappableContacts.length} contact${mappableContacts.length !== 1 ? 's' : ''}`;
   const infoLabel =
     showPackets && discoveryMode
       ? `${mappableContacts.length} node${mappableContacts.length !== 1 ? 's' : ''} discovered from live traffic`
-      : `Showing ${mappableContacts.length} contact${mappableContacts.length !== 1 ? 's' : ''} heard in the last ${timeWindowLabel}${includesFocusedOutsideWindow ? ' plus the focused contact' : ''}`;
+      : `Showing ${contactCountLabel} heard ${sinceLabel}${includesFocusedOutsideWindow ? ' plus the focused contact' : ''}`;
 
   return (
     <div className="flex flex-col h-full">
@@ -816,7 +911,15 @@ export function MapView({
         <span>{infoLabel}</span>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 md:justify-end">
           {!showPackets && (
-            <>
+            // Grouped and labelled like the "Since" filter below it. The colour
+            // dots are aria-hidden, so without this the legend is unlabelled to
+            // assistive tech — and its bucket names collide with the identically
+            // named filter chips for anything selecting by text.
+            <div
+              className="flex flex-wrap items-center gap-x-3 gap-y-1"
+              role="group"
+              aria-label="Marker recency legend"
+            >
               <span className="flex items-center gap-1">
                 <span
                   className="w-3 h-3 rounded-full"
@@ -849,7 +952,7 @@ export function MapView({
                 />{' '}
                 older
               </span>
-            </>
+            </div>
           )}
           {showPackets && (
             <>
@@ -895,6 +998,66 @@ export function MapView({
             />{' '}
             repeater
           </span>
+          {/* "Heard since" filter. Hidden in discovery mode, which selects
+              nodes by live traffic rather than by recency. */}
+          {!(showPackets && discoveryMode) && (
+            <div
+              className="flex flex-wrap items-center gap-1"
+              role="group"
+              aria-label="Show nodes heard since"
+            >
+              <span className="text-[0.6875rem] text-muted-foreground">Since</span>
+              {MAP_SINCE_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setSinceId(preset.id)}
+                  aria-pressed={sinceId === preset.id}
+                  className={cn(
+                    'rounded px-1.5 py-0.5 text-[0.625rem] uppercase tracking-wider transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                    sinceId === preset.id
+                      ? 'bg-primary/10 text-primary font-medium'
+                      : 'bg-muted hover:bg-accent'
+                  )}
+                >
+                  {preset.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setSinceId('custom')}
+                aria-pressed={sinceId === 'custom'}
+                className={cn(
+                  'rounded px-1.5 py-0.5 text-[0.625rem] uppercase tracking-wider transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  sinceId === 'custom'
+                    ? 'bg-primary/10 text-primary font-medium'
+                    : 'bg-muted hover:bg-accent'
+                )}
+              >
+                Custom
+              </button>
+              {sinceId === 'custom' && (
+                <>
+                  <input
+                    type="datetime-local"
+                    value={customSince}
+                    onChange={(e) => setCustomSince(e.target.value)}
+                    aria-label="Show nodes heard since (local time)"
+                    className="rounded border border-input bg-background px-1.5 py-0.5 text-[0.6875rem] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  {customSince && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomSince('')}
+                      className="rounded px-1.5 py-0.5 text-[0.625rem] uppercase tracking-wider bg-muted hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"

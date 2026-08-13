@@ -9,6 +9,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioDiscoveryTarget,
+  RadioRegionDiscoveryResponse,
 } from '../types';
 
 export function useRadioControl() {
@@ -17,6 +18,8 @@ export function useRadioControl() {
   const [meshDiscovery, setMeshDiscovery] = useState<RadioDiscoveryResponse | null>(null);
   const [meshDiscoveryLoadingTarget, setMeshDiscoveryLoadingTarget] =
     useState<RadioDiscoveryTarget | null>(null);
+  const [regionDiscovery, setRegionDiscovery] = useState<RadioRegionDiscoveryResponse | null>(null);
+  const [regionDiscoveryLoading, setRegionDiscoveryLoading] = useState(false);
 
   const prevHealthRef = useRef<HealthStatus | null>(null);
   const rebootPollTokenRef = useRef(0);
@@ -127,6 +130,32 @@ export function useRadioControl() {
     }
   }, []);
 
+  const handleDiscoverRegions = useCallback(async (publicKeys?: string[]) => {
+    setRegionDiscoveryLoading(true);
+    try {
+      const data = await api.discoverRegions(publicKeys);
+      setRegionDiscovery(data);
+      if (data.repeaters_queried === 0) {
+        toast.info('No repeaters available to query for regions');
+      } else if (data.regions.length === 0) {
+        toast.info(
+          `No regions reported (${data.repeaters_answered}/${data.repeaters_queried} repeaters answered)`
+        );
+      } else {
+        toast.success(
+          `Found ${data.regions.length} region${data.regions.length === 1 ? '' : 's'} from ${data.repeaters_answered}/${data.repeaters_queried} repeaters`
+        );
+      }
+    } catch (err) {
+      console.error('Failed to discover regions:', err);
+      toast.error('Failed to discover regions', {
+        description: err instanceof Error ? err.message : 'Check radio connection',
+      });
+    } finally {
+      setRegionDiscoveryLoading(false);
+    }
+  }, []);
+
   const handleHealthRefresh = useCallback(async () => {
     try {
       const data = await api.getHealth();
@@ -152,6 +181,9 @@ export function useRadioControl() {
     meshDiscovery,
     meshDiscoveryLoadingTarget,
     handleDiscoverMesh,
+    regionDiscovery,
+    regionDiscoveryLoading,
+    handleDiscoverRegions,
     handleHealthRefresh,
   };
 }

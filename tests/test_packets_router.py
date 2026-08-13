@@ -56,6 +56,17 @@ class TestUndecryptedCount:
         assert response.json()["count"] == 3
 
 
+class TestRegionBackfill:
+    """Test POST /api/packets/region-backfill."""
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_counts_on_empty_db(self, test_db, client):
+        response = await client.post("/api/packets/region-backfill")
+
+        assert response.status_code == 200
+        assert response.json() == {"scanned": 0, "scoped": 0, "named": 0}
+
+
 class TestGetRawPacket:
     """Test GET /api/packets/{id}."""
 

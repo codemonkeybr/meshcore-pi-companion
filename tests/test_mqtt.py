@@ -236,6 +236,74 @@ class TestConnectionLoop:
             assert pub.connected is False
 
     @pytest.mark.asyncio
+    async def test_planned_reconnect_suppresses_success_toast(self):
+        """A self-healing reconnect (via _should_break_wait) must not re-toast.
+
+        Regression for #305: the community-MQTT JWT-renewal teardown reconnects
+        on the periodic wake. The first connect should toast, but the planned
+        reconnect should only refresh health, not pop another success toast.
+        """
+        import asyncio
+
+        pub = MqttPublisher()
+        settings = _make_settings()
+
+        real_wait_for = asyncio.wait_for
+        connect_count = 0
+        second_connect = asyncio.Event()
+        break_done = {"value": False}
+
+        def factory(**kwargs):
+            mock = _mock_aiomqtt_client()
+            original_aenter = mock.__aenter__
+
+            async def signal_aenter(*a, **kw):
+                nonlocal connect_count
+                result = await original_aenter(*a, **kw)
+                connect_count += 1
+                if connect_count >= 2:
+                    second_connect.set()
+                return result
+
+            mock.__aenter__ = AsyncMock(side_effect=signal_aenter)
+            return mock
+
+        async def fake_wait_for(coro, timeout):
+            # Fire the ~60s housekeeping wake immediately; delegate every other
+            # wait (including the test's own) to the real implementation.
+            if timeout == 60:
+                if asyncio.iscoroutine(coro):
+                    coro.close()
+                await asyncio.sleep(0)  # yield so the test coroutine can run
+                raise TimeoutError
+            return await real_wait_for(coro, timeout)
+
+        def should_break(self, elapsed):
+            # Break exactly once to model a single planned reconnect.
+            if not break_done["value"]:
+                break_done["value"] = True
+                return True
+            return False
+
+        with (
+            patch("app.fanout.mqtt_base.aiomqtt.Client", side_effect=factory),
+            patch("app.fanout.mqtt_base._broadcast_health"),
+            patch("app.fanout.mqtt_base.asyncio.wait_for", side_effect=fake_wait_for),
+            patch.object(MqttPublisher, "_should_break_wait", should_break),
+            patch("app.websocket.broadcast_success") as mock_success,
+            patch("app.websocket.broadcast_health"),
+        ):
+            await pub.start(settings)
+            await asyncio.wait_for(second_connect.wait(), timeout=5)
+            await pub.stop()
+
+        assert connect_count >= 2
+        # First connect toasts; the planned reconnect does not.
+        assert mock_success.call_count == 1
+        # Flag is consumed, not left armed for a future genuine (re)connect.
+        assert pub._suppress_next_connect_toast is False
+
+    @pytest.mark.asyncio
     async def test_reconnects_after_connection_failure(self):
         """Connection loop should retry after a connection error with backoff."""
         import asyncio

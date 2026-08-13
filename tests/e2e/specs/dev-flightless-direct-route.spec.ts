@@ -109,6 +109,14 @@ test.describe('Partner-radio direct-route learning via DM ACK', () => {
       )
       .toBeGreaterThan(0);
 
+    // We send zero-hop adverts so the partner ideally hears us directly and the
+    // learned return route is zero-hop (direct_path_len === 0, empty path bytes).
+    // But mesh RF is nondeterministic: depending on link quality and timing, the
+    // partner may hear our advert (or route its ACK back) via a repeater, in
+    // which case the legitimately-learned direct route is 1+ hops with non-empty
+    // path bytes. The point of this test is that the DM ACK learns a *direct*
+    // route off flood, not that it is specifically zero-hop, so assert "off
+    // flood" (direct_path_len >= 0) rather than an exact hop count.
     await expect
       .poll(
         async () => {
@@ -120,10 +128,10 @@ test.describe('Partner-radio direct-route learning via DM ACK', () => {
           message: 'Waiting for partner radio route to update from flood to direct',
         }
       )
-      .toBe(0);
+      .toBeGreaterThanOrEqual(0);
 
     const learnedContact = await getContactByKey(E2E_PARTNER_RADIO_PUBKEY);
-    expect(learnedContact?.direct_path ?? '').toBe('');
+    expect(learnedContact?.direct_path_len ?? -1).toBeGreaterThanOrEqual(0);
 
     await page.locator('[title="View contact info"]').click();
     await expect(page.getByLabel('Contact Info')).toBeVisible({ timeout: 15_000 });

@@ -19,6 +19,7 @@ import type {
   RadioConfig,
   RadioConfigUpdate,
   RadioDiscoveryResponse,
+  RadioRegionDiscoveryResponse,
   RadioTraceHopRequest,
   RadioTraceResponse,
   RadioDiscoveryTarget,
@@ -33,6 +34,7 @@ import type {
   RepeaterNodeInfoResponse,
   RepeaterOwnerInfoResponse,
   RepeaterRadioSettingsResponse,
+  RepeaterRegionsResponse,
   RepeaterStatusResponse,
   TelemetryHistoryEntry,
   TelemetrySchedule,
@@ -113,6 +115,11 @@ export const api = {
     fetchJson<RadioDiscoveryResponse>('/radio/discover', {
       method: 'POST',
       body: JSON.stringify({ target }),
+    }),
+  discoverRegions: (publicKeys?: string[]) =>
+    fetchJson<RadioRegionDiscoveryResponse>('/radio/discover-regions', {
+      method: 'POST',
+      body: JSON.stringify(publicKeys && publicKeys.length > 0 ? { public_keys: publicKeys } : {}),
     }),
   requestRadioTrace: (hopHashBytes: 1 | 2 | 4, hops: RadioTraceHopRequest[]) =>
     fetchJson<RadioTraceResponse>('/radio/trace', {
@@ -437,6 +444,10 @@ export const api = {
     }),
   repeaterOwnerInfo: (publicKey: string) =>
     fetchJson<RepeaterOwnerInfoResponse>(`/contacts/${publicKey}/repeater/owner-info`, {
+      method: 'POST',
+    }),
+  repeaterRegions: (publicKey: string) =>
+    fetchJson<RepeaterRegionsResponse>(`/contacts/${publicKey}/repeater/regions`, {
       method: 'POST',
     }),
   repeaterLppTelemetry: (publicKey: string) =>

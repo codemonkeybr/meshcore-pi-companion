@@ -172,9 +172,25 @@ export function updateUrlHash(conv: Conversation | null): void {
   }
 }
 
+// Update URL hash and add a new browser history entry
+export function pushUrlHash(conv: Conversation | null): void {
+  const newHash = getConversationHash(conv);
+  if (newHash !== window.location.hash) {
+    window.history.pushState(null, '', newHash || window.location.pathname);
+  }
+}
+
 export function updateSettingsHash(section: SettingsSection): void {
   const newHash = getSettingsHash(section);
   if (newHash !== window.location.hash) {
     window.history.replaceState(null, '', newHash);
+  }
+}
+
+// Push a settings hash as a new browser history entry
+export function pushSettingsHash(section: SettingsSection): void {
+  const newHash = getSettingsHash(section);
+  if (newHash !== window.location.hash) {
+    window.history.pushState(null, '', newHash);
   }
 }

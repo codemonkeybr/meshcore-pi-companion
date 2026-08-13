@@ -27,6 +27,7 @@ from app.decoder import (
     try_decrypt_dm,
     try_decrypt_packet_with_channel_key,
     try_decrypt_path,
+    verify_advert_signature,
 )
 from app.keystore import get_private_key, get_public_key, has_private_key
 from app.models import (
@@ -35,7 +36,10 @@ from app.models import (
     RawPacketBroadcast,
     RawPacketDecryptedInfo,
 )
+from app.path_utils import calculate_packet_hash
+from app.region_resolver import resolve_region
 from app.repository import (
+    AppSettingsRepository,
     ChannelRepository,
     ContactAdvertPathRepository,
     ContactRepository,
@@ -73,6 +77,9 @@ async def create_message_from_decrypted(
     snr: float | None = None,
     channel_name: str | None = None,
     realtime: bool = True,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> int | None:
     """Store a decrypted channel message via the shared message service."""
     return await _create_message_from_decrypted(
@@ -89,6 +96,9 @@ async def create_message_from_decrypted(
         channel_name=channel_name,
         realtime=realtime,
         broadcast_fn=broadcast_event,
+        packet_hash=packet_hash,
+        transport_code=transport_code,
+        region=region,
     )
 
 
@@ -104,6 +114,9 @@ async def create_dm_message_from_decrypted(
     snr: float | None = None,
     outgoing: bool = False,
     realtime: bool = True,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> int | None:
     """Store a decrypted direct message via the shared message service."""
     return await _create_dm_message_from_decrypted(
@@ -119,6 +132,9 @@ async def create_dm_message_from_decrypted(
         outgoing=outgoing,
         realtime=realtime,
         broadcast_fn=broadcast_event,
+        packet_hash=packet_hash,
+        transport_code=transport_code,
+        region=region,
     )
 
 
@@ -304,9 +320,16 @@ async def process_raw_packet(
 
     # Log packet arrival at debug level
     path_hex = packet_info.path.hex() if packet_info and packet_info.path else ""
+    route_type_name = (
+        getattr(packet_info.route_type, "name", packet_info.route_type)
+        if packet_info
+        else "Unknown"
+    )
     logger.debug(
-        "Packet received: type=%s, is_new=%s, packet_id=%d, path='%s'",
+        "Packet received: type=%s, route=%s, hops=%s, is_new=%s, packet_id=%d, path='%s'",
         payload_type_name,
+        route_type_name,
+        packet_info.path_length if packet_info else "?",
         is_new_packet,
         packet_id,
         path_hex[:8] if path_hex else "(direct)",
@@ -325,13 +348,43 @@ async def process_raw_packet(
         "sender": None,
     }
 
+    # Compute packet hash once for threading into message broadcasts (used by bot fanout).
+    pkt_hash = calculate_packet_hash(raw_bytes)
+
+    # Resolve regional flood-scope for transport-routed packets. The transport code
+    # is a keyed MAC over the payload, so we recompute it for each known region name
+    # and keep the first match. Only transport-routed packets carry codes, so this is
+    # skipped for the common (unscoped) flood/direct case.
+    transport_code: int | None = None
+    region: str | None = None
+    if packet_info is not None and packet_info.transport_codes is not None:
+        transport_code = packet_info.transport_codes[0]
+        try:
+            settings = await AppSettingsRepository.get()
+            region = resolve_region(
+                int(packet_info.payload_type),
+                packet_info.payload,
+                transport_code,
+                settings.known_regions,
+            )
+        except Exception:
+            logger.debug("Region resolution failed for packet %d", packet_id, exc_info=True)
+
     # Process packets based on payload type
     # For GROUP_TEXT, we always try to decrypt even for duplicate packets - the message
     # deduplication in create_message_from_decrypted handles adding paths to existing messages.
     # This is more reliable than trying to look up the message via raw packet linking.
     if payload_type == PayloadType.GROUP_TEXT:
         decrypt_result = await _process_group_text(
-            raw_bytes, packet_id, ts, packet_info, rssi=rssi, snr=snr
+            raw_bytes,
+            packet_id,
+            ts,
+            packet_info,
+            rssi=rssi,
+            snr=snr,
+            packet_hash=pkt_hash,
+            transport_code=transport_code,
+            region=region,
         )
         if decrypt_result:
             result.update(decrypt_result)
@@ -344,13 +397,38 @@ async def process_raw_packet(
     elif payload_type == PayloadType.TEXT_MESSAGE:
         # Try to decrypt direct messages using stored private key and known contacts
         decrypt_result = await _process_direct_message(
-            raw_bytes, packet_id, ts, packet_info, rssi=rssi, snr=snr
+            raw_bytes,
+            packet_id,
+            ts,
+            packet_info,
+            rssi=rssi,
+            snr=snr,
+            packet_hash=pkt_hash,
+            transport_code=transport_code,
+            region=region,
         )
         if decrypt_result:
             result.update(decrypt_result)
 
     elif payload_type == PayloadType.PATH:
         await _process_path_packet(raw_bytes, ts, packet_info)
+
+    elif payload_type == PayloadType.ACK:
+        # Standalone ACK packets carry the 4-byte ack code in cleartext (the
+        # firmware just memcpy's the uint32 into the payload). A contact answers
+        # a *direct*-routed DM with one of these, whereas a *flood*-routed DM is
+        # answered with a PATH-return that has the ACK embedded (handled above in
+        # _process_path_packet). We match directly from the raw RF packet so DM
+        # delivery confirmation does not depend on the radio also surfacing a
+        # separate EventType.ACK host control frame, which some companion
+        # firmwares (e.g. pyMC over TCP) do not reliably emit for direct ACKs.
+        if packet_info is not None and len(packet_info.payload) >= 4:
+            ack_code = packet_info.payload[:4].hex()
+            matched = await apply_dm_ack_code(ack_code, broadcast_fn=broadcast_event)
+            if matched:
+                logger.info("Applied standalone ACK %s from raw packet", ack_code)
+            else:
+                logger.debug("Buffered/ignored standalone ACK %s from raw packet", ack_code)
 
     # Always broadcast raw packet for the packet feed UI (even duplicates)
     # This enables the frontend cracker to see all incoming packets in real-time
@@ -373,6 +451,8 @@ async def process_raw_packet(
         )
         if result["decrypted"]
         else None,
+        transport_code=transport_code,
+        region=region,
     )
     broadcast_event("raw_packet", broadcast_payload.model_dump())
 
@@ -386,6 +466,9 @@ async def _process_group_text(
     packet_info: PacketInfo | None,
     rssi: int | None = None,
     snr: float | None = None,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> dict | None:
     """
     Process a GroupText (channel message) packet.
@@ -424,6 +507,9 @@ async def _process_group_text(
             path_len=packet_info.path_length if packet_info else None,
             rssi=rssi,
             snr=snr,
+            packet_hash=packet_hash,
+            transport_code=transport_code,
+            region=region,
         )
 
         return {
@@ -460,6 +546,20 @@ async def _process_advertisement(
     advert = parse_advertisement(packet_info.payload, raw_packet=raw_bytes)
     if not advert:
         logger.debug("Failed to parse advertisement payload")
+        return
+
+    # Reject adverts whose Ed25519 signature does not verify against the embedded
+    # public key. MeshCore firmware (Mesh.cpp onRecvPacket) drops forged/corrupted
+    # adverts at exactly this check; without it a bit-flipped advert would be
+    # ingested as a phantom contact with a mangled public key (issue #315). The raw
+    # packet is already stored (see process_raw_packet) and still surfaces in the
+    # debug feed — only contact creation/update is gated here, matching firmware.
+    if not verify_advert_signature(packet_info.payload):
+        logger.warning(
+            "Dropping advertisement with invalid signature from %s (packet %s)",
+            advert.public_key[:12],
+            raw_bytes.hex().upper(),
+        )
         return
 
     new_path_len = packet_info.path_length
@@ -569,6 +669,9 @@ async def _process_direct_message(
     packet_info: PacketInfo | None,
     rssi: int | None = None,
     snr: float | None = None,
+    packet_hash: str | None = None,
+    transport_code: int | None = None,
+    region: str | None = None,
 ) -> dict | None:
     """
     Process a TEXT_MESSAGE (direct message) packet.
@@ -692,6 +795,9 @@ async def _process_direct_message(
                 rssi=rssi,
                 snr=snr,
                 outgoing=effective_outgoing,
+                packet_hash=packet_hash,
+                transport_code=transport_code,
+                region=region,
             )
 
             return {

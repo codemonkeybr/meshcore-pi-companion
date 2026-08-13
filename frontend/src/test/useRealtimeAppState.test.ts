@@ -2,6 +2,12 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useRealtimeAppState } from '../hooks/useRealtimeAppState';
+import {
+  getRawPacketStatsSession,
+  getRawPackets,
+  resetRawPacketStore,
+  seedRawPacketStore,
+} from '../stores/rawPacketStore';
 import type { Channel, Contact, Conversation, HealthStatus, Message, RawPacket } from '../types';
 
 const mocks = vi.hoisted(() => ({
@@ -32,6 +38,18 @@ const publicChannel: Channel = {
   muted: false,
 };
 
+const rawPacketFixture: RawPacket = {
+  id: 1,
+  observation_id: 2,
+  timestamp: 1700000000,
+  data: 'aabb',
+  payload_type: 'GROUP_TEXT',
+  snr: 7.5,
+  rssi: -80,
+  decrypted: false,
+  decrypted_info: null,
+};
+
 const incomingDm: Message = {
   id: 7,
   type: 'PRIV',
@@ -50,7 +68,6 @@ const incomingDm: Message = {
 
 function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppState>[0]> = {}) {
   const setHealth = vi.fn();
-  const setRawPackets = vi.fn();
   const setChannels = vi.fn();
   const setContacts = vi.fn();
 
@@ -59,7 +76,6 @@ function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppS
       prevHealthRef: { current: null as HealthStatus | null },
       setHealth,
       fetchConfig: vi.fn(),
-      setRawPackets,
       reconcileOnReconnect: vi.fn(),
       refreshUnreads: vi.fn(async () => {}),
       setChannels,
@@ -84,7 +100,6 @@ function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppS
     },
     fns: {
       setHealth,
-      setRawPackets,
       setChannels,
       setContacts,
     },
@@ -94,6 +109,7 @@ function createRealtimeArgs(overrides: Partial<Parameters<typeof useRealtimeAppS
 describe('useRealtimeAppState', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetRawPacketStore();
     mocks.api.getChannels.mockResolvedValue([publicChannel]);
   });
 
@@ -125,6 +141,8 @@ describe('useRealtimeAppState', () => {
 
     const { result } = renderHook(() => useRealtimeAppState(args));
 
+    seedRawPacketStore({ packets: [rawPacketFixture] });
+
     act(() => {
       result.current.onReconnect?.();
     });
@@ -134,7 +152,7 @@ describe('useRealtimeAppState', () => {
       expect(args.refreshUnreads).toHaveBeenCalledTimes(1);
       expect(mocks.api.getChannels).toHaveBeenCalledTimes(1);
       expect(args.fetchAllContacts).toHaveBeenCalledTimes(1);
-      expect(fns.setRawPackets).toHaveBeenCalledWith([]);
+      expect(getRawPackets()).toEqual([]);
       expect(fns.setChannels).toHaveBeenCalledWith([publicChannel]);
       expect(fns.setContacts).toHaveBeenCalledWith(contacts);
     });
@@ -168,6 +186,8 @@ describe('useRealtimeAppState', () => {
 
     const { result } = renderHook(() => useRealtimeAppState(args));
 
+    seedRawPacketStore({ packets: [rawPacketFixture] });
+
     act(() => {
       result.current.onReconnect?.();
     });
@@ -177,7 +197,7 @@ describe('useRealtimeAppState', () => {
       expect(args.refreshUnreads).toHaveBeenCalledTimes(1);
       expect(mocks.api.getChannels).toHaveBeenCalledTimes(1);
       expect(args.fetchAllContacts).toHaveBeenCalledTimes(1);
-      expect(fns.setRawPackets).toHaveBeenCalledWith([]);
+      expect(getRawPackets()).toEqual([]);
       expect(fns.setChannels).toHaveBeenCalledWith([publicChannel]);
       expect(fns.setContacts).toHaveBeenCalledWith(contacts);
     });
@@ -285,18 +305,8 @@ describe('useRealtimeAppState', () => {
   });
 
   it('appends raw packets using observation identity dedup', () => {
-    const { args, fns } = createRealtimeArgs();
-    const packet: RawPacket = {
-      id: 1,
-      observation_id: 2,
-      timestamp: 1700000000,
-      data: 'aabb',
-      payload_type: 'GROUP_TEXT',
-      snr: 7.5,
-      rssi: -80,
-      decrypted: false,
-      decrypted_info: null,
-    };
+    const { args } = createRealtimeArgs();
+    const packet = rawPacketFixture;
 
     const { result } = renderHook(() => useRealtimeAppState(args));
 
@@ -304,6 +314,7 @@ describe('useRealtimeAppState', () => {
       result.current.onRawPacket?.(packet);
     });
 
-    expect(fns.setRawPackets).toHaveBeenCalledWith(expect.any(Function));
+    expect(getRawPackets()).toEqual([packet]);
+    expect(getRawPacketStatsSession().totalObservedPackets).toBe(1);
   });
 });

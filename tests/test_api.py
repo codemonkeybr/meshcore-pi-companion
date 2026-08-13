@@ -1005,6 +1005,71 @@ class TestReadStateEndpoints:
         assert result["last_read_ats"][f"channel-{chan_key}"] == 1000
         assert result["last_read_ats"][f"contact-{contact_key}"] == 1000
 
+        # The oldest unread message per conversation, used by the client to place
+        # the unread divider without paging back through history.
+        first_chan = await MessageRepository.get_by_content(
+            msg_type="CHAN",
+            conversation_key=chan_key,
+            text="Bob: hello",
+            sender_timestamp=1001,
+        )
+        assert result["first_unread_ids"][f"channel-{chan_key}"] == first_chan.id
+        first_dm = await MessageRepository.get_by_content(
+            msg_type="PRIV",
+            conversation_key=contact_key,
+            text="hi @[TeStUsEr] there",
+            sender_timestamp=1005,
+        )
+        assert result["first_unread_ids"][f"contact-{contact_key}"] == first_dm.id
+
+    @pytest.mark.asyncio
+    async def test_first_unread_id_breaks_same_second_ties_by_id(self, test_db):
+        """Sender timestamps are whole seconds, so the oldest unread second is
+        routinely shared. The boundary must be the first of those messages, not
+        an arbitrary one."""
+        chan_key = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2"
+        await ChannelRepository.upsert(key=chan_key, name="Busy")
+        await ChannelRepository.update_last_read_at(chan_key, 1000)
+
+        # Three unread messages all landing in the same second.
+        ids = []
+        for text in ("Bob: first", "Bob: second", "Bob: third"):
+            ids.append(
+                await MessageRepository.create(
+                    msg_type="CHAN",
+                    text=text,
+                    received_at=1001,
+                    conversation_key=chan_key,
+                    sender_timestamp=1001,
+                )
+            )
+
+        result = await MessageRepository.get_unread_counts(None)
+
+        assert result["counts"][f"channel-{chan_key}"] == 3
+        assert result["first_unread_ids"][f"channel-{chan_key}"] == min(ids)
+
+    @pytest.mark.asyncio
+    async def test_first_unread_id_ignores_muted_and_outgoing(self, test_db):
+        """Muted channels are excluded from unread counts, so they must not
+        report a boundary either."""
+        chan_key = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC3"
+        await ChannelRepository.upsert(key=chan_key, name="Muted")
+        await ChannelRepository.update_last_read_at(chan_key, 1000)
+        await ChannelRepository.set_muted(chan_key, True)
+        await MessageRepository.create(
+            msg_type="CHAN",
+            text="Bob: unread but muted",
+            received_at=1001,
+            conversation_key=chan_key,
+            sender_timestamp=1001,
+        )
+
+        result = await MessageRepository.get_unread_counts(None)
+
+        assert f"channel-{chan_key}" not in result["counts"]
+        assert result["first_unread_ids"].get(f"channel-{chan_key}") is None
+
     @pytest.mark.asyncio
     async def test_get_unreads_no_name_skips_mentions(self, test_db):
         """Unreads without a radio name returns counts but no mention flags."""

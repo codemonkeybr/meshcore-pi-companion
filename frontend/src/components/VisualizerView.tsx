@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
-import type { Contact, RawPacket, RadioConfig } from '../types';
+import type { Channel, Contact, RawPacket, RadioConfig } from '../types';
 import { PacketVisualizer3D } from './PacketVisualizer3D';
 import { RawPacketList } from './RawPacketList';
+import { RawPacketInspectorDialog } from './RawPacketDetailModal';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { cn } from '@/lib/utils';
 import { getVisualizerSettings, saveVisualizerSettings } from '../utils/visualizerSettings';
+import { useRawPackets } from '../stores/rawPacketStore';
 
 interface VisualizerViewProps {
-  packets: RawPacket[];
   contacts: Contact[];
+  channels: Channel[];
   config: RadioConfig | null;
 }
 
-export function VisualizerView({ packets, contacts, config }: VisualizerViewProps) {
+export function VisualizerView({ contacts, channels, config }: VisualizerViewProps) {
+  const packets = useRawPackets();
   const [fullScreen, setFullScreen] = useState(() => getVisualizerSettings().hidePacketFeed);
   const [paneFullScreen, setPaneFullScreen] = useState(false);
+  const [selectedPacket, setSelectedPacket] = useState<RawPacket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Persist packet feed visibility to localStorage
@@ -71,7 +75,11 @@ export function VisualizerView({ packets, contacts, config }: VisualizerViewProp
             <PacketVisualizer3D packets={packets} contacts={contacts} config={config} />
           </TabsContent>
           <TabsContent value="packets" className="flex-1 m-0 overflow-hidden">
-            <RawPacketList packets={packets} />
+            <RawPacketList
+              packets={packets}
+              channels={channels}
+              onPacketClick={setSelectedPacket}
+            />
           </TabsContent>
         </Tabs>
       </div>
@@ -106,11 +114,31 @@ export function VisualizerView({ packets, contacts, config }: VisualizerViewProp
               Packet Feed
             </div>
             <div className="flex-1 overflow-hidden">
-              <RawPacketList packets={packets} />
+              <RawPacketList
+                packets={packets}
+                channels={channels}
+                onPacketClick={setSelectedPacket}
+              />
             </div>
           </div>
         </div>
       </div>
+
+      {/* While natively fullscreened, portal into the fullscreen element so the
+          dialog stays visible; otherwise keep the default document.body target. */}
+      <RawPacketInspectorDialog
+        open={selectedPacket !== null}
+        onOpenChange={(isOpen) => !isOpen && setSelectedPacket(null)}
+        channels={channels}
+        container={paneFullScreen ? containerRef.current : undefined}
+        source={
+          selectedPacket
+            ? { kind: 'packet', packet: selectedPacket }
+            : { kind: 'loading', message: 'Loading packet...' }
+        }
+        title="Packet Details"
+        description="Detailed byte and field breakdown for the selected raw packet."
+      />
     </div>
   );
 }

@@ -41,9 +41,15 @@ frontend/src/
 ├── themes.css              # Color theme definitions
 ├── contexts/
 │   ├── DistanceUnitContext.tsx # Browser-local distance-unit context/provider
+│   ├── PathHopWidthContext.tsx # Browser-local path hop-width display preference
+│   ├── RichPayloadContext.tsx  # Browser-local rich MeshCore payload rendering preference
 │   └── PushSubscriptionContext.tsx # Push subscription state context/provider
 ├── lib/
 │   └── utils.ts            # cn() — clsx + tailwind-merge helper
+├── networkGraph/
+│   └── packetNetworkGraph.ts # Packet→network graph construction shared by visualizer surfaces
+├── stores/
+│   └── rawPacketStore.ts   # Overheard packet stream + session stats, outside React
 ├── hooks/
 │   ├── index.ts            # Central re-export of all hooks
 │   ├── useConversationActions.ts   # Send/resend/trace/block conversation actions
@@ -60,7 +66,7 @@ frontend/src/
 │   ├── useBrowserNotifications.ts  # Per-conversation browser notification preferences + dispatch
 │   ├── usePushSubscription.ts      # Web Push subscription lifecycle, per-conversation filters
 │   ├── useFaviconBadge.ts          # Browser tab unread badge state
-│   ├── useRawPacketStatsSession.ts # Session-scoped packet-feed stats history
+│   ├── useEntranceSettled.ts       # Defers entrance animation work until layout settles
 │   └── useRememberedServerPassword.ts # Browser-local repeater/room password persistence
 ├── components/
 │   ├── AppShell.tsx            # App-shell layout: status, sidebar, search/settings panes, cracker, modals, security warning
@@ -82,6 +88,10 @@ frontend/src/
 │   ├── rawPacketIdentity.ts    # observation_id vs id dedup helpers
 │   ├── rawPacketStats.ts       # Session packet stats windows, rankings, and coverage helpers
 │   ├── regionScope.ts          # Regional flood-scope label/normalization helpers
+│   ├── meshcoreOpenPayloads.ts # Rich MeshCore Open payload detection/rendering helpers
+│   ├── textReplace.ts          # Shared message text substitution helpers
+│   ├── pathHopWidthPreference.ts # LocalStorage persistence for hop-width display toggle
+│   ├── richPayloadPreference.ts  # LocalStorage persistence for rich payload rendering toggle
 │   ├── visualizerUtils.ts      # 3D visualizer node types, colors, particles
 │   ├── visualizerSettings.ts   # LocalStorage persistence for visualizer options
 │   ├── a11y.ts                 # Keyboard accessibility helper
@@ -143,7 +153,7 @@ frontend/src/
 │   │   ├── SettingsFanoutSection.tsx     # Fanout integrations: MQTT, bots, config CRUD
 │   │   ├── SettingsRadioAppSection.tsx    # Radio-App Management: tracked telemetry, contact management, blocked lists
 │   │   ├── SettingsDatabaseSection.tsx   # Database: DB size, storage cleanup, auto-decrypt
-│   │   ├── SettingsStatisticsSection.tsx # Read-only mesh network stats
+│   │   ├── SettingsStatisticsSection.tsx # Read-only mesh network stats (incl. region-scope adoption)
 │   │   ├── SettingsAboutSection.tsx     # Version, author, license, links
 │   │   ├── ThemeSelector.tsx           # Color theme picker
 │   │   └── BulkDeleteContactsModal.tsx # Bulk contact deletion dialog
@@ -154,6 +164,7 @@ frontend/src/
 │   │   ├── RepeaterAclPane.tsx          # Permission table
 │   │   ├── RepeaterNodeInfoPane.tsx      # Repeater name, coords, clock drift
 │   │   ├── RepeaterRadioSettingsPane.tsx # Radio config + advert intervals
+│   │   ├── RepeaterRegionsPane.tsx      # Region hierarchy / flood-allowed region names
 │   │   ├── RepeaterLppTelemetryPane.tsx # CayenneLPP sensor data
 │   │   ├── RepeaterOwnerInfoPane.tsx    # Owner info + guest password
 │   │   ├── RepeaterTelemetryHistoryPane.tsx # Historical telemetry chart/table
@@ -243,11 +254,15 @@ High-level state is delegated to hooks:
 - `useConversationNavigation`: search target, conversation selection reset, and info-pane state
 - `useConversationActions`: send/resend/trace/path-discovery/block handlers and channel override updates
 - `useConversationMessages`: conversation switch loading, embedded conversation-scoped cache, jump-target loading, pagination, dedup/update helpers, reconnect reconciliation, and pending ACK buffering
-- `useUnreadCounts`: unread counters, mention tracking, recent-sort timestamps, and server `last_read_ats` boundaries
+- `useUnreadCounts`: unread counters, mention tracking, recent-sort timestamps, server `last_read_ats`, and `first_unread_ids` (the unread-divider anchor)
 - `useRealtimeAppState`: typed WS event application, reconnect recovery, cache/unread coordination
 - `useRepeaterDashboard`: repeater dashboard state (login, pane data/retries, console, actions)
 
 `App.tsx` intentionally still does the final `AppShell` prop assembly. That composition layer is considered acceptable here because it keeps the shell contract visible in one place and avoids a prop-bundling hook with little original logic.
+
+**The overheard packet stream is the one piece of app state that deliberately does not live in React.** It is held in `stores/rawPacketStore.ts` and read through `useSyncExternalStore`, because it updates several times a second with every packet the node hears — far more often than anything else — and only four surfaces consume it (`MapView`, `VisualizerView`, `RawPacketFeedView`, `CrackerPanel`). Held in `App` state it re-rendered the entire tree, including `MessageList`, which is neither memoized nor cheap on a long history.
+
+That gives the store a load-bearing invariant: **no ancestor of `MessageList` may call `useRawPackets()` / `useRawPacketStatsSession()`.** Nothing about the prop signatures enforces it — an innocuous-looking subscription added to `App`, `AppShell`, or `ConversationPane` silently restores the original slowdown. `src/test/appPacketIsolation.test.tsx` pins it by mounting the real ancestor chain and asserting `MessageList` does not re-render when packets arrive; it carries a negative control so the assertion cannot pass vacuously. Reach for packets in a new view by subscribing in that view, never by lifting them up.
 
 `ConversationPane.tsx` owns the main active-conversation surface branching:
 - empty state
@@ -291,6 +306,16 @@ High-level state is delegated to hooks:
   - `observation_id`: realtime per-arrival identity (session fidelity)
 - Packet feed/visualizer render keys and dedup logic should use `observation_id` (fallback to `id` only for older payloads).
 - The dedicated raw packet feed view now includes a frontend-only stats drawer. It tracks a separate lightweight per-observation session history for charts/rankings, so its windows are not limited by the visible packet list cap. Coverage messaging should stay honest when detailed in-memory stats history has been trimmed or the selected window predates the current browser session.
+
+### Virtualization (`MessageList`)
+
+The message list is windowed with `@tanstack/react-virtual`; only the visible rows are mounted, so render cost no longer scales with conversation length. Three details are load-bearing and easy to break:
+
+- **`scrollMargin`** is measured from the virtual spacer's offset within the scroll container, because the container carries `p-4` and can show an "older messages" banner above the rows. Without it every `scrollToIndex` with `start`/`center` lands 16–48px high, and the error shifts as the banner appears during pagination. Rows must subtract it back out in their `translateY`.
+- **The bottom-pin is deferred and re-asserted** across a bounded run of frames rather than performed once, because row heights start as estimates and a single `scrollToIndex` gets undone as they converge (completely so under StrictMode's double-invoked effects). It is cancelled by a pending `targetMessageId` and by any deliberate scroll gesture.
+- **`getItemKey` returns a string sentinel** for indices past the end of a shrunken list; a bare index would collide with the numeric message-id keyspace and poison the measurement cache.
+
+jsdom has no layout engine, so none of this is observable from the vitest suite — it needs a real browser.
 
 ### Radio settings behavior
 
@@ -361,6 +386,7 @@ Distance/validation helpers used by path + map UI.
 - `advert_interval`
 - `last_advert_time`
 - `flood_scope`
+- `known_regions`
 - `blocked_keys`, `blocked_names`, `discovery_blocked_types`
 - `tracked_telemetry_repeaters`, `tracked_telemetry_contacts`
 - `auto_resend_channel`
@@ -374,7 +400,11 @@ Note: MQTT, bot, and community MQTT settings were migrated to the `fanout_config
 
 `RawPacket.decrypted_info` includes `channel_key` and `contact_key` for MQTT topic routing.
 
-`UnreadCounts` includes `counts`, `mentions`, `last_message_times`, and `last_read_ats`. The unread-boundary/jump-to-unread behavior uses the server-provided `last_read_ats` map keyed by `getStateKey(...)`.
+`UnreadCounts` includes `counts`, `mentions`, `last_message_times`, `last_read_ats`, and `first_unread_ids`.
+
+The unread divider is anchored to `first_unread_ids` — the id of the oldest unread message per conversation — not to a timestamp. `MessageList` locates it with `findIndex(msg.id === unreadMarkerMessageId)`, which returns `-1` when that message is not in the loaded window; that is the signal to offer "Jump to unread" (routed through the `targetMessageId`/`getMessagesAround` path) rather than render a divider. Locating by timestamp instead would return index 0 whenever the boundary sits further back than the loaded window, silently placing the divider on the wrong message.
+
+Counts are incremented live over WebSocket while `first_unread_ids` only arrives with a full `/read-state/unreads` fetch, so `useUnreadCounts.incrementUnread` seeds the boundary itself on the read→unread transition. A channel going unread while the app is open would otherwise have a count but no boundary, and no divider at all.
 
 ## Contact Info Pane
 
@@ -411,9 +441,9 @@ State: `useConversationNavigation` controls open/close via `infoPaneChannelKey`.
 
 For repeater contacts (`type=2`), `ConversationPane.tsx` renders `RepeaterDashboard` instead of the normal chat UI (ChatHeader + MessageList + MessageInput).
 
-**Login**: `RepeaterLogin` component — password or guest login via `POST /api/contacts/{key}/repeater/login`.
+**Login**: `RepeaterLogin` component — password or guest login via `POST /api/contacts/{key}/repeater/login`. The frontend sends exactly one request; the backend internally escalates a timed-out login to one flood retry (see `app/AGENTS.md` § "Server login route escalation"), so a single call may take up to two response windows. Do not add a client-side login retry loop on top — a `LOGIN_FAILED` result means the password was refused, not that the route needs another attempt.
 
-**Dashboard panes** (after login): Telemetry, Node Info, Neighbors, ACL, Radio Settings, Advert Intervals, Owner Info — each fetched via granular `POST /api/contacts/{key}/repeater/{pane}` endpoints. Panes retry up to 3 times client-side. `Neighbors` depends on the smaller `node-info` fetch for repeater GPS, not the heavier radio-settings batch. "Load All" fetches all panes serially (parallel would queue behind the radio lock).
+**Dashboard panes** (after login): Telemetry, Node Info, Neighbors, ACL, Radio Settings, Regions, Advert Intervals, Owner Info — each fetched via granular `POST /api/contacts/{key}/repeater/{pane}` endpoints. The Regions pane prefers the admin CLI hierarchy and falls back to the guest anon flood-allowed names, so its payload carries a `source` of `cli` or `anon`. Panes retry up to 3 times client-side. `Neighbors` depends on the smaller `node-info` fetch for repeater GPS, not the heavier radio-settings batch. "Load All" fetches all panes serially (parallel would queue behind the radio lock).
 
 **Actions pane**: Send Advert, Sync Clock, Reboot — all send CLI commands via `POST /api/contacts/{key}/command`.
 
@@ -434,7 +464,7 @@ The `SearchView` component (`components/SearchView.tsx`) provides full-text sear
 - **State**: `targetMessageId` is shared between `useConversationNavigation` and `useConversationMessages`. When a search result is clicked, `handleNavigateToMessage` sets the target ID and switches to the target conversation.
 - **Same-conversation clear**: when `targetMessageId` is cleared after the target is reached, the hook preserves the around-loaded mid-history view instead of replacing it with the latest page.
 - **Persistence**: `SearchView` stays mounted after first open using the same `hidden` class pattern as `CrackerPanel`, preserving search state when navigating to results.
-- **Jump-to-message**: `useConversationMessages` handles optional `targetMessageId` by calling `api.getMessagesAround()` instead of the normal latest-page fetch, loading context around the target message. `MessageList` scrolls to the target via `data-message-id` attribute and applies a `message-highlight` CSS animation.
+- **Jump-to-message**: `useConversationMessages` handles optional `targetMessageId` by calling `api.getMessagesAround()` instead of the normal latest-page fetch, loading context around the target message. `MessageList` resolves the target to an index and calls `virtualizer.scrollToIndex(...)`, then applies a `message-highlight` CSS animation. A pending target suppresses the bottom-pin (see Virtualization below), since the around-load clears the list first and would otherwise be yanked to the newest message.
 - **Bidirectional pagination**: After jumping mid-history, `hasNewerMessages` enables forward pagination via `fetchNewerMessages`. The scroll-to-bottom button calls `jumpToBottom` (re-fetches latest page) instead of just scrolling.
 - **WS message suppression**: When `hasNewerMessages` is true, incoming WS messages for the active conversation are not added to the message list (the user is viewing historical context, not the latest page).
 
@@ -467,6 +497,15 @@ Key conventions documented in the reference:
 - **Buttons** use the shadcn `<Button>` component. Semantic color overrides (danger, warning, success) use `variant="outline"` with `className="border-{color}/50 text-{color} hover:bg-{color}/10"`.
 - **Badges/tags** use `text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded` with `bg-muted` (neutral) or `bg-primary/10` (active).
 - **Clickable text** (copy-to-clipboard, navigational links) uses `role="button" tabIndex={0}` with `cursor-pointer hover:text-primary transition-colors`.
+
+### Region-scope adoption panel
+
+`SettingsStatisticsSection.tsx` renders `stats.region_scope_24h` via `RegionScopeStatsPanel`. Two presentation rules exist because regional adoption is currently very sparse, and both are deliberate:
+
+- **Fractions, not bare percentages.** "3 of 117" carries the sample size that "2.6%" hides.
+- **The traffic percentage is withheld** when the scoped count is at or below `false_positive_floor` (corrupt-capture noise) or when the share would round to `0.0%`. The floor caveat is always shown alongside a non-zero scoped count. The sender figure is never suppressed — it requires successful decryption and so carries no noise.
+
+Traffic and sender figures use different denominators (all channels vs. decryptable-only) and are not expected to match.
 
 ## Security Posture (intentional)
 
@@ -506,9 +545,9 @@ PYTHONPATH=. uv run pytest tests/ -v
 
 This is intentional. In the sidebar, unread direct messages for actual contact conversations are treated as mention-equivalent for badge styling. That means both the Contacts section header and contact unread badges themselves use the highlighted mention-style colors for unread DMs, including when those contacts appear in Favorites. Repeaters do not inherit this rule, and channel badges still use mention styling only for real `@[name]` mentions.
 
-### RawPacketList always scrolls to bottom
+### RawPacketList autoscroll
 
-`RawPacketList` unconditionally scrolls to the latest packet on every update. This is intentional — the packet feed is a live status display, not an interactive log meant for lingering or long-term analysis. Users watching it want to see the newest packet, not hold a scroll position.
+`RawPacketList` sticks to the latest packet on every update when its `autoScroll` prop is true (the default). `RawPacketFeedView` exposes an "Autoscroll" checkbox next to the type filters (default ticked, session-only — intentionally not persisted) so users can pause scrolling to correlate older packets. Toggling it back on jumps to the bottom immediately (`autoScroll` is an effect dependency).
 
 ## Editing Checklist
 

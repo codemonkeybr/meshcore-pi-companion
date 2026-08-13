@@ -91,11 +91,26 @@ describe('RawPacketDetailModal', () => {
     expect(pathRun.className).toBe(idleClassName);
   });
 
-  it('shows scope card with transport codes for scoped packets', () => {
+  it('shows scope card with transport codes for scoped packets without a resolved region', () => {
     render(<RawPacketDetailModal packet={SCOPED_PACKET} channels={[]} onClose={vi.fn()} />);
 
     expect(screen.getByText('Scope')).toBeInTheDocument();
     expect(screen.getByText('Regional')).toBeInTheDocument();
+    expect(screen.getByText('0x1234, 0x5678 · unknown region')).toBeInTheDocument();
+  });
+
+  it('shows the resolved region name in the scope card when the backend matched one', () => {
+    render(
+      <RawPacketDetailModal
+        packet={{ ...SCOPED_PACKET, region: 'nl-gr', transport_code: 0x1234 }}
+        channels={[]}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Scope')).toBeInTheDocument();
+    expect(screen.getByText('nl-gr')).toBeInTheDocument();
+    // Raw codes remain visible as the secondary detail.
     expect(screen.getByText('0x1234, 0x5678')).toBeInTheDocument();
   });
 

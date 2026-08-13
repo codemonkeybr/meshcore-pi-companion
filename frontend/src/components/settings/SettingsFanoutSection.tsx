@@ -89,10 +89,20 @@ const DEFAULT_BOT_CODE = `def bot(**kwargs) -> str | list[str] | None:
             path: Hex-encoded routing path (may be None)
             is_outgoing: True if this is our own outgoing message
             path_bytes_per_hop: Bytes per hop in path (1, 2, or 3) when known
+            scoped: True if the message carried a regional flood scope,
+                False for plain/unscoped flood. Check this first. Set for
+                scoped DMs too.
+            region: Only meaningful when scoped is True (else always None).
+                When scoped, it's the decoded region name, or None if the
+                scope matched none of your known_regions. region alone can't
+                distinguish unscoped from unrecognized — use scoped.
 
     Returns:
         None for no reply, a string for a single reply,
-        or a list of strings to send multiple messages in order
+        a list of strings to send multiple messages in order, or a dict
+        {"region": <name or None>, "message": <str or list[str]>} to scope a
+        channel reply to a region for that send only (None/"" = unscoped flood;
+        region is ignored for DM replies).
     """
     sender_name = kwargs.get("sender_name")
     message_text = kwargs.get("message_text", "")
@@ -103,6 +113,15 @@ const DEFAULT_BOT_CODE = `def bot(**kwargs) -> str | list[str] | None:
     # Don't reply to our own outgoing messages
     if is_outgoing:
         return None
+    
+    # If you want to make use of persistant data between calls to this function, 
+    # you can put that data into the global _bot_globals dictionary, e.g.:
+    #
+    # bot_globals = globals()["_bot_globals"] 
+    # if not "known_sender_names" in bot_globals:
+    #     bot_globals["known_sender_names"] = set()
+    #
+    # bot_globals["known_sender_names"].add(sender_name)
 
     # Example: Only respond in #bot channel to "!pling" command
     if channel_name == "#bot" and "!pling" in message_text.lower():
@@ -287,6 +306,7 @@ const CREATE_INTEGRATION_DEFINITIONS: readonly CreateIntegrationDefinition[] = [
       config: {
         urls: '',
         preserve_identity: true,
+        include_outgoing: false,
         markdown_format: true,
         body_format_dm: '**DM:** {sender_name}: {text} **via:** [{hops_backticked}]',
         body_format_channel:
@@ -1169,14 +1189,22 @@ function MqttHaConfigEditor({
 
           <div>
             <span className="font-medium text-foreground">Per tracked contact</span> &mdash; updates
-            passively when advertisements with GPS are heard. Shown for one contact; a tracker is
-            created for each selected contact.
+            passively when advertisements with GPS are heard, and from any GPS reading in the
+            contact&apos;s CayenneLPP telemetry. Shown for one contact; a tracker is created for
+            each selected contact.
             <ul className="mt-0.5 ml-4 list-disc space-y-0.5">
               <li>
                 <code className="text-[0.6875rem]">
                   {`device_tracker.meshcore_${exampleContactNodeId}`}
                 </code>{' '}
-                &mdash; latitude/longitude
+                &mdash; latitude/longitude (plus altitude when telemetry provides it)
+              </li>
+              <li>
+                <code className="text-[0.6875rem]">
+                  {`sensor.meshcore_${exampleContactNodeId}_lpp_temperature_ch1`}
+                </code>
+                , etc. &mdash; CayenneLPP sensors (when the contact is tracked for telemetry; GPS
+                goes to the tracker above)
               </li>
             </ul>
           </div>
@@ -2586,6 +2614,23 @@ function AppriseConfigEditor({
           <p className="text-[0.8125rem] text-muted-foreground">
             When enabled, Discord webhooks will use their configured name/avatar instead of
             overriding with MeshCore sender info.
+          </p>
+        </div>
+      </label>
+
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={config.include_outgoing === true}
+          onChange={(e) => onChange({ ...config, include_outgoing: e.target.checked })}
+          className="h-4 w-4 rounded border-border"
+        />
+        <div>
+          <span className="text-sm">Forward RemoteTerm-sent messages</span>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Include DMs and channel messages sent by this RemoteTerm instance, including manual
+            sends and bot replies. Outgoing messages carry no routing path or signal data, so
+            path-related format fields render as direct and RSSI/SNR are empty.
           </p>
         </div>
       </label>

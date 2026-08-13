@@ -24,6 +24,10 @@ import {
   setSavedDistanceUnit,
 } from '../../utils/distanceUnits';
 import { useDistanceUnit } from '../../contexts/DistanceUnitContext';
+import { useRichPayloads } from '../../contexts/RichPayloadContext';
+import { setSavedRenderRichPayloads } from '../../utils/richPayloadPreference';
+import { usePathHopWidth } from '../../contexts/PathHopWidthContext';
+import { setSavedShowPathHopWidth } from '../../utils/pathHopWidthPreference';
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_SLIDER_STEP,
@@ -230,6 +234,8 @@ export function SettingsLocalSection({
   className?: string;
 }) {
   const { distanceUnit, setDistanceUnit } = useDistanceUnit();
+  const { renderRichPayloads, setRenderRichPayloads } = useRichPayloads();
+  const { showPathHopWidth, setShowPathHopWidth } = usePathHopWidth();
   const [reopenLastConversation, setReopenLastConversation] = useState(
     getReopenLastConversationEnabled
   );
@@ -446,6 +452,54 @@ export function SettingsLocalSection({
               <p className="text-[0.8125rem] text-muted-foreground">
                 Flash the connection status dot in color as packets arrive: blue for channel, purple
                 for DM, cyan for advert, dark green for other.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-md border border-border/60 p-3">
+            <Checkbox
+              id="render-rich-payloads"
+              checked={renderRichPayloads}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                setRenderRichPayloads(v);
+                setSavedRenderRichPayloads(v);
+              }}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label htmlFor="render-rich-payloads">
+                Render MeshCore Open GIFs &amp; Reactions
+              </Label>
+              <p className="text-[0.8125rem] text-muted-foreground">
+                MeshCore Open clients send GIFs and emoji reactions as encoded text (e.g.{' '}
+                <code className="text-[0.75rem]">g:abc123</code> or{' '}
+                <code className="text-[0.75rem]">r:1a2b:05</code>). When enabled, these render as
+                the GIF image or reaction emoji instead of the raw text. Reactions show generically
+                (the emoji is not tied to a specific message). GIFs load from media.giphy.com, which
+                reaches outside your local network and exposes your IP to Giphy — so this is off by
+                default.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-md border border-border/60 p-3">
+            <Checkbox
+              id="show-path-hop-width"
+              checked={showPathHopWidth}
+              onCheckedChange={(checked) => {
+                const v = checked === true;
+                setShowPathHopWidth(v);
+                setSavedShowPathHopWidth(v);
+              }}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label htmlFor="show-path-hop-width">Show Path Hop Width</Label>
+              <p className="text-[0.8125rem] text-muted-foreground">
+                Append the per-hop identifier width to the hop-count badge on received messages —
+                e.g. <code className="text-[0.75rem]">(2 · 2B)</code> for a 2-hop path with 2-byte
+                hops. Direct (0-hop) messages show no width. Off by default.
               </p>
             </div>
           </div>

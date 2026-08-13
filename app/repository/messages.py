@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,6 +65,8 @@ class MessageRepository:
         outgoing: bool = False,
         sender_name: str | None = None,
         sender_key: str | None = None,
+        transport_code: int | None = None,
+        region: str | None = None,
     ) -> int | None:
         """Create a message, returning the ID or None if duplicate.
 
@@ -94,8 +97,8 @@ class MessageRepository:
                 """
                 INSERT OR IGNORE INTO messages (type, conversation_key, text, sender_timestamp,
                                                 received_at, paths, txt_type, signature, outgoing,
-                                                sender_name, sender_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                sender_name, sender_key, transport_code, region)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_type,
@@ -109,6 +112,8 @@ class MessageRepository:
                     outgoing,
                     sender_name,
                     normalized_sender_key,
+                    transport_code,
+                    region,
                 ),
             ) as cursor:
                 rowcount = cursor.rowcount
@@ -357,10 +362,16 @@ class MessageRepository:
     def _row_to_message(row: Any) -> Message:
         """Convert a database row to a Message model."""
         packet_id = None
+        transport_code = None
+        region = None
         if hasattr(row, "keys"):
             row_keys = row.keys()
             if "packet_id" in row_keys:
                 packet_id = row["packet_id"]
+            if "transport_code" in row_keys:
+                transport_code = row["transport_code"]
+            if "region" in row_keys:
+                region = row["region"]
 
         return Message(
             id=row["id"],
@@ -377,6 +388,8 @@ class MessageRepository:
             acked=row["acked"],
             sender_name=row["sender_name"],
             packet_id=packet_id,
+            transport_code=transport_code,
+            region=region,
         )
 
     @staticmethod
@@ -621,6 +634,50 @@ class MessageRepository:
                 pass
 
     @staticmethod
+    async def stream_chan_messages_with_raw(
+        batch_size: int = 500,
+    ) -> "AsyncIterator[tuple[int, bytes]]":
+        """Yield (message_id, raw_packet_bytes) for CHAN messages that still have a
+        retained raw packet, in ascending id batches.
+
+        Used by the region backfill: region is a property of the on-air payload, so
+        any retained raw packet for the message yields the same transport code.
+        """
+        last_id = 0
+        while True:
+            async with db.readonly() as conn:
+                async with conn.execute(
+                    """
+                    SELECT m.id AS mid, rp.data AS data
+                    FROM messages m
+                    JOIN raw_packets rp ON rp.message_id = m.id
+                    WHERE m.type = 'CHAN' AND m.id > ?
+                    GROUP BY m.id
+                    ORDER BY m.id ASC
+                    LIMIT ?
+                    """,
+                    (last_id, batch_size),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield row["mid"], bytes(row["data"])
+                last_id = row["mid"]
+
+    @staticmethod
+    async def set_transport_scope(
+        message_id: int, transport_code: int | None, region: str | None
+    ) -> None:
+        """Set the resolved transport code / region on a stored message."""
+        async with db.tx() as conn:
+            async with conn.execute(
+                "UPDATE messages SET transport_code = ?, region = ? WHERE id = ?",
+                (transport_code, region, message_id),
+            ):
+                pass
+
+    @staticmethod
     async def get_by_content(
         msg_type: str,
         conversation_key: str,
@@ -663,12 +720,15 @@ class MessageRepository:
             blocked_names: Display names whose messages should be excluded from counts.
 
         Returns:
-            Dict with 'counts', 'mentions', 'last_message_times', and 'last_read_ats' keys.
+            Dict with 'counts', 'mentions', 'last_message_times', 'last_read_ats',
+            and 'first_unread_ids' keys.
         """
         counts: dict[str, int] = {}
         mention_flags: dict[str, bool] = {}
         last_message_times: dict[str, int] = {}
         last_read_ats: dict[str, int | None] = {}
+        # id of the oldest unread message per conversation.
+        first_unread_ids: dict[str, int | None] = {}
 
         mention_token = f"@[{name}]" if name else None
 
@@ -759,6 +819,40 @@ class MessageRepository:
             for row in rows:
                 last_read_ats[f"contact-{row['public_key']}"] = row["last_read_at"]
 
+            # Oldest unread message per conversation. ROW_NUMBER rather than
+            # MIN(received_at) with a bare id: sender timestamps are whole seconds
+            # (a protocol constraint, see AGENTS.md), so several unread messages
+            # routinely share the oldest second and SQLite's bare-column rule only
+            # promises *a* row holding the minimum. Ordering by (received_at, id)
+            # picks the same message the client's own ordering does.
+            async with conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT m.type, m.conversation_key, m.id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY m.type, m.conversation_key
+                               ORDER BY m.received_at ASC, m.id ASC
+                           ) AS rn
+                    FROM messages m
+                    LEFT JOIN channels c ON m.type = 'CHAN' AND m.conversation_key = c.key
+                    LEFT JOIN contacts ct ON m.type = 'PRIV' AND m.conversation_key = ct.public_key
+                    WHERE m.outgoing = 0
+                      AND m.received_at > COALESCE(
+                              CASE WHEN m.type = 'CHAN' THEN c.last_read_at ELSE ct.last_read_at END,
+                              0
+                          )
+                      AND (m.type <> 'CHAN' OR COALESCE(c.muted, 0) = 0)
+                      {blocked_sql}
+                )
+                SELECT type, conversation_key, id FROM ranked WHERE rn = 1
+                """,
+                blocked_params,
+            ) as cursor:
+                rows = await cursor.fetchall()
+            for row in rows:
+                prefix = "channel" if row["type"] == "CHAN" else "contact"
+                first_unread_ids[f"{prefix}-{row['conversation_key']}"] = row["id"]
+
             async with conn.execute(
                 f"""
                 SELECT type, conversation_key, MAX(received_at) as last_message_time
@@ -784,6 +878,7 @@ class MessageRepository:
             "mentions": mention_flags,
             "last_message_times": last_message_times,
             "last_read_ats": last_read_ats,
+            "first_unread_ids": first_unread_ids,
         }
 
     @staticmethod

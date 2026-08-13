@@ -43,7 +43,7 @@ describe('CrackerPanel', () => {
   });
 
   it('allows clearing max length while editing', async () => {
-    render(<CrackerPanel packets={[]} channels={[]} onChannelCreate={vi.fn()} visible={false} />);
+    render(<CrackerPanel channels={[]} onChannelCreate={vi.fn()} visible={false} />);
 
     await waitFor(() => {
       expect(mockedApi.getUndecryptedPacketCount).toHaveBeenCalled();

@@ -26,6 +26,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioDiscoveryTarget,
+  RadioRegionDiscoveryResponse,
   RadioStatsSnapshot,
 } from '../../types';
 
@@ -152,6 +153,9 @@ export function SettingsRadioSection({
   meshDiscovery,
   meshDiscoveryLoadingTarget,
   onDiscoverMesh,
+  regionDiscovery,
+  regionDiscoveryLoading,
+  onDiscoverRegions,
   onClose,
   className,
 }: {
@@ -170,6 +174,9 @@ export function SettingsRadioSection({
   meshDiscovery: RadioDiscoveryResponse | null;
   meshDiscoveryLoadingTarget: RadioDiscoveryTarget | null;
   onDiscoverMesh: (target: RadioDiscoveryTarget) => Promise<void>;
+  regionDiscovery: RadioRegionDiscoveryResponse | null;
+  regionDiscoveryLoading: boolean;
+  onDiscoverRegions: (publicKeys?: string[]) => Promise<void>;
   onClose: () => void;
   className?: string;
 }) {
@@ -202,6 +209,7 @@ export function SettingsRadioSection({
   // Flood & advert control state
   const [advertIntervalHours, setAdvertIntervalHours] = useState('0');
   const [floodScope, setFloodScope] = useState('');
+  const [knownRegions, setKnownRegions] = useState('');
   const [maxRadioContacts, setMaxRadioContacts] = useState('');
   const [floodBusy, setFloodBusy] = useState(false);
   const [floodError, setFloodError] = useState<string | null>(null);
@@ -232,6 +240,7 @@ export function SettingsRadioSection({
   useEffect(() => {
     setAdvertIntervalHours(String(Math.round(appSettings.advert_interval / 3600)));
     setFloodScope(stripRegionScopePrefix(appSettings.flood_scope));
+    setKnownRegions((appSettings.known_regions ?? []).join('\n'));
     setMaxRadioContacts(String(appSettings.max_radio_contacts));
   }, [appSettings]);
 
@@ -417,6 +426,14 @@ export function SettingsRadioSection({
       if (floodScope !== stripRegionScopePrefix(appSettings.flood_scope)) {
         update.flood_scope = floodScope;
       }
+      // Known regions: one per line (commas also accepted), trimmed, blanks dropped.
+      const parsedRegions = knownRegions
+        .split(/[\n,]/)
+        .map((r) => r.trim())
+        .filter((r) => r.length > 0);
+      if (JSON.stringify(parsedRegions) !== JSON.stringify(appSettings.known_regions ?? [])) {
+        update.known_regions = parsedRegions;
+      }
       const newMaxRadioContacts = parseInt(maxRadioContacts, 10);
       if (!isNaN(newMaxRadioContacts) && newMaxRadioContacts !== appSettings.max_radio_contacts) {
         update.max_radio_contacts = newMaxRadioContacts;
@@ -469,6 +486,34 @@ export function SettingsRadioSection({
     } catch (err) {
       setDiscoverError(err instanceof Error ? err.message : 'Failed to run mesh discovery');
     }
+  };
+
+  const handleDiscoverRegions = async () => {
+    // Prefer repeaters from the most recent mesh-discovery sweep (they just
+    // answered, so they're likely in range for the direct-routed regions
+    // request); otherwise let the backend pick recent repeater contacts.
+    const discoveredRepeaterKeys = (meshDiscovery?.results ?? [])
+      .filter((r) => r.node_type === 'repeater')
+      .map((r) => r.public_key);
+    await onDiscoverRegions(discoveredRepeaterKeys);
+  };
+
+  const handleAddDiscoveredRegions = () => {
+    if (!regionDiscovery || regionDiscovery.regions.length === 0) return;
+    const existing = knownRegions
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const seen = new Set(existing.map((s) => s.toLowerCase()));
+    const additions = regionDiscovery.regions.filter((r) => !seen.has(r.toLowerCase()));
+    if (additions.length === 0) {
+      toast.info('All discovered regions are already listed');
+      return;
+    }
+    setKnownRegions([...existing, ...additions].join('\n'));
+    toast.success(
+      `Added ${additions.length} region${additions.length === 1 ? '' : 's'} — review and Save Messaging Settings`
+    );
   };
 
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -1165,8 +1210,95 @@ export function SettingsRadioSection({
         <p className="text-[0.8125rem] text-muted-foreground">
           Tag outgoing messages with a region name (e.g. MyRegion). Repeaters configured for that
           region can forward the traffic, while repeaters configured to deny other regions may drop
-          it. Leave empty to disable.
+          it. Leave empty to send unscoped (plain flood). Forcing unscoped when a default scope is
+          configured on the radio requires firmware v12 or newer. Individual channels can override
+          this with their own region or an "always unscoped" setting.
         </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="known-regions">Known Regions (for decoding)</Label>
+        <textarea
+          id="known-regions"
+          value={knownRegions}
+          onChange={(e) => setKnownRegions(e.target.value)}
+          rows={4}
+          placeholder={'nl-gr\nde-by\nMyRegion'}
+          spellCheck={false}
+          className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        />
+        <p className="text-[0.8125rem] text-muted-foreground">
+          One region name per line. Incoming region-scoped (TransportFlood/TransportDirect) packets
+          are matched against this list so messages and the packet inspector show a readable region
+          label instead of a raw transport code. Saving a change re-tags existing messages whose
+          original packet is still stored.
+        </p>
+
+        <div className="space-y-2 rounded-md border border-input bg-muted/20 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[0.625rem] uppercase tracking-wider text-muted-foreground font-medium">
+              Discover regions from repeaters
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleDiscoverRegions}
+              disabled={regionDiscoveryLoading || !health?.radio_connected}
+            >
+              {regionDiscoveryLoading ? 'Asking repeaters...' : 'Discover Regions'}
+            </Button>
+          </div>
+          <p className="text-[0.8125rem] text-muted-foreground">
+            Asks nearby repeaters which regions they flood, so you can populate the list above. Uses
+            repeaters from your last mesh discovery sweep when available, otherwise your most
+            recently seen repeaters. Only repeaters in direct range answer, and this only reveals
+            flood-allowed regions (not blocked ones).
+          </p>
+          {!health?.radio_connected && (
+            <p className="text-sm text-destructive">Radio not connected</p>
+          )}
+          {regionDiscovery && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">
+                {regionDiscovery.repeaters_answered}/{regionDiscovery.repeaters_queried} repeater
+                {regionDiscovery.repeaters_queried === 1 ? '' : 's'} answered
+                {regionDiscovery.regions.length > 0
+                  ? ` — ${regionDiscovery.regions.length} region${regionDiscovery.regions.length === 1 ? '' : 's'} found`
+                  : ''}
+              </p>
+              {regionDiscovery.regions.length > 0 ? (
+                <>
+                  <div className="flex flex-wrap gap-1.5">
+                    {regionDiscovery.regions.map((region) => (
+                      <span
+                        key={region}
+                        className="text-[0.625rem] uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 font-mono"
+                      >
+                        {region}
+                      </span>
+                    ))}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleAddDiscoveredRegions}
+                    className="border-success/50 text-success hover:bg-success/10"
+                  >
+                    Add to Known Regions
+                  </Button>
+                </>
+              ) : (
+                regionDiscovery.repeaters_queried > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    No flood-allowed regions were reported.
+                  </p>
+                )
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="space-y-2">

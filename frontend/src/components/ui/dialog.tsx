@@ -33,13 +33,19 @@ interface DialogContentProps extends React.ComponentPropsWithoutRef<
   typeof DialogPrimitive.Content
 > {
   hideCloseButton?: boolean;
+  /**
+   * Portal target. Defaults to `document.body`. Pass the active fullscreen
+   * element when rendering inside `requestFullscreen()`, otherwise the dialog
+   * mounts outside that subtree and is invisible while still trapping focus.
+   */
+  container?: HTMLElement | null;
 }
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, hideCloseButton = false, ...props }, ref) => (
-  <DialogPortal>
+>(({ className, children, hideCloseButton = false, container, ...props }, ref) => (
+  <DialogPortal container={container ?? undefined}>
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}

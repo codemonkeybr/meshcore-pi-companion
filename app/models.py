@@ -343,7 +343,12 @@ class Channel(BaseModel):
     on_radio: bool = False
     flood_scope_override: str | None = Field(
         default=None,
-        description="Per-channel outbound flood scope override (null = use global app setting)",
+        description=(
+            "Per-channel outbound flood scope override, tri-state: null = inherit the "
+            "global app setting; '*' (UNSCOPED_OVERRIDE_MARKER) = force unscoped/plain "
+            "flood even over a scoped global; a region name (e.g. '#Esperance') = scope "
+            "this channel."
+        ),
     )
     path_hash_mode_override: int | None = Field(
         default=None,
@@ -429,6 +434,17 @@ class Message(BaseModel):
         default=None,
         description="Representative raw packet row ID when archival raw bytes exist",
     )
+    transport_code: int | None = Field(
+        default=None,
+        description=(
+            "Region scope transport code (uint16) when the message arrived via a "
+            "TransportFlood/TransportDirect packet; None for unscoped (plain flood) messages"
+        ),
+    )
+    region: str | None = Field(
+        default=None,
+        description="Resolved region name for the transport code, if it matched a known region",
+    )
 
 
 class MessagesAroundResponse(BaseModel):
@@ -474,6 +490,14 @@ class RawPacketBroadcast(BaseModel):
     rssi: int | None = Field(default=None, description="Received signal strength in dBm")
     decrypted: bool = False
     decrypted_info: RawPacketDecryptedInfo | None = None
+    transport_code: int | None = Field(
+        default=None,
+        description="Region scope transport code (uint16) for TransportFlood/TransportDirect packets",
+    )
+    region: str | None = Field(
+        default=None,
+        description="Resolved region name for the transport code, if it matched a known region",
+    )
 
 
 class RawPacketDetail(BaseModel):
@@ -489,6 +513,14 @@ class RawPacketDetail(BaseModel):
     )
     decrypted: bool = False
     decrypted_info: RawPacketDecryptedInfo | None = None
+    transport_code: int | None = Field(
+        default=None,
+        description="Region scope transport code (uint16) for TransportFlood/TransportDirect packets",
+    )
+    region: str | None = Field(
+        default=None,
+        description="Resolved region name for the transport code, if it matched a known region",
+    )
 
 
 class SendMessageRequest(BaseModel):
@@ -503,6 +535,15 @@ class SendDirectMessageRequest(SendMessageRequest):
 
 class SendChannelMessageRequest(SendMessageRequest):
     channel_key: str = Field(description="Channel key (32-char hex)")
+    flood_scope_override: str | None = Field(
+        default=None,
+        description=(
+            "Per-send regional flood-scope override. None = use the channel's persisted "
+            "override (or none); empty string = force unscoped/plain flood; a region name "
+            "scopes this single send to that region. Takes precedence over the channel's "
+            "persisted flood_scope_override for this send only."
+        ),
+    )
 
 
 class RepeaterLoginRequest(BaseModel):
@@ -566,6 +607,15 @@ class RepeaterRadioSettingsResponse(BaseModel):
     radio: str | None = Field(default=None, description="Radio settings (freq,bw,sf,cr)")
     tx_power: str | None = Field(default=None, description="TX power in dBm")
     airtime_factor: str | None = Field(default=None, description="Airtime factor")
+    duty_cycle_limit: str | None = Field(
+        default=None,
+        description=(
+            "Configured duty-cycle limit as a percentage string (e.g. '25.0%'), derived "
+            "by firmware from airtime_factor (100/(af+1)). This is the configured ceiling, "
+            "not the current measured duty cycle. Only available on firmware >= 1.15; None "
+            "on older nodes that don't support 'get dutycycle'."
+        ),
+    )
     repeat_enabled: str | None = Field(default=None, description="Repeat mode enabled")
     flood_max: str | None = Field(default=None, description="Max flood hops")
 
@@ -578,10 +628,51 @@ class RepeaterAdvertIntervalsResponse(BaseModel):
 
 
 class RepeaterOwnerInfoResponse(BaseModel):
-    """Owner info and guest password from a repeater."""
+    """Owner info, firmware, and guest password from a repeater.
+
+    ``owner_info``, ``firmware_version``, and ``name`` come from the
+    guest-accessible binary owner-info request (REQ_TYPE_GET_OWNER_INFO / 0x07).
+    ``guest_password`` is admin-only and still comes from the CLI, so guests see
+    ``None`` for it.
+    """
 
     owner_info: str | None = Field(default=None, description="Owner info string")
-    guest_password: str | None = Field(default=None, description="Guest password")
+    firmware_version: str | None = Field(
+        default=None, description="Firmware version string (from binary owner-info request)"
+    )
+    name: str | None = Field(
+        default=None, description="Repeater name (from binary owner-info request)"
+    )
+    guest_password: str | None = Field(default=None, description="Guest password (admin only)")
+
+
+class RepeaterRegionEntry(BaseModel):
+    """One region from a repeater's region hierarchy dump."""
+
+    name: str = Field(description="Region name ('*' is the wildcard/global root)")
+    depth: int = Field(description="Indentation depth in the hierarchy (0 = root)")
+    flood_allowed: bool = Field(description="True if flood is allowed for this region")
+    is_home: bool = Field(description="True if this is the repeater's home region")
+
+
+class RepeaterRegionsResponse(BaseModel):
+    """Region hierarchy and flood permissions from a repeater.
+
+    Primary source is the admin `region` CLI dump — an indented tree capped at
+    ~160 chars, so large region sets can be truncated (``truncated`` flags this).
+    When the CLI is unavailable (e.g. guest access), ``source`` is ``"anon"`` and
+    ``regions`` is the guest-accessible anon request's flat list of flood-allowed
+    region names only — no hierarchy, no blocked regions, no home marker. See
+    issue #309.
+    """
+
+    regions: list[RepeaterRegionEntry] = Field(default_factory=list)
+    raw: str | None = Field(default=None, description="Raw CLI dump text as received")
+    truncated: bool = Field(default=False, description="True if the dump was likely truncated")
+    source: Literal["cli", "anon"] | None = Field(
+        default=None,
+        description="'cli' = full admin hierarchy; 'anon' = guest flood-allowed names only",
+    )
 
 
 class LppSensor(BaseModel):
@@ -635,6 +726,14 @@ class RepeaterNeighborsResponse(BaseModel):
 
     neighbors: list[NeighborInfo] = Field(
         default_factory=list, description="List of neighbors seen by repeater"
+    )
+    reported_count: int | None = Field(
+        default=None,
+        description=(
+            "Total neighbor count reported by the repeater firmware, independent of "
+            "how many entries were actually returned. May exceed len(neighbors) when a "
+            "multi-chunk fetch is incomplete (dropped follow-up query / duty-cycle throttle)."
+        ),
     )
 
 
@@ -795,6 +894,60 @@ class RadioDiscoveryResponse(BaseModel):
     )
 
 
+class RadioRegionDiscoveryRequest(BaseModel):
+    """Request to sweep nearby repeaters for their flood-allowed region names.
+
+    Uses the guest-accessible anon regions request (direct-routed, so only
+    repeaters in range answer). When ``public_keys`` is omitted, the sweep
+    targets the most recently seen repeater contacts.
+    """
+
+    public_keys: list[str] | None = Field(
+        default=None,
+        description="Specific repeater public keys to query; None = most recent repeater contacts",
+    )
+    max_repeaters: int = Field(
+        default=8,
+        ge=1,
+        le=40,
+        description="Maximum number of repeaters to query in one sweep",
+    )
+
+
+class RadioRegionDiscoveryRepeater(BaseModel):
+    """One repeater's result from a region discovery sweep."""
+
+    public_key: str = Field(description="Repeater public key")
+    name: str | None = Field(default=None, description="Known contact name, if any")
+    answered: bool = Field(description="True if the repeater answered the anon regions request")
+    regions: list[str] = Field(
+        default_factory=list,
+        description="Flood-allowed region names reported by this repeater (wildcard excluded)",
+    )
+
+
+class RadioRegionDiscoveryResponse(BaseModel):
+    """Aggregated result of a region discovery sweep across nearby repeaters.
+
+    ``regions`` is the deduplicated union of every repeater's flood-allowed
+    region names — the list an operator can merge into ``known_regions``. The
+    anon request only reports flood-allowed names, so blocked regions and the
+    hierarchy are not visible here (use the per-repeater admin regions pane for
+    the full picture). See issue #309.
+    """
+
+    repeaters_queried: int = Field(description="How many repeaters were contacted")
+    repeaters_answered: int = Field(description="How many repeaters answered the request")
+    regions: list[str] = Field(
+        default_factory=list,
+        description="Deduplicated union of flood-allowed region names across all repeaters",
+    )
+    results: list[RadioRegionDiscoveryRepeater] = Field(
+        default_factory=list,
+        description="Per-repeater region results",
+    )
+
+
 class UnreadCounts(BaseModel):
     """Aggregated unread counts, mention flags, and last message times for all conversations."""
 
@@ -806,6 +959,13 @@ class UnreadCounts(BaseModel):
     )
     last_message_times: dict[str, int] = Field(
         default_factory=dict, description="Map of stateKey -> last message timestamp"
+    )
+    first_unread_ids: dict[str, int | None] = Field(
+        default_factory=dict,
+        description=(
+            "Map of stateKey -> id of the oldest unread message. Lets the client place "
+            "the unread divider (and jump to it) without paging back through history."
+        ),
     )
     last_read_ats: dict[str, int | None] = Field(
         default_factory=dict, description="Map of stateKey -> server-side last_read_at boundary"
@@ -841,6 +1001,13 @@ class AppSettings(BaseModel):
     flood_scope: str = Field(
         default="",
         description="Outbound flood scope / region name (empty = disabled, no tagging)",
+    )
+    known_regions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Region scope names used to resolve incoming TransportFlood/TransportDirect "
+            "packets back to a readable region label (packet inspector + channel decoration)"
+        ),
     )
     blocked_keys: list[str] = Field(
         default_factory=list,
@@ -923,6 +1090,41 @@ class PacketsPerHourBucket(BaseModel):
     count: int = Field(description="Number of packets received in that hour")
 
 
+class RegionScopeStats(BaseModel):
+    """Regional flood-scope adoption over the last 24 hours.
+
+    Two independent views, deliberately not merged — they have different
+    denominators and will not agree:
+
+    - Traffic (``total_messages``/``scoped_messages``) counts flood-routed
+      channel-message packets across all channels, including ones we cannot
+      decrypt. Broad coverage, but corrupt RF captures contribute false
+      positives, hence ``false_positive_floor``.
+    - Senders (``total_senders``/``scoped_senders``) counts distinct message
+      senders, which requires decryption and so only covers channels we hold
+      keys for. Narrower, but noise-free and immune to one chatty node skewing
+      the result.
+    """
+
+    total_messages: int = Field(
+        description="Flood-routed channel-message packets heard in the last 24h (unique payloads)"
+    )
+    scoped_messages: int = Field(description="Of those, how many carried a regional transport code")
+    scoped_pct: float
+    false_positive_floor: float = Field(
+        description=(
+            "Estimated false positives in scoped_messages, measured from transport-routed "
+            "packets claiming a payload type the protocol does not define. A scoped_messages "
+            "value at or below this is not evidence of regional adoption."
+        )
+    )
+    total_senders: int = Field(
+        description="Distinct channel-message senders in the last 24h (decryptable channels only)"
+    )
+    scoped_senders: int = Field(description="Of those, how many sent at least one scoped message")
+    scoped_senders_pct: float
+
+
 class StatisticsResponse(BaseModel):
     busiest_channels_24h: list[BusyChannel]
     contact_count: int
@@ -938,6 +1140,7 @@ class StatisticsResponse(BaseModel):
     repeaters_heard: ContactActivityCounts
     known_channels_active: ContactActivityCounts
     path_hash_width_24h: PathHashWidthStats
+    region_scope_24h: RegionScopeStats
     packets_per_hour_72h: list[PacketsPerHourBucket]
     noise_floor_24h: NoiseFloorHistoryStats
 

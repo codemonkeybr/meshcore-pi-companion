@@ -175,6 +175,9 @@ class RadioManager:
         self.device_model: str | None = None
         self.firmware_build: str | None = None
         self.firmware_version: str | None = None
+        # Companion protocol version (FIRMWARE_VER_CODE). Gates version-dependent
+        # host commands such as the mode-1 unscoped flood-scope frame (ver 12+).
+        self.firmware_ver_code: int | None = None
         self.max_channels: int = 40
         self.path_hash_mode: int = 0
         self.path_hash_mode_supported: bool = False
@@ -221,6 +224,7 @@ class RadioManager:
         self.device_model = None
         self.firmware_build = None
         self.firmware_version = None
+        self.firmware_ver_code = None
         self.max_channels = 40
         self.path_hash_mode = 0
         self.path_hash_mode_supported = False

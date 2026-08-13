@@ -36,4 +36,34 @@ describe('RawPacketList', () => {
 
     expect(onPacketClick).toHaveBeenCalledWith(packet);
   });
+
+  it('sticks to the bottom on new packets when autoScroll is on, and holds when off', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => 500,
+    });
+    try {
+      const { container, rerender } = render(
+        <RawPacketList packets={[createPacket({ id: 1 })]} autoScroll />
+      );
+      const list = container.querySelector('.overflow-y-auto') as HTMLElement;
+
+      rerender(
+        <RawPacketList packets={[createPacket({ id: 1 }), createPacket({ id: 2 })]} autoScroll />
+      );
+      expect(list.scrollTop).toBe(500);
+
+      // Pause autoscroll, simulate the user scrolling up, then receive a packet.
+      list.scrollTop = 0;
+      rerender(
+        <RawPacketList
+          packets={[createPacket({ id: 1 }), createPacket({ id: 2 }), createPacket({ id: 3 })]}
+          autoScroll={false}
+        />
+      );
+      expect(list.scrollTop).toBe(0);
+    } finally {
+      delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
 });

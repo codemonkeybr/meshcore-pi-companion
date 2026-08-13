@@ -9,7 +9,13 @@ from fastapi import HTTPException
 from meshcore import EventType
 from pydantic import ValidationError
 
-from app.models import CONTACT_TYPE_REPEATER, Contact, RadioTraceHopRequest, RadioTraceRequest
+from app.models import (
+    CONTACT_TYPE_REPEATER,
+    Contact,
+    RadioRegionDiscoveryRequest,
+    RadioTraceHopRequest,
+    RadioTraceRequest,
+)
 from app.radio import RadioManager, radio_manager
 from app.routers.radio import (
     PrivateKeyUpdate,
@@ -18,8 +24,10 @@ from app.routers.radio import (
     RadioConfigUpdate,
     RadioDiscoveryRequest,
     RadioSettings,
+    _dedupe_region_names,
     disconnect_radio,
     discover_mesh,
+    discover_regions,
     get_private_key,
     get_radio_config,
     reboot_radio,
@@ -1089,3 +1097,197 @@ class TestRebootAndReconnect:
         assert result["paused"] is True
         mock_rm.pause_connection.assert_awaited_once()
         mock_broadcast.assert_called_once_with(False, "BLE: AA:BB:CC:DD:EE:FF")
+
+
+def _repeater(public_key: str, name: str | None = "RPT") -> Contact:
+    return Contact(public_key=public_key, name=name, type=2)
+
+
+class TestDedupeRegionNames:
+    def test_drops_wildcard_blanks_and_case_insensitive_dupes(self):
+        assert _dedupe_region_names(["*", "us", "US", "", "  ", "ca", "Us"]) == ["us", "ca"]
+
+    def test_empty(self):
+        assert _dedupe_region_names([]) == []
+
+
+class TestDiscoverRegions:
+    @pytest.mark.asyncio
+    async def test_sweeps_explicit_repeaters_and_aggregates_union(self):
+        mc = _mock_meshcore_with_info()
+        key_a, key_b = "aa" * 32, "bb" * 32
+        contacts = {key_a: _repeater(key_a, "Alpha"), key_b: _repeater(key_b, "Bravo")}
+        region_map = {key_a: ["us", "ca"], key_b: ["ca", "de"]}
+
+        async def _anon(_mc, contact):
+            return region_map[contact.public_key]
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                side_effect=lambda key: contacts.get(key),
+            ),
+            patch("app.routers.radio.request_anon_region_names", side_effect=_anon),
+        ):
+            response = await discover_regions(
+                RadioRegionDiscoveryRequest(public_keys=[key_a, key_b])
+            )
+
+        assert response.repeaters_queried == 2
+        assert response.repeaters_answered == 2
+        assert response.regions == ["us", "ca", "de"]
+        assert [(r.public_key, r.name, r.answered, r.regions) for r in response.results] == [
+            (key_a, "Alpha", True, ["us", "ca"]),
+            (key_b, "Bravo", True, ["ca", "de"]),
+        ]
+        # One radio_operation held for the whole sweep -> auto-fetch toggled once.
+        mc.stop_auto_message_fetching.assert_awaited_once()
+        mc.start_auto_message_fetching.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unreachable_repeater_is_reported_and_excluded_from_union(self):
+        mc = _mock_meshcore_with_info()
+        key_a, key_b = "aa" * 32, "bb" * 32
+        contacts = {key_a: _repeater(key_a), key_b: _repeater(key_b)}
+
+        async def _anon(_mc, contact):
+            return ["us"] if contact.public_key == key_a else None
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                side_effect=lambda key: contacts.get(key),
+            ),
+            patch("app.routers.radio.request_anon_region_names", side_effect=_anon),
+        ):
+            response = await discover_regions(
+                RadioRegionDiscoveryRequest(public_keys=[key_a, key_b])
+            )
+
+        assert response.repeaters_queried == 2
+        assert response.repeaters_answered == 1
+        assert response.regions == ["us"]
+        assert response.results[1].answered is False
+        assert response.results[1].regions == []
+
+    @pytest.mark.asyncio
+    async def test_wildcard_and_dupes_stripped_per_repeater(self):
+        mc = _mock_meshcore_with_info()
+        key_a = "aa" * 32
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=_repeater(key_a),
+            ),
+            patch(
+                "app.routers.radio.request_anon_region_names",
+                new=AsyncMock(return_value=["*", "US", "us", "ca"]),
+            ),
+        ):
+            response = await discover_regions(RadioRegionDiscoveryRequest(public_keys=[key_a]))
+
+        assert response.results[0].regions == ["US", "ca"]
+        assert response.regions == ["US", "ca"]
+
+    @pytest.mark.asyncio
+    async def test_auto_targets_recent_repeaters_when_no_keys(self):
+        mc = _mock_meshcore_with_info()
+        key_a = "aa" * 32
+        recent = AsyncMock(return_value=[_repeater(key_a, "Recent")])
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch("app.routers.radio.ContactRepository.get_repeaters_by_recent", new=recent),
+            patch(
+                "app.routers.radio.request_anon_region_names",
+                new=AsyncMock(return_value=["eu"]),
+            ),
+        ):
+            response = await discover_regions(RadioRegionDiscoveryRequest(max_repeaters=5))
+
+        recent.assert_awaited_once_with(limit=5)
+        assert response.repeaters_queried == 1
+        assert response.regions == ["eu"]
+
+    @pytest.mark.asyncio
+    async def test_no_targets_returns_empty_without_touching_radio(self):
+        mc = _mock_meshcore_with_info()
+        anon = AsyncMock(return_value=["us"])
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_repeaters_by_recent",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("app.routers.radio.request_anon_region_names", new=anon),
+        ):
+            response = await discover_regions(RadioRegionDiscoveryRequest())
+
+        assert response.repeaters_queried == 0
+        assert response.repeaters_answered == 0
+        assert response.regions == []
+        assert response.results == []
+        anon.assert_not_awaited()
+        # No radio_operation should have been entered.
+        mc.stop_auto_message_fetching.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_repeater_keys_are_filtered_out(self):
+        mc = _mock_meshcore_with_info()
+        key_a = "aa" * 32
+        client = Contact(public_key=key_a, name="Client", type=1)
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                return_value=client,
+            ),
+            patch(
+                "app.routers.radio.request_anon_region_names",
+                new=AsyncMock(return_value=["us"]),
+            ),
+        ):
+            response = await discover_regions(RadioRegionDiscoveryRequest(public_keys=[key_a]))
+
+        assert response.repeaters_queried == 0
+        assert response.results == []
+
+    @pytest.mark.asyncio
+    async def test_explicit_keys_capped_at_max_repeaters(self):
+        mc = _mock_meshcore_with_info()
+        keys = ["aa" * 32, "bb" * 32, "cc" * 32]
+        contacts = {k: _repeater(k) for k in keys}
+        anon = AsyncMock(return_value=["us"])
+
+        with (
+            patch("app.routers.radio.radio_manager.require_connected", return_value=mc),
+            patch.object(radio_manager, "_meshcore", mc),
+            patch(
+                "app.routers.radio.ContactRepository.get_by_key",
+                new_callable=AsyncMock,
+                side_effect=lambda key: contacts.get(key),
+            ),
+            patch("app.routers.radio.request_anon_region_names", new=anon),
+        ):
+            response = await discover_regions(
+                RadioRegionDiscoveryRequest(public_keys=keys, max_repeaters=2)
+            )
+
+        assert response.repeaters_queried == 2
+        assert anon.await_count == 2

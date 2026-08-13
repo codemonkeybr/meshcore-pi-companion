@@ -474,6 +474,35 @@ export function formatHopCounts(paths: MessagePath[] | null | undefined): {
 }
 
 /**
+ * Compact per-hop width label for a message's paths, e.g. "2B" (2 bytes per
+ * hop) or "1B/2B" when different receive paths used different hash widths.
+ *
+ * The width is derived from each path's hex length divided by its hop count,
+ * so it is only shown for paths that actually carry hop bytes with usable
+ * `path_len` metadata. Returns null when no path has a derivable width — direct
+ * (0-hop) paths and legacy rows without hop metadata contribute nothing.
+ */
+export function formatPathHopWidths(paths: MessagePath[] | null | undefined): string | null {
+  if (!paths || paths.length === 0) {
+    return null;
+  }
+  const bytesPerHop = new Set<number>();
+  for (const p of paths) {
+    const mode = inferPathHashMode(p.path, p.path_len);
+    if (mode != null) {
+      bytesPerHop.add(mode + 1);
+    }
+  }
+  if (bytesPerHop.size === 0) {
+    return null;
+  }
+  return [...bytesPerHop]
+    .sort((a, b) => a - b)
+    .map((w) => `${w}B`)
+    .join('/');
+}
+
+/**
  * Build complete path resolution with sender, hops, and receiver
  */
 export function resolvePath(

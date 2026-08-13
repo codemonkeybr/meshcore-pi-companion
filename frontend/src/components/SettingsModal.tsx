@@ -10,6 +10,7 @@ import type {
   RadioConfigUpdate,
   RadioDiscoveryResponse,
   RadioDiscoveryTarget,
+  RadioRegionDiscoveryResponse,
 } from '../types';
 import type { LocalLabel } from '../utils/localLabel';
 import {
@@ -43,6 +44,9 @@ interface SettingsModalBaseProps {
   meshDiscovery: RadioDiscoveryResponse | null;
   meshDiscoveryLoadingTarget: RadioDiscoveryTarget | null;
   onDiscoverMesh: (target: RadioDiscoveryTarget) => Promise<void>;
+  regionDiscovery: RadioRegionDiscoveryResponse | null;
+  regionDiscoveryLoading: boolean;
+  onDiscoverRegions: (publicKeys?: string[]) => Promise<void>;
   onHealthRefresh: () => Promise<void>;
   onRefreshAppSettings: () => Promise<void>;
   onLocalLabelChange?: (label: LocalLabel) => void;
@@ -84,6 +88,9 @@ export function SettingsModal(props: SettingsModalProps) {
     meshDiscovery,
     meshDiscoveryLoadingTarget,
     onDiscoverMesh,
+    regionDiscovery,
+    regionDiscoveryLoading,
+    onDiscoverRegions,
     onHealthRefresh,
     onRefreshAppSettings,
     onLocalLabelChange,
@@ -221,6 +228,9 @@ export function SettingsModal(props: SettingsModalProps) {
                 meshDiscoveryLoadingTarget={meshDiscoveryLoadingTarget}
                 onDiscoverMesh={onDiscoverMesh}
                 onSyncChannels={onSyncChannels}
+                regionDiscovery={regionDiscovery}
+                regionDiscoveryLoading={regionDiscoveryLoading}
+                onDiscoverRegions={onDiscoverRegions}
                 onClose={onClose}
                 className={sectionContentClass}
               />

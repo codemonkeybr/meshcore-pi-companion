@@ -22,6 +22,8 @@ from app.models import (
     RepeaterNodeInfoResponse,
     RepeaterOwnerInfoResponse,
     RepeaterRadioSettingsResponse,
+    RepeaterRegionEntry,
+    RepeaterRegionsResponse,
     RepeaterStatusResponse,
     TelemetryHistoryEntry,
 )
@@ -29,6 +31,7 @@ from app.repository import ContactRepository, RepeaterTelemetryRepository
 from app.routers.contacts import _ensure_on_radio, _resolve_contact_or_404
 from app.routers.server_control import (
     batch_cli_fetch,
+    fetch_repeater_owner_info_binary,
     prepare_authenticated_contact_connection,
     require_server_capable_contact,
     send_contact_cli_command,
@@ -280,7 +283,8 @@ async def repeater_neighbors(public_key: str) -> RepeaterNeighborsResponse:
                 )
             )
 
-    return RepeaterNeighborsResponse(neighbors=neighbors)
+    reported_count = neighbors_data.get("neighbours_count") if neighbors_data else None
+    return RepeaterNeighborsResponse(neighbors=neighbors, reported_count=reported_count)
 
 
 @router.post("/{public_key}/repeater/acl", response_model=RepeaterAclResponse)
@@ -360,10 +364,20 @@ async def repeater_radio_settings(public_key: str) -> RepeaterRadioSettingsRespo
             ("get radio", "radio"),
             ("get tx", "tx_power"),
             ("get af", "airtime_factor"),
+            ("get dutycycle", "duty_cycle_limit"),
             ("get repeat", "repeat_enabled"),
             ("get flood.max", "flood_max"),
         ],
     )
+    # `get dutycycle` only exists on firmware >= 1.15. Older nodes fall through to
+    # the generic unknown-config handler and reply "??: dutycycle" (or an ERROR
+    # string), which extract_response_text passes back verbatim. Drop those so the
+    # field reads as unsupported rather than surfacing the sentinel to the UI.
+    dc = results.get("duty_cycle_limit")
+    if dc is not None:
+        dc = dc.strip()
+        if dc.startswith("??") or dc.lower().startswith("error"):
+            results["duty_cycle_limit"] = None
     return RepeaterRadioSettingsResponse(**results)
 
 
@@ -389,20 +403,183 @@ async def repeater_advert_intervals(public_key: str) -> RepeaterAdvertIntervalsR
 
 @router.post("/{public_key}/repeater/owner-info", response_model=RepeaterOwnerInfoResponse)
 async def repeater_owner_info(public_key: str) -> RepeaterOwnerInfoResponse:
-    """Fetch owner info and guest password from a repeater via CLI commands."""
+    """Fetch owner info, firmware, and guest password from a repeater.
+
+    Owner info + firmware + name come from the guest-accessible binary request
+    (REQ_TYPE_GET_OWNER_INFO / 0x07), which the firmware serves to any logged-in
+    client. The guest password is admin-only and still comes from the CLI, so a
+    guest sees it blank. See issue #306.
+    """
     radio_manager.require_connected()
     contact = await _resolve_contact_or_404(public_key)
     _require_repeater(contact)
 
-    results = await _batch_cli_fetch(
+    owner = await fetch_repeater_owner_info_binary(contact) or {}
+
+    # Guest password is admin-only; still fetched via CLI (guests get None).
+    cli = await _batch_cli_fetch(
         contact,
         "repeater_owner_info",
-        [
-            ("get owner.info", "owner_info"),
-            ("get guest.password", "guest_password"),
-        ],
+        [("get guest.password", "guest_password")],
     )
-    return RepeaterOwnerInfoResponse(**results)
+
+    return RepeaterOwnerInfoResponse(
+        owner_info=owner.get("owner_info"),
+        firmware_version=owner.get("firmware_version"),
+        name=owner.get("name"),
+        guest_password=cli.get("guest_password"),
+    )
+
+
+# The firmware's `region` dump is written into a fixed ~160-char buffer
+# (CommonCLI::handleRegionCmd -> RegionMap::exportTo(reply, 160)), so large
+# region sets get truncated. Flag when the reply lands close to that ceiling.
+_REGION_DUMP_CAP = 160
+
+
+def _is_region_name(name: str) -> bool:
+    """Return True if ``name`` is a valid region name (or the wildcard ``*``).
+
+    Mirrors firmware ``RegionMap::is_name_char``: ``-``, ``$``, ``#``, digits, or
+    any byte ``>= 'A'``. Crucially this excludes spaces, so a firmware that does
+    not support regions (older than v1.10) and replies to `region` with
+    ``"Unknown command"`` is rejected here rather than mis-parsed as a region —
+    which lets the endpoint fall back to the anon path or an empty result.
+    """
+    if name == "*":
+        return True
+    if not name:
+        return False
+    return all(c in "-$#0123456789" or ord(c) >= 0x41 for c in name)
+
+
+def _parse_region_dump(text: str) -> tuple[list[RepeaterRegionEntry], bool]:
+    """Parse the repeater `region` CLI dump into a structured hierarchy.
+
+    Firmware emits an indented tree (``RegionMap::printChildRegions``), one entry
+    per line: ``{depth spaces}{name}{^ if home}{ F if flood-allowed}``. The root
+    is the wildcard ``*``. Absence of the trailing `` F`` means flood is denied.
+
+    Lines that are not valid region names are dropped, so an unsupported-command
+    reply parses to no entries. Returns the parsed entries and a best-effort
+    ``truncated`` flag (the dump is capped at ~160 chars, and a complete dump
+    ends every line with a newline).
+    """
+    truncated = len(text) >= _REGION_DUMP_CAP - 2 or (
+        text.strip() != "" and not text.endswith("\n")
+    )
+    entries: list[RepeaterRegionEntry] = []
+    for line in text.split("\n"):
+        if line.strip() == "":
+            continue
+        depth = len(line) - len(line.lstrip(" "))
+        content = line.strip()
+        flood_allowed = content.endswith(" F")
+        if flood_allowed:
+            content = content[:-2].rstrip()
+        is_home = content.endswith("^")
+        if is_home:
+            content = content[:-1]
+        name = content.strip()
+        if not _is_region_name(name):
+            continue
+        entries.append(
+            RepeaterRegionEntry(
+                name=name, depth=depth, flood_allowed=flood_allowed, is_home=is_home
+            )
+        )
+    return entries, truncated
+
+
+def _parse_anon_region_names(names: str) -> list[RepeaterRegionEntry]:
+    """Parse the anon regions request's comma-separated flood-allowed names.
+
+    ``req_regions_sync`` returns the firmware's ``exportNamesTo(REGION_DENY_FLOOD)``
+    output: a flat, comma-separated list of the region names where flood is
+    *allowed* (``*`` is the wildcard). There is no hierarchy or blocked-region
+    information in this guest-accessible view, so every entry is depth 0 and
+    flood-allowed.
+    """
+    entries: list[RepeaterRegionEntry] = []
+    for raw_name in names.split(","):
+        name = raw_name.strip().strip("\x00")
+        if not name:
+            continue
+        entries.append(RepeaterRegionEntry(name=name, depth=0, flood_allowed=True, is_home=False))
+    return entries
+
+
+async def request_anon_region_names(mc, contact: Contact) -> list[str] | None:
+    """Send the guest anon regions request over an already-open radio session.
+
+    Ensures the contact is on the radio, settles, then requests its
+    flood-allowed region names. Returns the parsed names (wildcard ``*``
+    included), or ``None`` if the repeater did not answer (older firmware, out
+    of range, add failure). The caller must already hold ``radio_operation``.
+    This is the shared per-repeater primitive behind both the single-repeater
+    guest fallback and the radio-wide region discovery sweep.
+    """
+    try:
+        await _ensure_on_radio(mc, contact)
+        await asyncio.sleep(1.0)  # settle after add_contact
+        names = await mc.commands.req_regions_sync(contact.public_key, timeout=10, min_timeout=5)
+    except Exception as exc:
+        logger.debug("anon regions request failed for %s: %s", contact.public_key[:12], exc)
+        return None
+    if not names:
+        return None
+    return [entry.name for entry in _parse_anon_region_names(names)]
+
+
+async def _fetch_anon_flood_allowed_regions(contact: Contact) -> list[RepeaterRegionEntry] | None:
+    """Guest-accessible fallback: fetch flood-allowed region names via anon request.
+
+    Returns ``None`` when the repeater does not answer (older firmware, out of
+    range) so the caller can leave the pane empty.
+    """
+    async with radio_manager.radio_operation(
+        "repeater_regions_anon", pause_polling=True, suspend_auto_fetch=True
+    ) as mc:
+        names = await request_anon_region_names(mc, contact)
+
+    if names is None:
+        return None
+    return [
+        RepeaterRegionEntry(name=name, depth=0, flood_allowed=True, is_home=False) for name in names
+    ]
+
+
+@router.post("/{public_key}/repeater/regions", response_model=RepeaterRegionsResponse)
+async def repeater_regions(public_key: str) -> RepeaterRegionsResponse:
+    """Fetch the repeater's region hierarchy and flood permissions.
+
+    Primary path is the admin CLI `region` dump (full hierarchy + allowed/blocked
+    + home; may be truncated by the firmware's ~160-char cap). When the CLI
+    returns nothing — e.g. guest access, which cannot run CLI commands — it falls
+    back to the guest-accessible anon regions request, which only yields a flat
+    list of flood-allowed region names. See issue #309.
+    """
+    radio_manager.require_connected()
+    contact = await _resolve_contact_or_404(public_key)
+    _require_repeater(contact)
+
+    results = await _batch_cli_fetch(contact, "repeater_regions", [("region", "regions")])
+    raw = results.get("regions")
+    entries, truncated = _parse_region_dump(raw or "")
+    # The CLI dump always includes the wildcard root, so a non-empty result means
+    # the CLI answered. Empty means no CLI reply (guest / timeout) -> try anon.
+    if entries:
+        return RepeaterRegionsResponse(regions=entries, raw=raw, truncated=truncated, source="cli")
+
+    anon_entries = await _fetch_anon_flood_allowed_regions(contact)
+    if anon_entries is not None:
+        return RepeaterRegionsResponse(
+            regions=anon_entries, raw=raw, truncated=False, source="anon"
+        )
+
+    # Nothing usable from either path (unsupported firmware, guest with no anon
+    # support, or out of range) -> empty, not a truncated dump.
+    return RepeaterRegionsResponse(regions=[], raw=raw, truncated=False, source="cli")
 
 
 @router.post("/{public_key}/command", response_model=CommandResponse)

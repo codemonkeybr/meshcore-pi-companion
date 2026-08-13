@@ -37,6 +37,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["is_outgoing"] = is_outgoing
             captured["is_dm"] = is_dm
@@ -86,6 +89,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["is_outgoing"] = is_outgoing
             return None
@@ -132,6 +138,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["path"] = path
             captured["path_bytes_per_hop"] = path_bytes_per_hop
@@ -162,6 +171,206 @@ class TestBotModuleParameterExtraction:
         assert captured["path_bytes_per_hop"] == 2
 
     @pytest.mark.asyncio
+    async def test_region_extracted_from_payload(self):
+        """A channel message's resolved region is pulled from data and forwarded (#300)."""
+        from app.fanout.bot import BotModule
+
+        captured = {}
+
+        def fake_execute(
+            code,
+            sender_name,
+            sender_key,
+            message_text,
+            is_dm,
+            channel_key,
+            channel_name,
+            sender_timestamp,
+            path,
+            is_outgoing,
+            path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
+        ):
+            captured["region"] = region
+            return None
+
+        mod = BotModule("test", {"code": "def bot(**k): pass"}, name="Test")
+
+        with (
+            patch("app.fanout.bot_exec.execute_bot_code", side_effect=fake_execute),
+            patch(
+                "app.fanout.bot_exec._bot_semaphore",
+                MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock()),
+            ),
+            patch("app.fanout.bot.asyncio.sleep", new_callable=AsyncMock),
+            patch("app.repository.ChannelRepository") as mock_chan,
+        ):
+            mock_chan.get_by_key = AsyncMock(return_value=MagicMock(name="#test"))
+            await mod._run_for_message(
+                {
+                    "type": "CHAN",
+                    "conversation_key": "ch1",
+                    "text": "Alice: hello",
+                    "sender_name": "Alice",
+                    "channel_name": "#test",
+                    "region": "EU",
+                }
+            )
+
+        assert captured["region"] == "EU"
+
+    @pytest.mark.asyncio
+    async def test_region_absent_defaults_to_none(self):
+        """A message without a region key forwards region=None to bot execution."""
+        from app.fanout.bot import BotModule
+
+        captured = {}
+
+        def fake_execute(
+            code,
+            sender_name,
+            sender_key,
+            message_text,
+            is_dm,
+            channel_key,
+            channel_name,
+            sender_timestamp,
+            path,
+            is_outgoing,
+            path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
+        ):
+            captured["region"] = region
+            return None
+
+        mod = BotModule("test", {"code": "def bot(**k): pass"}, name="Test")
+
+        with (
+            patch("app.fanout.bot_exec.execute_bot_code", side_effect=fake_execute),
+            patch(
+                "app.fanout.bot_exec._bot_semaphore",
+                MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock()),
+            ),
+            patch("app.fanout.bot.asyncio.sleep", new_callable=AsyncMock),
+            patch("app.repository.ContactRepository") as mock_contact,
+        ):
+            mock_contact.get_by_key = AsyncMock(return_value=MagicMock(name="Alice"))
+            await mod._run_for_message(
+                {
+                    "type": "PRIV",
+                    "conversation_key": "pk1",
+                    "text": "hello",
+                }
+            )
+
+        assert captured["region"] is None
+
+    @pytest.mark.asyncio
+    async def test_scoped_true_when_transport_code_present(self):
+        """A message with a transport_code forwards scoped=True (#300)."""
+        from app.fanout.bot import BotModule
+
+        captured = {}
+
+        def fake_execute(
+            code,
+            sender_name,
+            sender_key,
+            message_text,
+            is_dm,
+            channel_key,
+            channel_name,
+            sender_timestamp,
+            path,
+            is_outgoing,
+            path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
+        ):
+            captured["scoped"] = scoped
+            return None
+
+        mod = BotModule("test", {"code": "def bot(**k): pass"}, name="Test")
+
+        with (
+            patch("app.fanout.bot_exec.execute_bot_code", side_effect=fake_execute),
+            patch(
+                "app.fanout.bot_exec._bot_semaphore",
+                MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock()),
+            ),
+            patch("app.fanout.bot.asyncio.sleep", new_callable=AsyncMock),
+            patch("app.repository.ChannelRepository") as mock_chan,
+        ):
+            mock_chan.get_by_key = AsyncMock(return_value=MagicMock(name="#test"))
+            await mod._run_for_message(
+                {
+                    "type": "CHAN",
+                    "conversation_key": "ch1",
+                    "text": "Alice: hello",
+                    "sender_name": "Alice",
+                    "channel_name": "#test",
+                    # Scoped but region unresolved: scoped must still be True.
+                    "transport_code": 6789,
+                    "region": None,
+                }
+            )
+
+        assert captured["scoped"] is True
+
+    @pytest.mark.asyncio
+    async def test_scoped_false_when_transport_code_absent(self):
+        """A message without a transport_code forwards scoped=False (unscoped flood)."""
+        from app.fanout.bot import BotModule
+
+        captured = {}
+
+        def fake_execute(
+            code,
+            sender_name,
+            sender_key,
+            message_text,
+            is_dm,
+            channel_key,
+            channel_name,
+            sender_timestamp,
+            path,
+            is_outgoing,
+            path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
+        ):
+            captured["scoped"] = scoped
+            return None
+
+        mod = BotModule("test", {"code": "def bot(**k): pass"}, name="Test")
+
+        with (
+            patch("app.fanout.bot_exec.execute_bot_code", side_effect=fake_execute),
+            patch(
+                "app.fanout.bot_exec._bot_semaphore",
+                MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock()),
+            ),
+            patch("app.fanout.bot.asyncio.sleep", new_callable=AsyncMock),
+            patch("app.repository.ContactRepository") as mock_contact,
+        ):
+            mock_contact.get_by_key = AsyncMock(return_value=MagicMock(name="Alice"))
+            await mod._run_for_message(
+                {
+                    "type": "PRIV",
+                    "conversation_key": "pk1",
+                    "text": "hello",
+                }
+            )
+
+        assert captured["scoped"] is False
+
+    @pytest.mark.asyncio
     async def test_channel_sender_prefix_stripped(self):
         """Channel message text has 'SenderName: ' prefix stripped."""
         from app.fanout.bot import BotModule
@@ -180,6 +389,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["message_text"] = message_text
             captured["sender_name"] = sender_name
@@ -228,6 +440,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["channel_name"] = channel_name
             return None
@@ -275,6 +490,9 @@ class TestBotModuleParameterExtraction:
             path,
             is_outgoing,
             path_bytes_per_hop,
+            packet_hash,
+            region,
+            scoped,
         ):
             captured["sender_name"] = sender_name
             captured["sender_key"] = sender_key

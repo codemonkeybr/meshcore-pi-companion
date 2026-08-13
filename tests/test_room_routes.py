@@ -173,11 +173,17 @@ class TestRoomCommandReuse:
     async def test_generic_command_route_accepts_room_servers(self, test_db):
         mc = _mock_mc()
         await _insert_contact(ROOM_KEY, name="Room Server", contact_type=3)
+        # The CLI send path now flushes the radio buffer before sending, so get_msg
+        # must report an empty buffer (NO_MORE_MSGS) for that drain to terminate;
+        # the command's actual reply is returned by the subsequent fetch.
         mc.commands.get_msg = AsyncMock(
-            return_value=_radio_result(
-                EventType.CONTACT_MSG_RECV,
-                {"pubkey_prefix": ROOM_KEY[:12], "text": "> ok", "txt_type": 1},
-            )
+            side_effect=[
+                _radio_result(EventType.NO_MORE_MSGS),
+                _radio_result(
+                    EventType.CONTACT_MSG_RECV,
+                    {"pubkey_prefix": ROOM_KEY[:12], "text": "> ok", "txt_type": 1},
+                ),
+            ]
         )
 
         with (

@@ -292,6 +292,27 @@ class ContactRepository:
         return [ContactRepository._row_to_contact(row) for row in rows]
 
     @staticmethod
+    async def get_repeaters_by_recent(limit: int = 8) -> list[Contact]:
+        """Get repeater contacts ordered by most recently seen.
+
+        Used by the region discovery sweep, which prefers recently-heard
+        repeaters since the anon regions request is direct-routed and only
+        in-range repeaters will answer.
+        """
+        async with db.readonly() as conn:
+            async with conn.execute(
+                """
+                SELECT * FROM contacts
+                WHERE type = 2 AND length(public_key) = 64
+                ORDER BY COALESCE(last_seen, 0) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [ContactRepository._row_to_contact(row) for row in rows]
+
+    @staticmethod
     async def get_recently_contacted_non_repeaters(limit: int = 200) -> list[Contact]:
         """Get recently interacted-with non-repeater contacts."""
         async with db.readonly() as conn:

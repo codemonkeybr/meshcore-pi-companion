@@ -54,6 +54,21 @@ export interface RadioDiscoveryResponse {
   results: RadioDiscoveryResult[];
 }
 
+export interface RadioRegionDiscoveryRepeater {
+  public_key: string;
+  name: string | null;
+  answered: boolean;
+  regions: string[];
+}
+
+export interface RadioRegionDiscoveryResponse {
+  repeaters_queried: number;
+  repeaters_answered: number;
+  /** Deduplicated union of flood-allowed region names across all repeaters. */
+  regions: string[];
+  results: RadioRegionDiscoveryRepeater[];
+}
+
 export type RadioAdvertMode = 'flood' | 'zero_hop';
 
 export interface FanoutStatusEntry {
@@ -309,6 +324,10 @@ export interface Message {
   sender_name: string | null;
   channel_name?: string | null;
   packet_id?: number | null;
+  /** Region scope transport code (uint16) when this arrived via a transport-routed packet. */
+  transport_code?: number | null;
+  /** Resolved region name for the transport code, if it matched a known region. */
+  region?: string | null;
 }
 
 export interface MessagesAroundResponse {
@@ -352,6 +371,10 @@ export interface RawPacket {
     sender_timestamp: number | null;
     message: string | null;
   } | null;
+  /** Region scope transport code (uint16) for TransportFlood/TransportDirect packets. */
+  transport_code?: number | null;
+  /** Resolved region name for the transport code, if it matched a known region. */
+  region?: string | null;
 }
 
 export interface AppSettings {
@@ -361,6 +384,7 @@ export interface AppSettings {
   advert_interval: number;
   last_advert_time: number;
   flood_scope: string;
+  known_regions: string[];
   blocked_keys: string[];
   blocked_names: string[];
   discovery_blocked_types: number[];
@@ -377,6 +401,7 @@ export interface AppSettingsUpdate {
   advert_interval?: number;
   auto_resend_channel?: boolean;
   flood_scope?: string;
+  known_regions?: string[];
   blocked_keys?: string[];
   blocked_names?: string[];
   discovery_blocked_types?: number[];
@@ -457,6 +482,10 @@ export interface RepeaterStatusResponse {
 
 export interface RepeaterNeighborsResponse {
   neighbors: NeighborInfo[];
+  // Total neighbor count reported by the repeater firmware, independent of how many
+  // entries were actually returned. Exceeds neighbors.length when a multi-chunk fetch
+  // is incomplete. Null on older firmware / failed fetches.
+  reported_count?: number | null;
 }
 
 export interface RepeaterAclResponse {
@@ -475,6 +504,9 @@ export interface RepeaterRadioSettingsResponse {
   radio: string | null;
   tx_power: string | null;
   airtime_factor: string | null;
+  // Configured duty-cycle limit (e.g. "25.0%"), firmware-derived from airtime_factor.
+  // Only present on firmware >= 1.15; null on older nodes.
+  duty_cycle_limit: string | null;
   repeat_enabled: string | null;
   flood_max: string | null;
 }
@@ -486,7 +518,24 @@ export interface RepeaterAdvertIntervalsResponse {
 
 export interface RepeaterOwnerInfoResponse {
   owner_info: string | null;
+  firmware_version: string | null;
+  name: string | null;
   guest_password: string | null;
+}
+
+export interface RepeaterRegionEntry {
+  name: string;
+  depth: number;
+  flood_allowed: boolean;
+  is_home: boolean;
+}
+
+export interface RepeaterRegionsResponse {
+  regions: RepeaterRegionEntry[];
+  raw: string | null;
+  truncated: boolean;
+  /** 'cli' = full admin hierarchy; 'anon' = guest flood-allowed names only. */
+  source: 'cli' | 'anon' | null;
 }
 
 export interface LppSensor {
@@ -519,7 +568,8 @@ export type PaneName =
   | 'radioSettings'
   | 'advertIntervals'
   | 'ownerInfo'
-  | 'lppTelemetry';
+  | 'lppTelemetry'
+  | 'regions';
 
 export interface PaneState {
   loading: boolean;
@@ -592,6 +642,8 @@ export interface UnreadCounts {
   mentions: Record<string, boolean>;
   last_message_times: Record<string, number>;
   last_read_ats: Record<string, number | null>;
+  /** stateKey -> id of the oldest unread message. Locates the unread divider. */
+  first_unread_ids: Record<string, number | null>;
 }
 
 interface BusyChannel {
@@ -624,6 +676,24 @@ interface PacketsPerHourBucket {
   count: number;
 }
 
+/**
+ * Regional flood-scope adoption over the last 24h. Two views with different
+ * denominators that will not agree — traffic spans all channels including
+ * undecryptable ones (so it carries a false-positive floor from corrupt RF
+ * captures), while senders requires decryption and is therefore noise-free but
+ * limited to channels we hold keys for.
+ */
+export interface RegionScopeStats {
+  total_messages: number;
+  scoped_messages: number;
+  scoped_pct: number;
+  /** Estimated false positives in scoped_messages. At or below this = not adoption. */
+  false_positive_floor: number;
+  total_senders: number;
+  scoped_senders: number;
+  scoped_senders_pct: number;
+}
+
 export interface StatisticsResponse {
   busiest_channels_24h: BusyChannel[];
   contact_count: number;
@@ -647,6 +717,7 @@ export interface StatisticsResponse {
     double_byte_pct: number;
     triple_byte_pct: number;
   };
+  region_scope_24h: RegionScopeStats;
   packets_per_hour_72h: PacketsPerHourBucket[];
   noise_floor_24h: NoiseFloorHistoryStats;
 }

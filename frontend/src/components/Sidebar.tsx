@@ -23,6 +23,7 @@ import {
 } from '../types';
 import {
   buildSidebarSectionSortOrders,
+  FAVORITES_SORT_CYCLE,
   getStateKey,
   loadLegacyLocalStorageSortOrder,
   loadLocalStorageSidebarSectionSortOrders,
@@ -41,6 +42,60 @@ import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
 
 type FavoriteItem = { type: 'channel'; channel: Channel } | { type: 'contact'; contact: Contact };
+
+// Grouping order for the Favorites "by type" sorts. Mirrors the standalone sidebar
+// section order: Channels, Contacts (clients/sensors/unknown), Rooms, Repeaters.
+function favoriteTypeRank(item: FavoriteItem): number {
+  if (item.type === 'channel') return 0;
+  switch (item.contact.type) {
+    case CONTACT_TYPE_ROOM:
+      return 2;
+    case CONTACT_TYPE_REPEATER:
+      return 3;
+    default:
+      return 1;
+  }
+}
+
+// The next order when the section's sort toggle is clicked. Favorites cycles
+// through all four orders; every other (single-type) section flips recent<->alpha.
+function nextSortOrder(section: SidebarSortableSection, current: SortOrder): SortOrder {
+  if (section === 'favorites') {
+    const idx = FAVORITES_SORT_CYCLE.indexOf(current);
+    return FAVORITES_SORT_CYCLE[(idx + 1) % FAVORITES_SORT_CYCLE.length];
+  }
+  return current === 'alpha' ? 'recent' : 'alpha';
+}
+
+// Compact glyph/text shown on the toggle for the current order.
+function sortOrderLabel(order: SortOrder): string {
+  switch (order) {
+    case 'alpha':
+      return 'A-Z';
+    case 'type-recent':
+      return 'Type ⏱';
+    case 'type-alpha':
+      return 'Type A-Z';
+    case 'recent':
+    default:
+      return '⏱';
+  }
+}
+
+// Human phrase for aria/title, describing what the order sorts by.
+function sortOrderDescription(order: SortOrder): string {
+  switch (order) {
+    case 'alpha':
+      return 'alphabetically';
+    case 'type-recent':
+      return 'by type, then recent';
+    case 'type-alpha':
+      return 'by type, then alphabetically';
+    case 'recent':
+    default:
+      return 'by recent';
+  }
+}
 
 type ConversationRow = {
   key: string;
@@ -159,7 +214,7 @@ export function Sidebar({
 
   const handleSortToggle = (section: SidebarSortableSection) => {
     setSectionSortOrders((prev) => {
-      const nextOrder = prev[section] === 'alpha' ? 'recent' : 'alpha';
+      const nextOrder = nextSortOrder(section, prev[section]);
       const updated = { ...prev, [section]: nextOrder };
       saveLocalStorageSidebarSectionSortOrders(updated);
       return updated;
@@ -197,7 +252,13 @@ export function Sidebar({
   );
 
   const getContactHeardTime = useCallback((contact: Contact): number => {
-    return Math.max(contact.last_seen ?? 0, contact.last_advert ?? 0);
+    // Prefer last_seen (server receive wall clock — the value the UI shows as
+    // "Last heard") so the recency sort matches the displayed date. Fall back to
+    // last_advert only for repeaters known purely from radio sync, which have no
+    // independent last_seen. Using Math.max here let a radio-reported (sender
+    // clock, skew-prone) last_advert pin a repeater to the top even when its
+    // displayed last_seen was older. See ContactStatusInfo "Last heard".
+    return contact.last_seen || contact.last_advert || 0;
   }, []);
 
   const getContactRecentTime = useCallback(
@@ -317,9 +378,16 @@ export function Sidebar({
   );
 
   const sortFavoriteItemsByOrder = useCallback(
-    (items: FavoriteItem[], order: SortOrder) =>
-      [...items].sort((a, b) => {
-        if (order === 'recent') {
+    (items: FavoriteItem[], order: SortOrder) => {
+      const typeGrouped = order === 'type-recent' || order === 'type-alpha';
+      const byRecent = order === 'recent' || order === 'type-recent';
+      return [...items].sort((a, b) => {
+        if (typeGrouped) {
+          const rankDiff = favoriteTypeRank(a) - favoriteTypeRank(b);
+          if (rankDiff !== 0) return rankDiff;
+        }
+
+        if (byRecent) {
           const timeA =
             a.type === 'channel'
               ? getLastMessageTime('channel', a.channel.key)
@@ -334,7 +402,8 @@ export function Sidebar({
         }
 
         return getFavoriteItemName(a).localeCompare(getFavoriteItemName(b));
-      }),
+      });
+    },
     [getContactRecentTime, getFavoriteItemName, getLastMessageTime]
   );
 
@@ -796,20 +865,18 @@ export function Sidebar({
           <div className="ml-auto flex items-center gap-1.5">
             {sortSection && sectionSortOrder && (
               <button
-                className="bg-transparent text-muted-foreground/60 px-1 py-0.5 text-[0.625rem] rounded hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="bg-transparent text-muted-foreground/60 px-1 py-0.5 text-[0.625rem] rounded hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring whitespace-nowrap"
                 onClick={() => handleSortToggle(sortSection)}
-                aria-label={
-                  sectionSortOrder === 'alpha'
-                    ? `Sort ${title} by recent`
-                    : `Sort ${title} alphabetically`
-                }
-                title={
-                  sectionSortOrder === 'alpha'
-                    ? `Sort ${title} by recent`
-                    : `Sort ${title} alphabetically`
-                }
+                aria-label={`Sort ${title} ${sortOrderDescription(
+                  nextSortOrder(sortSection, sectionSortOrder)
+                )}`}
+                title={`Currently sorted ${sortOrderDescription(
+                  sectionSortOrder
+                )}. Click to sort ${sortOrderDescription(
+                  nextSortOrder(sortSection, sectionSortOrder)
+                )}.`}
               >
-                {sectionSortOrder === 'alpha' ? 'A-Z' : '⏱'}
+                {sortOrderLabel(sectionSortOrder)}
               </button>
             )}
             {unreadCount > 0 && (

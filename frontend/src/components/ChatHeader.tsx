@@ -7,7 +7,7 @@ import { ChannelFloodScopeOverrideModal } from './ChannelFloodScopeOverrideModal
 import { ChannelPathHashModeOverrideModal } from './ChannelPathHashModeOverrideModal';
 import { handleKeyboardActivate } from '../utils/a11y';
 import { isPublicChannelKey } from '../utils/publicChannel';
-import { stripRegionScopePrefix } from '../utils/regionScope';
+import { stripRegionScopePrefix, floodScopeOverrideLabel } from '../utils/regionScope';
 import { isPrefixOnlyContact } from '../utils/pubkey';
 import { cn } from '../lib/utils';
 import { ContactAvatar } from './ContactAvatar';
@@ -102,7 +102,9 @@ export function ChatHeader({
   const activeFloodScopeLabel = activeFloodScopeOverride
     ? stripRegionScopePrefix(activeFloodScopeOverride)
     : null;
-  const activeFloodScopeDisplay = activeFloodScopeOverride ? activeFloodScopeOverride : null;
+  // Badge text: maps the raw override ("*", "#Region", null) to a friendly label
+  // so the unscoped marker renders as "unscoped" instead of a bare "*".
+  const activeFloodScopeBadge = floodScopeOverrideLabel(activeFloodScopeOverride);
   const activePathHashModeOverride =
     conversation.type === 'channel' ? (activeChannel?.path_hash_mode_override ?? null) : null;
   const showPathHashModeOverride =
@@ -256,7 +258,7 @@ export function ChatHeader({
                 </span>
               )}
             </span>
-            {conversation.type === 'channel' && activeFloodScopeDisplay && (
+            {conversation.type === 'channel' && activeFloodScopeBadge && (
               <button
                 className="mt-0.5 flex basis-full items-center gap-1 text-left sm:hidden"
                 onClick={handleEditFloodScopeOverride}
@@ -268,7 +270,7 @@ export function ChatHeader({
                   aria-hidden="true"
                 />
                 <span className="min-w-0 truncate text-[0.6875rem] font-medium text-[hsl(var(--region-override))]">
-                  {activeFloodScopeDisplay}
+                  {activeFloodScopeBadge}
                 </span>
               </button>
             )}
@@ -445,9 +447,9 @@ export function ChatHeader({
               className={`h-4 w-4 ${activeFloodScopeLabel ? 'text-[hsl(var(--region-override))]' : 'text-muted-foreground'}`}
               aria-hidden="true"
             />
-            {activeFloodScopeDisplay && (
+            {activeFloodScopeBadge && (
               <span className="hidden text-[0.6875rem] font-medium text-[hsl(var(--region-override))] sm:inline">
-                {activeFloodScopeDisplay}
+                {activeFloodScopeBadge}
               </span>
             )}
           </button>
@@ -513,7 +515,7 @@ export function ChatHeader({
           open={channelOverrideOpen}
           onClose={() => setChannelOverrideOpen(false)}
           roomName={conversation.name}
-          currentOverride={activeFloodScopeDisplay}
+          currentOverride={activeFloodScopeOverride}
           onSetOverride={(value) => onSetChannelFloodScopeOverride(conversation.id, value)}
         />
       )}

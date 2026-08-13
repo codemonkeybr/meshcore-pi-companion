@@ -13,6 +13,7 @@ import type {
   RepeaterAdvertIntervalsResponse,
   RepeaterOwnerInfoResponse,
   RepeaterLppTelemetryResponse,
+  RepeaterRegionsResponse,
   CommandResponse,
 } from '../types';
 import {
@@ -41,6 +42,7 @@ interface PaneData {
   advertIntervals: RepeaterAdvertIntervalsResponse | null;
   ownerInfo: RepeaterOwnerInfoResponse | null;
   lppTelemetry: RepeaterLppTelemetryResponse | null;
+  regions: RepeaterRegionsResponse | null;
 }
 
 interface RepeaterDashboardCacheEntry {
@@ -64,6 +66,7 @@ function createInitialPaneStates(): Record<PaneName, PaneState> {
     advertIntervals: { ...INITIAL_PANE_STATE },
     ownerInfo: { ...INITIAL_PANE_STATE },
     lppTelemetry: { ...INITIAL_PANE_STATE },
+    regions: { ...INITIAL_PANE_STATE },
   };
 }
 
@@ -77,6 +80,7 @@ function createInitialPaneData(): PaneData {
     advertIntervals: null,
     ownerInfo: null,
     lppTelemetry: null,
+    regions: null,
   };
 }
 
@@ -107,6 +111,7 @@ function normalizePaneStates(paneStates: Record<PaneName, PaneState>): Record<Pa
     advertIntervals: { ...paneStates.advertIntervals, loading: false },
     ownerInfo: { ...paneStates.ownerInfo, loading: false },
     lppTelemetry: { ...paneStates.lppTelemetry, loading: false },
+    regions: { ...paneStates.regions, loading: false },
   };
 }
 
@@ -174,6 +179,8 @@ function fetchPaneData(publicKey: string, pane: PaneName) {
       return api.repeaterOwnerInfo(publicKey);
     case 'lppTelemetry':
       return api.repeaterLppTelemetry(publicKey);
+    case 'regions':
+      return api.repeaterRegions(publicKey);
   }
 }
 
@@ -427,6 +434,7 @@ export function useRepeaterDashboard(
       'advertIntervals',
       'ownerInfo',
       'lppTelemetry',
+      'regions',
     ];
     // Serial execution — parallel calls just queue behind the radio lock anyway
     for (const pane of panes) {

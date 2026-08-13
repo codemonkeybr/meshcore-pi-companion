@@ -46,6 +46,13 @@ class AppSettingsUpdate(BaseModel):
         default=None,
         description="Outbound flood scope / region name (empty = disabled)",
     )
+    known_regions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Region scope names used to decode incoming transport-scoped packets "
+            "(stored without a leading '#')"
+        ),
+    )
     blocked_keys: list[str] | None = Field(
         default=None,
         description="Public keys whose messages are hidden from the UI",
@@ -212,6 +219,23 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
         logger.info("Updating advert_interval to %d", interval)
         kwargs["advert_interval"] = interval
 
+    # Known regions for scope decoding. Normalize to user-facing form (no leading
+    # '#'), trim blanks, and dedupe case-insensitively while preserving order.
+    known_regions_changed = False
+    if update.known_regions is not None:
+        cleaned_regions: list[str] = []
+        seen_regions: set[str] = set()
+        for raw_name in update.known_regions:
+            name = (raw_name or "").strip()
+            if name.startswith("#"):
+                name = name[1:].strip()
+            if name and name.lower() not in seen_regions:
+                seen_regions.add(name.lower())
+                cleaned_regions.append(name)
+        current = await AppSettingsRepository.get()
+        known_regions_changed = cleaned_regions != current.known_regions
+        kwargs["known_regions"] = cleaned_regions
+
     # Block lists
     if update.blocked_keys is not None:
         kwargs["blocked_keys"] = [k.lower() for k in update.blocked_keys]
@@ -258,16 +282,28 @@ async def update_settings(update: AppSettingsUpdate) -> AppSettings:
 
         # Apply flood scope to radio immediately if changed
         if flood_scope_changed:
+            from app.services.flood_scope import set_radio_flood_scope
             from app.services.radio_runtime import radio_runtime as radio_manager
 
             if radio_manager.is_connected:
                 try:
                     scope = result.flood_scope
                     async with radio_manager.radio_operation("set_flood_scope") as mc:
-                        await mc.commands.set_flood_scope(scope if scope else "")
+                        await set_radio_flood_scope(
+                            mc, scope, fw_ver=radio_manager.firmware_ver_code
+                        )
                         logger.info("Applied flood_scope=%r to radio", scope or "(disabled)")
                 except Exception as e:
                     logger.warning("Failed to apply flood_scope to radio: %s", e)
+
+        # Retroactively tag stored messages when the region list changed. Runs in
+        # the background since it walks every channel message with a retained raw
+        # packet; clients refetch conversations to see updated badges.
+        if known_regions_changed:
+            from app.services.messages import backfill_message_regions
+
+            logger.info("known_regions changed; scheduling region backfill")
+            asyncio.create_task(backfill_message_regions(result.known_regions))
 
         return result
 

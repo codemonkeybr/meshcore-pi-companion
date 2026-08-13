@@ -43,9 +43,18 @@ interface NewMessageModalProps {
   onBulkAddHashtagChannels: (channelNames: string[], tryHistorical: boolean) => Promise<void>;
 }
 
-function validateHashtagName(channelName: string): string | null {
+function validateHashtagName(channelName: string, permitExtended: boolean): string | null {
   if (!channelName) {
     return 'Channel name is required';
+  }
+  // The on-radio channel name field holds 32 UTF-8 bytes including the leading '#'.
+  if (new TextEncoder().encode(`#${channelName}`).length > 32) {
+    return 'Channel name is too long (max 32 bytes including #)';
+  }
+  if (permitExtended) {
+    // Hashed verbatim, matching meshcore_py / meshcore-cli / meshcore.js — any character
+    // (capitals, whitespace, '&', accents, …) yields a valid SHA256-derived key.
+    return null;
   }
   if (!/^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$/.test(channelName)) {
     return 'Use letters, numbers, and single dashes (no leading/trailing dashes)';
@@ -53,9 +62,11 @@ function validateHashtagName(channelName: string): string | null {
   return null;
 }
 
-function parseBulkHashtagNames(rawText: string, permitCapitals: boolean): BulkParseResult {
+function parseBulkHashtagNames(rawText: string, permitExtended: boolean): BulkParseResult {
+  // When extended names are permitted, whitespace can be part of a name, so split on
+  // newlines/commas only. Otherwise keep the whitespace-delimited behavior.
   const tokens = rawText
-    .split(/[\s,]+/)
+    .split(permitExtended ? /[\n,]+/ : /[\s,]+/)
     .map((token) => token.trim())
     .filter(Boolean);
 
@@ -65,13 +76,13 @@ function parseBulkHashtagNames(rawText: string, permitCapitals: boolean): BulkPa
 
   for (const token of tokens) {
     const stripped = token.replace(/^#+/, '');
-    const validationError = validateHashtagName(stripped);
+    const validationError = validateHashtagName(stripped, permitExtended);
     if (validationError) {
       invalidNames.push(token);
       continue;
     }
 
-    const normalized = permitCapitals ? stripped : stripped.toLowerCase();
+    const normalized = permitExtended ? stripped : stripped.toLowerCase();
     const channelName = `#${normalized}`;
     if (seen.has(channelName)) {
       continue;
@@ -101,7 +112,7 @@ export function NewMessageModal({
   const [channelKey, setChannelKey] = useState('');
   const [bulkChannelText, setBulkChannelText] = useState('');
   const [tryHistorical, setTryHistorical] = useState(false);
-  const [permitCapitals, setPermitCapitals] = useState(false);
+  const [permitExtended, setPermitExtended] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const hashtagInputRef = useRef<HTMLInputElement>(null);
@@ -114,7 +125,7 @@ export function NewMessageModal({
     setChannelKey('');
     setBulkChannelText('');
     setTryHistorical(false);
-    setPermitCapitals(false);
+    setPermitExtended(false);
     setError('');
   };
 
@@ -130,7 +141,7 @@ export function NewMessageModal({
       setChannelKey('');
       setBulkChannelText('');
       setTryHistorical(false);
-      setPermitCapitals(false);
+      setPermitExtended(false);
       setError('');
       setLoading(false);
       requestAnimationFrame(() => {
@@ -146,7 +157,7 @@ export function NewMessageModal({
       setChannelKey('');
       setBulkChannelText('');
       setTryHistorical(false);
-      setPermitCapitals(false);
+      setPermitExtended(false);
       setError('');
       setLoading(false);
       requestAnimationFrame(() => {
@@ -177,17 +188,17 @@ export function NewMessageModal({
         await onCreateChannel(name.trim(), channelKey.trim(), tryHistorical);
       } else if (tab === 'hashtag') {
         const channelName = name.trim();
-        const validationError = validateHashtagName(channelName);
+        const validationError = validateHashtagName(channelName, permitExtended);
         if (validationError) {
           setError(validationError);
           return;
         }
-        const normalizedName = permitCapitals ? channelName : channelName.toLowerCase();
+        const normalizedName = permitExtended ? channelName : channelName.toLowerCase();
         await onCreateHashtagChannel(`#${normalizedName}`, tryHistorical);
       } else {
         const { channelNames, invalidNames } = parseBulkHashtagNames(
           bulkChannelText,
-          permitCapitals
+          permitExtended
         );
         if (channelNames.length === 0) {
           setError('Enter at least one valid channel name');
@@ -215,7 +226,7 @@ export function NewMessageModal({
   const handleCreateAndAddAnother = async () => {
     setError('');
     const channelName = name.trim();
-    const validationError = validateHashtagName(channelName);
+    const validationError = validateHashtagName(channelName, permitExtended);
     if (validationError) {
       setError(validationError);
       return;
@@ -223,7 +234,7 @@ export function NewMessageModal({
 
     setLoading(true);
     try {
-      const normalizedName = permitCapitals ? channelName : channelName.toLowerCase();
+      const normalizedName = permitExtended ? channelName : channelName.toLowerCase();
       await onCreateHashtagChannel(`#${normalizedName}`, tryHistorical);
       setName('');
       hashtagInputRef.current?.focus();
@@ -375,14 +386,18 @@ export function NewMessageModal({
               <label className="flex cursor-pointer items-center gap-3">
                 <input
                   type="checkbox"
-                  checked={permitCapitals}
-                  onChange={(e) => setPermitCapitals(e.target.checked)}
+                  checked={permitExtended}
+                  onChange={(e) => setPermitExtended(e.target.checked)}
                   className="h-4 w-4 rounded border-input accent-primary"
                 />
-                <span className="text-sm">Permit capitals in channel key derivation</span>
+                <span className="text-sm">
+                  Permit capitals, whitespace, and extended characters
+                </span>
               </label>
               <p className="pl-7 text-xs text-muted-foreground">
-                Not recommended; most companions normalize to lowercase
+                Off normalizes to lowercase letters, numbers, and dashes. On hashes the name exactly
+                as typed — matches other MeshCore clients and lets you join channels with capitals,
+                spaces, or symbols like &amp;.
               </p>
             </div>
           </TabsContent>
@@ -401,22 +416,27 @@ export function NewMessageModal({
                   className="min-h-48 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Paste channel names separated by lines, spaces, or commas. Leading # marks are
-                  stripped automatically.
+                  {permitExtended
+                    ? 'One channel name per line (or comma-separated); spaces are kept as part of the name. Leading # marks are stripped automatically.'
+                    : 'Paste channel names separated by lines, spaces, or commas. Leading # marks are stripped automatically.'}
                 </p>
               </div>
               <div className="space-y-1">
                 <label className="flex cursor-pointer items-center gap-3">
                   <input
                     type="checkbox"
-                    checked={permitCapitals}
-                    onChange={(e) => setPermitCapitals(e.target.checked)}
+                    checked={permitExtended}
+                    onChange={(e) => setPermitExtended(e.target.checked)}
                     className="h-4 w-4 rounded border-input accent-primary"
                   />
-                  <span className="text-sm">Permit capitals in channel key derivation</span>
+                  <span className="text-sm">
+                    Permit capitals, whitespace, and extended characters
+                  </span>
                 </label>
                 <p className="pl-7 text-xs text-muted-foreground">
-                  Not recommended; most companions normalize to lowercase
+                  Off normalizes to lowercase letters, numbers, and dashes. On hashes each name
+                  exactly as typed — matches other MeshCore clients and lets you join channels with
+                  capitals, spaces, or symbols like &amp;.
                 </p>
               </div>
             </TabsContent>

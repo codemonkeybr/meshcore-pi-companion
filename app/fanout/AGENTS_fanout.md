@@ -120,6 +120,8 @@ Wraps bot code execution via `app/fanout/bot_exec.py`. Config blob:
 - Executes in a thread pool with timeout and semaphore concurrency control
 - Rate-limits outgoing messages for repeater compatibility
 - Channel `message_text` passed to bot code is normalized for human readability by stripping a leading `"{sender_name}: "` prefix when it matches the payload sender.
+- The `bot(...)` function receives, in order: `sender_name`, `sender_key`, `message_text`, `is_dm`, `channel_key`, `channel_name`, `sender_timestamp`, `path`, then optionally `is_outgoing`, `path_bytes_per_hop`, `packet_hash`. Two further kwargs — `region` (resolved region name; `None` for unscoped flood or a transport code matching no known region) and `scoped` (`bool`: whether the message carried a regional flood scope) — are delivered **only** to bots that use `**kwargs` or explicitly name the parameter; they are intentionally not added to the positional call styles so existing bot signatures keep binding unchanged. `scoped` disambiguates a `None` region: `not scoped` = unscoped, `scoped and region is None` = scoped-but-unknown-region, `scoped and region` = that named region. Unlike `region` (channel-only historically), `scoped` is also set for scoped DMs (flood-direct messages can carry a scope), which resolves the DM half of #300. `_analyze_bot_signature` in `bot_exec.py` picks the call style from the bot's actual signature.
+- **Return shapes** (`execute_bot_code` → `process_bot_response`): `None` (no reply), a `str`, a `list[str]` (sent in order), or a `dict` `{"region": <name|None>, "message": <str|list[str]>}`. The dict form (`BotReply`) scopes the reply send to a region **for that send only**: a region name applies it, `None`/empty clears it (unscoped/plain flood), and an absent `region` key falls back to the channel's persisted `flood_scope_override`. Region scoping applies to channel replies only — it is ignored for DM replies (DMs are not region-scoped). Outgoing scope reuses the existing `send_channel_message_with_effective_scope` set-scope/send/restore machinery via a per-send `flood_scope_override` on `SendChannelMessageRequest`. Note the bot can scope to any region name; whether the echo is *labeled* still depends on the operator's `app_settings.known_regions` (that list only drives decode, not transmit).
 
 ### webhook (webhook.py)
 HTTP webhook delivery. Config blob:
@@ -132,6 +134,7 @@ HTTP webhook delivery. Config blob:
 Push notifications via Apprise library. Config blob:
 - `urls` — newline-separated Apprise notification service URLs
 - `preserve_identity` — suppress Discord webhook name/avatar override
+- `include_outgoing` — when true, RemoteTerm-originated manual and bot-sent messages are forwarded to Apprise; missing/false preserves the legacy incoming-only behavior
 - `include_path` — include routing path in notification body
 - Channel notifications normalize stored message text by stripping a leading `"{sender_name}: "` prefix when it matches the payload sender so alerts do not duplicate the name.
 

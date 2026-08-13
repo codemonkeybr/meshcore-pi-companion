@@ -8,6 +8,8 @@ interface RawPacketListProps {
   packets: RawPacket[];
   channels?: Channel[];
   onPacketClick?: (packet: RawPacket) => void;
+  /** When true (default), the feed sticks to the newest packet. */
+  autoScroll?: boolean;
 }
 
 function formatTime(timestamp: number): string {
@@ -58,7 +60,12 @@ function getRouteTypeLabel(routeType: string): string {
   }
 }
 
-export function RawPacketList({ packets, channels, onPacketClick }: RawPacketListProps) {
+export function RawPacketList({
+  packets,
+  channels,
+  onPacketClick,
+  autoScroll = true,
+}: RawPacketListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const decoderOptions = useMemo(() => createDecoderOptions(channels), [channels]);
 
@@ -76,11 +83,13 @@ export function RawPacketList({ packets, channels, onPacketClick }: RawPacketLis
     [decodedPackets]
   );
 
+  // Stick to the newest packet while autoscroll is on. Toggling it back on also
+  // jumps to the bottom immediately (autoScroll is a dependency).
   useEffect(() => {
-    if (listRef.current) {
+    if (autoScroll && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [packets]);
+  }, [packets, autoScroll]);
 
   if (packets.length === 0) {
     return (
